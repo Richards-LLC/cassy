@@ -104,6 +104,28 @@ enum CloseVerificationDispatch {
     AlreadyActive(cas_types::VerificationDispatch),
 }
 
+/// GH #2417: task-note marker binding a no-code review dispatch to the exact
+/// portable proof it was requested for.
+const NO_CODE_REVIEW_BOUND: &str = "NO-CODE REVIEW BOUND dispatch";
+
+fn one_line(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The proof recorded when `dispatch_id` was requested, from the task notes.
+fn no_code_review_binding<'a>(notes: &'a str, dispatch_id: &str) -> Option<&'a str> {
+    let marker = format!("{NO_CODE_REVIEW_BOUND} {dispatch_id}: ");
+    notes.lines().rev().find_map(|line| line.split_once(marker.as_str()).map(|(_, proof)| proof.trim()))
+}
+
+/// Whether a resolved approval of `dispatch_id` reviewed the proof the task
+/// carries now. An approval of an earlier or unrecorded proof never closes it.
+fn no_code_review_covers_current_proof(task: &Task, dispatch_id: &str) -> bool {
+    no_code_review_binding(&task.notes, dispatch_id)
+        .zip(task.external_ref.as_deref())
+        .is_some_and(|(bound, current)| bound == one_line(current))
+}
+
 // gate[N-10 notice]: Close-path verification dispatch creation
 fn request_close_verification_dispatch(
     cas_root: &std::path::Path,
@@ -183,6 +205,19 @@ fn request_close_verification_dispatch(
             });
             tx.execute("UPDATE tasks SET deliverables = ?1 WHERE id = ?2",
                 rusqlite::params![serde_json::to_string(&deliverables)?, task_id])?;
+        }
+        // GH #2417: bind a no-code review to the proof it was requested for.
+        let (execution_note, external_ref, notes): (Option<String>, Option<String>, String) = tx.query_row(
+            "SELECT execution_note, external_ref, notes FROM tasks WHERE id = ?1",
+            [task_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if execution_note.as_deref() == Some("no-code")
+            && let Some(proof) = external_ref.as_deref().map(one_line).filter(|proof| !proof.is_empty())
+            && no_code_review_binding(&notes, &dispatch.id).is_none()
+        {
+            let line = format!("[{}] {NO_CODE_REVIEW_BOUND} {}: {proof}", chrono::Utc::now().format("%Y-%m-%d %H:%M"), dispatch.id);
+            let notes = if notes.is_empty() { line } else { format!("{notes}\n\n{line}") };
+            tx.execute("UPDATE tasks SET notes = ?1 WHERE id = ?2", rusqlite::params![notes, task_id])?;
         }
         tx.commit()?;
         Ok(if already_active { CloseVerificationDispatch::AlreadyActive(dispatch) }
@@ -10631,6 +10666,32 @@ impl CasCore {
                         dispatch.id, verdict.id, verdict.summary
                     );
                     close_notes.record(&mut task, &rejection_note);
+                    typed_dispatch = None;
+                }
+
+                // GH #2417: an approval covers only the no-code proof its dispatch
+                // was requested for. A revised report, or an approval that never
+                // recorded its proof, retires that approval so this close mints a
+                // new dispatch and needs a new passing verdict.
+                if !is_epic
+                    && task.execution_note.as_deref() == Some("no-code")
+                    && let Some(dispatch) = typed_dispatch.as_ref()
+                    && dispatch.state == cas_types::VerificationDispatchState::Resolved
+                    && let Ok(Some(verdict)) = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
+                    && verdict.status == VerificationStatus::Approved
+                    && !no_code_review_covers_current_proof(&task, &dispatch.id)
+                {
+                    close_notes.record(&mut task, &format!(
+                        "Approval {} (dispatch {}) covers an earlier no-code proof than {}; a new independent verdict is required.",
+                        verdict.id, dispatch.id, task.external_ref.as_deref().unwrap_or("<none>"),
+                    ));
+                    superseded_approved_verdict_id = Some(verdict.id);
+                    cas_store::invalidate_verification_dispatch_for_repository_drift(&self.cas_root, &dispatch.id)
+                        .map_err(|error| McpError {
+                            code: ErrorCode::INTERNAL_ERROR,
+                            message: Cow::from(format!("Failed to retire approval of an earlier no-code proof: {error}")),
+                            data: None,
+                        })?;
                     typed_dispatch = None;
                 }
 

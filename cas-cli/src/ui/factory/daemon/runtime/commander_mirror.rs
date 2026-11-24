@@ -1245,6 +1245,14 @@ mod tests {
                 let prefix = if role == AgentRole::Supervisor { "supervisor" } else { "worker" };
                 agent.metadata.insert(format!("{prefix}_cli"), cli.backend().name().into());
                 agent.metadata.insert(format!("{prefix}_account_dir"), account.to_string_lossy().into_owned());
+                agent.metadata.insert(format!("{prefix}_effort"), "high".into());
+                if role == AgentRole::Worker {
+                    let tasks = crate::store::open_task_store_local(&root).unwrap();
+                    let mut task = cas_types::Task::new("cas-held".into(), "held".into());
+                    task.status = cas_types::TaskStatus::InProgress;
+                    task.assignee = Some(agent.name.clone());
+                    tasks.add(&task).unwrap();
+                }
                 let id = queue.enqueue_urgent_with_outcome(
                     "director", &agent.name, "Review the task", Some("factory-1"),
                     None, None, false, Some(&cas_store::QueueOrigin::Daemon),
@@ -1277,19 +1285,20 @@ mod tests {
                 let mut lines = if cli == cas_mux::SupervisorCli::Claude {
                     vec![
                         serde_json::json!({"type":"user","uuid":"turn-1","timestamp":at(0),"message":{"content":prompt}}),
-                        serde_json::json!({"type":"assistant","timestamp":at(1),"message":{"id":"msg-1","role":"assistant","usage":{"input_tokens":30,"output_tokens":5},"content":[{"type":"tool_use","id":"call-1","name":"mcp__cs__task","input":call}]}}),
+                        serde_json::json!({"type":"assistant","timestamp":at(1),"message":{"id":"msg-1","role":"assistant","model":"claude-opus-5-5","usage":{"input_tokens":20,"cache_read_input_tokens":10,"output_tokens":5},"content":[{"type":"tool_use","id":"call-1","name":"mcp__cs__task","input":call}]}}),
                         serde_json::json!({"type":"user","timestamp":at(2),"message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false,"content":"updated"}]}}),
-                        serde_json::json!({"type":"assistant","timestamp":at(3),"message":{"id":"msg-1","role":"assistant","usage":{"input_tokens":30,"output_tokens":5},"content":[{"type":"text","text":"Updated."}],"stop_reason":"end_turn"}}),
+                        serde_json::json!({"type":"assistant","timestamp":at(3),"message":{"id":"msg-1","role":"assistant","model":"claude-opus-5-5","usage":{"input_tokens":20,"cache_read_input_tokens":10,"output_tokens":5},"content":[{"type":"text","text":"Updated."}],"stop_reason":"end_turn"}}),
                         serde_json::json!({"type":"system","timestamp":at(3),"subtype":"turn_duration"}),
                     ]
                 } else {
                     vec![
                         serde_json::json!({"type":"session_meta","payload":{"id":"native-ledger-session","cwd":cwd,"source":"cli"}}),
                         serde_json::json!({"type":"event_msg","timestamp":at(0),"payload":{"type":"task_started","turn_id":"turn-1"}}),
+                        serde_json::json!({"type":"turn_context","timestamp":at(0),"payload":{"turn_id":"turn-1","model":"gpt-6.1-sol","effort":"xhigh"}}),
                         serde_json::json!({"type":"response_item","timestamp":at(0),"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":prompt}]}}),
                         serde_json::json!({"type":"response_item","timestamp":at(1),"payload":{"type":"function_call","call_id":"call-1","name":"mcp__cs__task","arguments":call.to_string()}}),
                         serde_json::json!({"type":"response_item","timestamp":at(2),"payload":{"type":"function_call_output","call_id":"call-1","output":"updated"}}),
-                        serde_json::json!({"type":"event_msg","timestamp":at(3),"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30,"output_tokens":5}}}}),
+                        serde_json::json!({"type":"event_msg","timestamp":at(3),"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30,"cached_input_tokens":10,"output_tokens":5}}}}),
                         serde_json::json!({"type":"event_msg","timestamp":at(3),"payload":{"type":"task_complete","turn_id":"turn-1"}}),
                     ]
                 };
@@ -1324,6 +1333,15 @@ mod tests {
                 assert_eq!(payload["input_tokens"], 30);
                 assert_eq!(payload["output_tokens"], 5);
                 assert_eq!(payload["minutes"], 0.05);
+                // What the turn ran on and which task it was spent on, recorded at the producer.
+                let claude = cli == cas_mux::SupervisorCli::Claude;
+                assert_eq!(payload["spend"], serde_json::json!({
+                    "harness": if claude { "claude" } else { "codex" },
+                    "model": if claude { "claude-opus-5-5" } else { "gpt-6.1-sol" },
+                    "effort": if claude { "high" } else { "xhigh" },
+                    "cached_input_tokens": 10,
+                }));
+                assert_eq!(turns[0].task_id.as_deref(), (role == AgentRole::Worker).then_some("cas-held"));
                 // An incremental incomplete turn cannot create a row; failed
                 // mutations, reads and outgoing status/receipt messages are no-op.
                 let read = serde_json::json!({"action":"mine"});

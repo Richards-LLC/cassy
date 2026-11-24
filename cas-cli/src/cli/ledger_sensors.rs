@@ -43,11 +43,11 @@ pub(super) struct Loss {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(super) struct RunnerLosses {
-    jobs_examined: usize,
-    losses: Vec<Loss>,
+    pub(super) jobs_examined: usize,
+    pub(super) losses: Vec<Loss>,
     by_job_and_runner_labels: BTreeMap<String, usize>,
     /// Missing logs/annotations prevent a known zero, but retain confirmed hits.
-    missing: Vec<String>,
+    pub(super) missing: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(super) struct IssueDay {
@@ -60,7 +60,7 @@ pub(super) struct IssueDay {
 pub(super) struct IssueDays {
     repo: String,
     /// UTC calendar days; only events in the release interval count.
-    days: BTreeMap<String, IssueDay>,
+    pub(super) days: BTreeMap<String, IssueDay>,
     agent_evidence: String,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -82,8 +82,8 @@ struct Pair {
 }
 #[derive(Debug, Serialize)]
 pub(super) struct ParkLatency {
-    first_parks: usize,
-    merged: usize,
+    pub(super) first_parks: usize,
+    pub(super) merged: usize,
     unmatched: usize,
     median_minutes: Option<f64>,
     p90_minutes: Option<f64>,
@@ -93,12 +93,16 @@ pub(super) struct ParkLatency {
 #[derive(Debug, Serialize)]
 pub(super) struct Visibility {
     threshold_minutes: u32,
-    observed_cross_machine: usize,
+    /// Parks inspected, and those whose origin machine was also their merge
+    /// owner. A zero cross-machine count is only meaningful beside these.
+    pub(super) examined: usize,
+    pub(super) same_machine: BTreeMap<String, usize>,
+    pub(super) observed_cross_machine: usize,
     seen_within_threshold: usize,
     late: Vec<String>,
     /// Missing observation is censored, never proof a park was lost.
     not_observed_by_capture: Vec<String>,
-    unmeasurable: Vec<String>,
+    pub(super) unmeasurable: Vec<String>,
     captured_at: DateTime<Utc>,
 }
 
@@ -257,6 +261,8 @@ fn latency(
 fn visibility(parks: &[Park], captured_at: DateTime<Utc>, threshold_minutes: u32) -> Visibility {
     let mut out = Visibility {
         threshold_minutes,
+        examined: parks.len(),
+        same_machine: BTreeMap::new(),
         observed_cross_machine: 0,
         seen_within_threshold: 0,
         late: vec![],
@@ -273,6 +279,7 @@ fn visibility(parks: &[Park], captured_at: DateTime<Utc>, threshold_minutes: u32
             continue;
         };
         if origin == owner {
+            *out.same_machine.entry(origin.clone()).or_default() += 1;
             continue;
         }
         out.observed_cross_machine += 1;
@@ -756,6 +763,10 @@ pub(super) fn render(out: &mut String, sensors: &Sensors) {
         format!("N={} min; {} cross-machine, {} seen in time, {} late, {} not observed by capture, {} unknown", v.threshold_minutes, v.observed_cross_machine,
             v.seen_within_threshold, v.late.len(), v.not_observed_by_capture.len(), v.unmeasurable.len())));
     if let Measure::Known(v) = &sensors.cross_machine_parks {
+        if !v.same_machine.is_empty() {
+            let _ = writeln!(out, "    {} park(s) examined; same machine: {}", v.examined,
+                v.same_machine.iter().map(|(machine, n)| format!("{machine} {n}")).collect::<Vec<_>>().join(", "));
+        }
         for task in &v.late {
             let _ = writeln!(
                 out,

@@ -1797,6 +1797,13 @@ pub(super) fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(Path
     }
 }
 
+/// The nearest ancestor of `dir`, inclusive, that holds a package.json.
+fn owning_package(repo: &Path, dir: &Path) -> PathBuf {
+    dir.ancestors().take_while(|ancestor| ancestor.starts_with(repo))
+        .find(|ancestor| ancestor.join("package.json").is_file())
+        .unwrap_or(dir).to_path_buf()
+}
+
 /// Runners evidenced in `dir`: config files, package.json dependencies or
 /// scripts, then locally installed executables. The first nonempty kind wins.
 fn local_runners(dir: &Path) -> BTreeSet<&'static str> {
@@ -2010,6 +2017,8 @@ fn execute_selection(
         } else {
             runner_path(repo, &package, runner)?
         };
+        // GH #2196: Jest runs from the package that owns the config, as the raw command does.
+        let cwd = if runner == "jest" { owning_package(repo, &package) } else { package.clone() };
         let source = std::fs::read_to_string(repo.join(path))?;
         let expected_rows = source_rows(path, &source).unwrap_or_default();
         let sites = if widened.is_none() { declared_sites(path, &source)? } else { Vec::new() };
@@ -2052,7 +2061,7 @@ fn execute_selection(
         let run = |iteration| -> Result<(bool, Value)> {
             let report = reports.path().join(format!("report-{iteration}.json"));
             let mut command = Command::new(&executable);
-            command.current_dir(&package).env("CI", "1").envs(environment.iter().copied());
+            command.current_dir(&cwd).env("CI", "1").envs(environment.iter().copied());
             let file = repo.join(path);
             match runner {
                 "vitest" => {
@@ -3350,7 +3359,8 @@ mod tests {
 
     /// GH #2058 (and #2066, #2117, #2122): an integration spec that only a
     /// sibling Jest config selects ran under the default `.spec.ts` config and
-    /// found no tests, so no stability proof could ever be earned.
+    /// found no tests, so no stability proof could ever be earned. GH #2196:
+    /// the package, not the config's `rootDir`, is the cwd its fixture reads assume.
     #[test]
     fn jest_spec_runs_under_the_config_that_selects_it_gh_2058() {
         let repo = tempfile::tempdir().unwrap();
@@ -3379,19 +3389,28 @@ mod tests {
         // The default config selects `.spec.ts`; a sibling config selects the integration spec.
         write(&backend.join("jest.config.js"),
             r"module.exports = { testRegex: '.*\\.spec\\.ts$' };");
+        // GH #2196: the sibling config sits in `test/` with a rootDir that is neither its
+        // own directory nor the package; Jest never enters rootDir, so the spec reads its
+        // migration relative to the package (the raw run's cwd).
         let sibling = test.join("jest-inbox-tools.integration.config.js");
-        write(&sibling, r"module.exports = { testRegex: '.*\\.integration\\.ts$' };");
-        // A stand-in Jest: lists the files its config selects under its own directory and
-        // runs a spec only when its config lists it ("No tests found" otherwise).
+        write(&sibling, r"module.exports = { rootDir: '../src', roots: ['<rootDir>/../test'], testRegex: '.*\\.integration\\.ts$' };");
+        write(&backend.join("prisma/migrations/20261112200000_workspace_reports/migration.sql"), "SELECT 1;");
+        write(&backend.join("src/index.ts"), "");
+        // A stand-in Jest: lists the files its config selects under its rootDir and
+        // runs a spec only when its config lists it ("No tests found" otherwise) and
+        // its cwd-relative migration opens (ENOENT otherwise).
         let jest = backend.join("node_modules/.bin/jest");
         write(&jest, r#"#!/usr/bin/env node
 const fs = require('fs'), path = require('path');
 const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1];
-const config = path.resolve(at('--config')), pattern = new RegExp(require(config).testRegex);
+const config = path.resolve(at('--config')), loaded = require(config), pattern = new RegExp(loaded.testRegex);
+const root = path.resolve(path.dirname(config), loaded.rootDir || '.');
 const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
   entry.name === 'node_modules' ? [] : entry.isDirectory() ? walk(path.join(dir, entry.name)) : [path.join(dir, entry.name)]);
-const listed = walk(path.dirname(config)).filter((file) => pattern.test(file));
+const roots = (loaded.roots || ['<rootDir>']).map((dir) => path.resolve(root, dir.replace('<rootDir>', '.')));
+const listed = roots.flatMap(walk).filter((file) => pattern.test(file));
 if (a.includes('--listTests')) { console.log(JSON.stringify(listed)); process.exit(0); }
+fs.readFileSync('prisma/migrations/20261112200000_workspace_reports/migration.sql');
 const spec = a[a.indexOf('--runTestsByPath') + 1], ok = listed.includes(spec);
 fs.writeFileSync(at('--outputFile'), JSON.stringify({ success: ok, testResults: ok ? [{ name: spec, status: 'passed',
   assertionResults: [{ fullName: 'pool drains', status: 'passed' }] }] : [] }));

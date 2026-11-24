@@ -5526,9 +5526,9 @@ alert during the hold; lifting it alone generates no stale READY backlog.
 
 `cas ledger estimate pipeline <stage> --instance <sha>` and MCP `system action=estimate query=pipeline:<stage>:<sha>` record promises from successful measured runs; task/epic lookup uses closed project tasks. `--preview` is read-only. `cas ledger backfill --sync` derives historical facts and synchronizes the ledger without inventing promises. Estimate/outcome kinds use migration m297 and store-open reconciliation, preserving append-only sequence and history. See [ESTIMATES](../../docs/ESTIMATES.md) for endpoints, calibration, outcome semantics and supervisor-owned two-machine backfill proof.
 
-### Delivery detail in the friction ledger
+### Delivery detail in the scorecard
 
-`cas ledger report --release vX.Y.Z` keeps review history per delivery cycle,
+`cas scorecard --release vX.Y.Z` (alias `cas ledger report`) keeps review history per delivery cycle,
 with independent, supervisor-direct or unknown historical provenance. The check
 stage totals retain their release-time window; the dated review rows show the
 complete retained history of those deliveries. Wakes are also grouped by the

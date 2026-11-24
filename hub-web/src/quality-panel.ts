@@ -66,9 +66,9 @@ function dataTable(row: RubricRow & { points: Point[] }): string {
 }
 
 function rubricRow(row: RubricRow): string {
-  if (!row.points) return `<li class="quality-rubric quality-pending"><span class="quality-now">–</span><span class="quality-name">${escapeHtml(row.name)}<small>${escapeHtml(row.unit)}</small></span><span class="quality-source">awaiting ${escapeHtml(row.pending ?? "scoring")}</span></li>`;
+  if (!row.points) return `<li class="quality-rubric quality-pending" data-testid="quality-pending"><span class="quality-now">–</span><span class="quality-name">${escapeHtml(row.name)}<small>${escapeHtml(row.unit)}</small></span><span class="quality-source">awaiting ${escapeHtml(row.pending ?? "scoring")}</span></li>`;
   const points = row.points, word = row.trend?.word ?? "no change";
-  return `<li class="quality-rubric" data-trend="${escapeHtml(word)}"><span class="quality-now">${escapeHtml(fmt(row, points.at(-1)?.value))}</span><span class="quality-name">${escapeHtml(row.name)}<small>${escapeHtml(row.unit)}</small></span><span class="quality-spark-cell">${chart({ ...row, points }, false)}</span><span class="quality-was">was ${escapeHtml(fmt(row, points.at(-2)?.value))}</span><span class="quality-change">${escapeHtml(row.trend?.change ?? "no data")}</span><details class="quality-row-data"><summary>Data</summary>${dataTable({ ...row, points })}</details></li>`;
+  return `<li class="quality-rubric" data-testid="quality-rubric" data-trend="${escapeHtml(word)}"><span class="quality-now">${escapeHtml(fmt(row, points.at(-1)?.value))}</span><span class="quality-name">${escapeHtml(row.name)}<small>${escapeHtml(row.unit)}</small></span><span class="quality-spark-cell">${chart({ ...row, points }, false)}</span><span class="quality-was">was ${escapeHtml(fmt(row, points.at(-2)?.value))}</span><span class="quality-change">${escapeHtml(row.trend?.change ?? "no data")}</span><details class="quality-row-data"><summary>Data</summary>${dataTable({ ...row, points })}</details></li>`;
 }
 
 export function qualityMarkup(view: QualityView): string {

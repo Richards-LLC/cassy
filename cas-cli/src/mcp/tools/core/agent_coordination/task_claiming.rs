@@ -1196,14 +1196,29 @@ impl CasCore {
         // agent id or a worker name (cas-6cfe7, GH #987): a name resolves to
         // the live registration carrying it, the newest if there are several.
         let target_agent = resolve_transfer_target(agent_store.as_ref(), &req.to_agent)
-            .ok_or_else(|| McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
-                    "Target agent not found: {} (no registered agent has that id or name)",
-                    req.to_agent
-                )),
-                data: None,
+            .ok_or_else(|| {
+                // Discovery is descriptive only: a peer row never becomes a
+                // local registration or authorizes local branch adoption.
+                if let Some((name, machine)) = peer_transfer_receiver(&self.cas_root, &req.to_agent) {
+                    return remote_transfer_receiver_error(&name, &machine);
+                }
+                McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "Target agent not found: {} (no registered agent has that id or name in this machine's registry)",
+                        req.to_agent
+                    )),
+                    data: None,
+                }
             })?;
+
+        if let Some(machine) = target_agent.machine_id.as_deref().map(str::trim)
+            .filter(|machine| !machine.is_empty() && *machine != cas_types::Agent::get_or_generate_machine_id())
+        {
+            let label = target_agent.metadata.get(crate::cloud::peers::META_HOSTNAME)
+                .map(String::as_str).map(str::trim).filter(|label| !label.is_empty()).unwrap_or(machine);
+            return Err(remote_transfer_receiver_error(&target_agent.name, label));
+        }
 
         if !target_agent.is_alive() {
             return Err(McpError {
@@ -1294,6 +1309,27 @@ impl CasCore {
                 "\n[{timestamp}] BRANCH ADOPTED: {} -> {} at {} by {agent_id}",
                 adoption.source_branch, adoption.branch, adoption.tip,
             ));
+            // cas-faa9 (GH #1437, #2334): the start record names the lane
+            // that now carries the delivery and its receiver, so start,
+            // rebind and close measure that lane instead of the old owner's.
+            if let (Some(work_target), Some(base_sha)) =
+                (task.deliverables.work_target.clone().or_else(|| {
+                    task.deliverables.factory_branch_start.as_ref().map(|start| start.work_target.clone())
+                }), adoption.base.clone())
+            {
+                crate::mcp::tools::core::task::rebind::rebind_start(
+                    &mut task,
+                    cas_types::FactoryBranchStart {
+                        work_target,
+                        assignee: target_agent.name.clone(),
+                        branch: adoption.branch.clone(),
+                        base_sha,
+                    },
+                    &agent_id,
+                    "transfer adopt_branch",
+                    crate::mcp::tools::core::task::rebind::StartAudit::Note,
+                );
+            }
         }
         // Update assignee to the target agent
         task.assignee = Some(target_name);
@@ -1520,6 +1556,33 @@ impl CasCore {
         }
 
         Ok(Self::success(output))
+    }
+}
+
+/// Peer discovery shares the project/account/liveness filters used by
+/// coordination peers. It grants no mutation or registration authority.
+fn peer_transfer_receiver(cas_root: &std::path::Path, target: &str) -> Option<(String, String)> {
+    let crate::cloud::peers::PeerDiscovery::Found { workers, .. } =
+        crate::cloud::peers::discover_peers(cas_root, None).ok()? else { return None; };
+    let target = target.trim();
+    let receiver = workers.iter().find(|worker| worker.agent_id == target).or_else(|| {
+        let mut matches = workers.iter().filter(|worker| worker.matches(target));
+        let receiver = matches.next()?;
+        matches.next().is_none().then_some(receiver)
+    })?;
+    let machine = receiver.machine_id.as_deref()?.trim();
+    if machine.is_empty() || machine == cas_types::Agent::get_or_generate_machine_id() { return None; }
+    Some((receiver.name.clone(), receiver.machine.clone()))
+}
+
+fn remote_transfer_receiver_error(name: &str, machine: &str) -> McpError {
+    McpError {
+        code: ErrorCode::INVALID_PARAMS,
+        message: Cow::from(format!(
+            "TRANSFER_RECEIVER_ON_OTHER_MACHINE: '{name}' is registered on {machine}; run the transfer from that machine's supervisor so adoption happens in the receiver's own checkout. No assignment, lease or branch was changed."
+        )),
+        data: Some(serde_json::json!({"code":"TRANSFER_RECEIVER_ON_OTHER_MACHINE",
+            "machine":machine,"receiver":name,"next_action":"transfer_from_receiver_supervisor"})),
     }
 }
 

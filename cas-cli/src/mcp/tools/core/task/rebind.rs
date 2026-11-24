@@ -109,6 +109,50 @@ use crate::mcp::CasCore;
 
 use super::{lifecycle::close_ops, repo_context, resolve_agent_identity};
 
+/// Who records the audit row for a start-boundary write.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartAudit {
+    /// The caller writes its own `DELIVERY BRANCH REBOUND` row, which the
+    /// quality ledger reads; this writer adds nothing.
+    Recorded,
+    /// This writer appends a `DELIVERY START REBOUND` row naming the
+    /// previous record whenever one existed and changed.
+    Note,
+}
+
+/// cas-faa9: the one writer for `factory_branch_start`. Start, adoption,
+/// retarget and explicit rebind each keep their own safety checks, then bind
+/// through here so the previous record always survives in the audit trail.
+pub(crate) fn rebind_start(
+    task: &mut cas_types::Task,
+    start: FactoryBranchStart,
+    actor: &str,
+    reason: &str,
+    audit: StartAudit,
+) -> Option<FactoryBranchStart> {
+    let previous = task.deliverables.factory_branch_start.replace(start.clone());
+    // A legacy row may name its earlier train only in the start it is
+    // replacing; keep that target so its history stays upstream.
+    task.deliverables.record_prior_work_target(previous.as_ref().map(|prior| &prior.work_target));
+    if audit == StartAudit::Recorded || previous.is_none() || previous.as_ref() == Some(&start) {
+        return previous;
+    }
+    let audit_row = serde_json::json!({
+        "actor": actor,
+        "reason": reason,
+        "previous_start": &previous,
+        "start": start,
+    });
+    if !task.notes.is_empty() {
+        task.notes.push('\n');
+    }
+    task.notes.push_str(&format!(
+        "[{}] DELIVERY START REBOUND: {audit_row}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+    ));
+    previous
+}
+
 // gate[G-152 rebind]: Delivery branch rebinding authority and evidence
 fn refused(reason: impl Into<String>) -> McpError {
     CasCore::error(
@@ -338,9 +382,6 @@ impl CasCore {
                 expected.status,
                 TaskStatus::Open | TaskStatus::InProgress | TaskStatus::Blocked
             )
-            || (expected.status == TaskStatus::Blocked
-                && (expected.deliverables.parked_branch.is_some()
-                    || expected.deliverables.factory_branch_anchor.is_some()))
         {
             return Err(refused(
                 "only an unparked active task can rebind; use request_changes before replacing a parked delivery",
@@ -356,6 +397,27 @@ impl CasCore {
             .work_target
             .as_ref()
             .ok_or_else(|| refused("the task has no declared work target"))?;
+        if expected.status == TaskStatus::Blocked {
+            // Retargeting retires the proof, but keeps its branch/anchor as
+            // history. Commit capture can also precede a refused first park.
+            // Neither is an active park; a live review or merge still is.
+            let live_review = cas_store::has_active_verification_dispatch(&self.cas_root, id)
+                .map_err(|error| refused(error.to_string()))?;
+            let delivery = cas_store::get_latest_worker_delivery(&self.cas_root, id)
+                .map_err(|error| refused(error.to_string()))?;
+            let live_delivery = delivery.as_ref().is_some_and(|(_, transaction)|
+                !transaction.state.is_recoverable_failure());
+            let retained_park = expected.deliverables.parked_close_reason.is_some()
+                && previous.work_target == *target
+                && !delivery.as_ref().is_some_and(|(_, transaction)| transaction.state.is_recoverable_failure());
+            if expected.pending_verification || expected.pending_worktree_merge
+                || live_review || live_delivery || retained_park
+            {
+                return Err(refused(
+                    "the delivery still has review or park authority; resolve that boundary with request_changes or an approved proof_scope_fix before rebinding",
+                ));
+            }
+        }
         // Reassignment preserves the old start as evidence. Explicit approval
         // binds the current assignee's lane; the prior owner stays in the audit.
         // Retargeting still cannot move the delivery to another repository.
@@ -475,12 +537,12 @@ impl CasCore {
             .deliverables
             .retain_factory_branch_anchor_as_history();
         rebound.deliverables.parked_branch = None;
-        rebound.deliverables.factory_branch_start = Some(FactoryBranchStart {
+        rebind_start(&mut rebound, FactoryBranchStart {
             work_target: target.clone(),
             assignee: assignee.to_string(),
             branch: branch.to_string(),
             base_sha: base.clone(),
-        });
+        }, &supervisor.name, reason, StartAudit::Recorded);
         // The common root was validated above. A linked checkout need not
         // duplicate its project configuration, and shares these same refs.
         // GH #1673: after a reviewed retarget, an untouched lane has no

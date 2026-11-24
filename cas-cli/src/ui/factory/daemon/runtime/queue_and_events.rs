@@ -60,6 +60,8 @@ const SPAWN_BOOT_VERIFICATION_WINDOW: Duration = Duration::from_secs(
 /// for a cold `git worktree add` on a large repo, short enough that a hung git
 /// process cannot wedge the spawn queue for a whole session.
 const SPAWN_PROVISION_TIMEOUT: Duration = Duration::from_secs(300);
+/// cas-dc08 (N1): the worker-name registry read has a 5 s Git budget plus the stores.
+const SPAWN_NAME_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 /// cas-2702: how often the daemon inspects the queue for rows it never drained.
 const SPAWN_QUEUE_STALL_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 /// cas-2702: age at which an undrained queue row is reported as stalled.
@@ -3256,7 +3258,13 @@ pub(crate) fn run_queue_select(
         );
         selection.facts.insert(row.id, facts);
     }
-    if request.operator_replies || !selection.rows.is_empty() {
+    // cas-1d2a: `operator_replies` is true on every pass while Commander is
+    // connected, so this second writer hop (two uncached store opens, each
+    // running its schema init, to adopt notices) ran on every pass even with
+    // nothing to read or adopt. Look first, on the select lane.
+    if (request.operator_replies && operator_work_pending(request, queue.as_ref()))
+        || !selection.rows.is_empty()
+    {
         let cas_dir = request.cas_dir.clone();
         let (session, supervisor) = (session.to_string(), request.supervisor_name.clone());
         let (operator_replies, adopt, deferred) = (
@@ -3305,6 +3313,33 @@ pub(crate) fn run_queue_select(
         let _ = cas_factory::notify_daemon(&request.cas_dir);
     }
     Ok(selection)
+}
+
+/// Whether the operator half of a selection has a reply to read or a notice to
+/// adopt (cas-1d2a). Reads only. An error counts as pending, so the writer hop
+/// then does what it always did.
+fn operator_work_pending(
+    request: &super::prompt_queue_jobs::QueueSelectRequest,
+    queue: &dyn cas_store::PromptQueueStore,
+) -> bool {
+    let deferred = &request.deferred_operator_replies;
+    let replies = queue.peek_operator_replies(
+        &request.session_name,
+        10usize.saturating_add(deferred.len()),
+    );
+    if replies.map_or(true, |rows| rows.iter().any(|row| !deferred.contains(&row.id))) {
+        return true;
+    }
+    request.adopt_operator_notices
+        && super::prompt_queue_jobs::job_thread_store("supervisor_queue", &request.cas_dir, |dir| {
+            Ok(crate::store::open_supervisor_queue_store(dir)?)
+        })
+        .and_then(|notices| {
+            notices
+                .list_pending_prompt_outbox("operator", "supervisor_notice", 1)
+                .map_err(anyhow::Error::from)
+        })
+        .map_or(true, |pending| !pending.is_empty())
 }
 
 /// cas-20ac: collapse task-free duplicate worker deaths. Runs on the writer.
@@ -6758,7 +6793,7 @@ impl FactoryDaemon {
                                     agent,
                                 )
                         });
-                        // gate[W-16 watchdog]: Post-registration harness exit or disappearance
+                        // gate[W-16 watchdog]: Post-registration harness exit, disappearance or first-prompt timeout
                         if process_exited {
                             return Some((
                                 worker.clone(),
@@ -6777,6 +6812,29 @@ impl FactoryDaemon {
                         return Some((worker.clone(), VerificationAction::Confirmed));
                     }
                     if boot_window_elapsed {
+                        // Registration and a repainting TUI do not prove the first prompt ran.
+                        // Keep Claude's boot watch through its existing first-prompt grace.
+                        let awaiting_first_prompt = self.app.harness_for(worker) == cas_mux::SupervisorCli::Claude
+                            && !active_agents.iter().filter(|agent| agent.name == *worker
+                                && agent.factory_session.as_deref() == Some(self.session_name.as_str()))
+                                .any(|agent| {
+                                    let Some(path) = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
+                                        self.app.cas_dir(), agent) else { return false };
+                                    crate::mcp::tools::service::harness_observation::claude_turn_activity_since(
+                                        &path, chrono::DateTime::<chrono::Utc>::from(verification.launched_wall))
+                                });
+                        if awaiting_first_prompt {
+                            if verification.registered_at.is_some_and(|registered_at|
+                                now.saturating_duration_since(registered_at) >= CLAUDE_FIRST_PROMPT_GRACE)
+                            {
+                                return Some((worker.clone(), VerificationAction::Failed(crate::gates::tag("W-16", format!(
+                                    "Worker did not take its first prompt within {} seconds after registration; no turn from this launch was observed. Inspect the worker's startup output, then recycle the worker or reassign its task.{}",
+                                    CLAUDE_FIRST_PROMPT_GRACE.as_secs(),
+                                    pane_tail.as_deref().map(|tail| format!("\n\nLast worker pane output:\n{tail}")).unwrap_or_default(),
+                                )))));
+                            }
+                            return None;
+                        }
                         return Some((worker.clone(), VerificationAction::Expired));
                     }
                 } else if let Some(registered_at) = verification.registered_at {
@@ -6885,7 +6943,7 @@ impl FactoryDaemon {
                 &self.session_name,
                 verification.request_id,
                 &worker,
-                None,
+                verification.task_id.as_deref(),
                 "register",
                 success,
                 &detail,
@@ -8611,9 +8669,14 @@ impl FactoryDaemon {
                 // alongside so message_status stays truthful about *why* a
                 // row is still pending.
                 let pane_known = self.app.mux.get(&pane_target).is_some();
+                // GH #1731 §1: between recycle shutdown and relaunch the name
+                // is off the roster and has no pane, but its successor is
+                // coming. The shutdown gate already keeps this mail; so must
+                // a failed inject.
                 let target_is_current =
                     self.app.worker_names().contains(&pane_target.to_string())
-                        || pane_target == self.app.supervisor_name();
+                        || pane_target == self.app.supervisor_name()
+                        || self.pending_worker_replacements().contains(&pane_target);
                 match super::delivery::classify_queued_delivery(
                     false,
                     pane_known,
@@ -11882,6 +11945,27 @@ impl FactoryDaemon {
         self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
     }
 
+    /// cas-dc08 (N1): read the worker and branch registry on a blocking
+    /// thread (Git and both stores), bounded so a stuck read cannot hold the
+    /// spawn queue. The loop thread does none of that work.
+    async fn load_spawn_names(
+        &self,
+        task_id: Option<&str>,
+    ) -> anyhow::Result<crate::factory_isolation::WorkerNameRegistry> {
+        let (cas_dir, project, task_id) =
+            (self.app.cas_dir().to_path_buf(), self.app.project_path().to_path_buf(), task_id.map(str::to_string));
+        let load = tokio::task::spawn_blocking(move || {
+            crate::ui::factory::app::render_and_ops::epic_workers::load_spawn_name_registry(
+                &cas_dir, &project, task_id.as_deref(),
+            )
+        });
+        match tokio::time::timeout(SPAWN_NAME_CHECK_TIMEOUT, load).await {
+            Ok(Ok(loaded)) => loaded.map_err(anyhow::Error::msg),
+            Ok(Err(error)) => Err(anyhow::anyhow!("spawn refused: worker name check stopped: {error}. No worker was started.")),
+            Err(_) => Err(anyhow::anyhow!("spawn refused: worker name check timed out after {}s. No worker was started.", SPAWN_NAME_CHECK_TIMEOUT.as_secs())),
+        }
+    }
+
     pub(super) async fn process_pending_spawns(&mut self) {
         self.poll_worker_cleanup_jobs_at(Instant::now());
         // Step 1: Check if in-flight background spawn completed
@@ -12370,6 +12454,13 @@ impl FactoryDaemon {
             return;
         }
 
+        // cas-dc08 (N1): a dynamic spawn's name is checked against the worker
+        // and branch registry before it is bound or launched.
+        let mut names = None;
+        if let PendingSpawn::Anonymous { task_id, .. } | PendingSpawn::Named { task_id, .. } = &action {
+            names = Some(self.load_spawn_names(task_id.as_deref()).await);
+        }
+
         match action {
             PendingSpawn::Anonymous {
                 request_id,
@@ -12379,9 +12470,10 @@ impl FactoryDaemon {
             } => {
                 // cas-7587 (GH #122): task_id decides the worktree base (its
                 // epic branch), not the session's pinned epic focus.
-                match self
-                    .app
-                    .snapshot_worker_spawn(None, isolate, task_id.as_deref())
+                match names
+                    .take()
+                    .expect("name registry read before an Anonymous spawn")
+                    .and_then(|names| self.app.snapshot_worker_spawn(None, isolate, task_id.as_deref(), names))
                 {
                     Ok(prep) => {
                         let worker_name = prep.worker_name.clone();
@@ -12476,9 +12568,10 @@ impl FactoryDaemon {
             } => {
                 // cas-7587 (GH #122): see the Anonymous arm — the task's epic
                 // branch outranks the pinned focus for base resolution.
-                match self
-                    .app
-                    .snapshot_worker_spawn(Some(&name), isolate, task_id.as_deref())
+                match names
+                    .take()
+                    .expect("name registry read before a Named spawn")
+                    .and_then(|names| self.app.snapshot_worker_spawn(Some(&name), isolate, task_id.as_deref(), names))
                 {
                     Ok(prep) => {
                         let worker_name = prep.worker_name.clone();
@@ -20648,6 +20741,106 @@ mod tests {
                 assert!(!output.stdout.windows(b"fixture-secret-4cdd".len())
                     .any(|bytes| bytes == b"fixture-secret-4cdd"));
             }
+        }
+    }
+
+    /// GH #2234: registration is not proof that the launch took its first prompt.
+    #[tokio::test]
+    async fn first_prompt_timeout_is_task_bound_and_preserves_live_progress_cas_3b23() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        // The last case is GH #2338: a long first turn still running, whose
+        // turn-start record has scrolled out of the transcript's tail window.
+        for (has_pane, takes_prompt, long_turn) in
+            [(true, false, false), (false, false, false), (true, true, false), (true, true, true)]
+        {
+            let temp = tempfile::tempdir().unwrap();
+            let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+            let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+            let worker = "first-prompt-worker";
+            let task_id = "cas-first-prompt";
+            let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
+            let mut task = Task::new(task_id.into(), "await first prompt".into());
+            task.assignee = Some(worker.into());
+            tasks.add(&task).unwrap();
+            let spawns = crate::store::open_spawn_queue_store(&cas_dir).unwrap();
+            let request = spawns.enqueue_spawn(1, &[], false, None,
+                Some(&daemon.session_name), Some(task_id)).unwrap();
+            spawns.record_spawn_state(request, cas_store::SpawnLifecycleState::Registered,
+                Some(worker), None).unwrap();
+            daemon.app.mux.set_worker_spec(worker, cas_mux::WorkerSpec::builtin_default());
+            if has_pane {
+                let pty = cas_mux::Pty::spawn(worker, cas_mux::PtyConfig {
+                    command: "sh".into(), args: vec!["-c".into(), "read line".into()],
+                    cwd: Some(temp.path().to_path_buf()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+                }).unwrap();
+                daemon.app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
+                    worker, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Claude,
+                ).unwrap());
+            }
+            let launched_wall = std::time::SystemTime::now() - Duration::from_secs(400);
+            crate::factory_hook_canary::record_session_start(&cas_dir, worker, "first-prompt-session").unwrap();
+            let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+            let mut agent = cas_types::Agent::new("first-prompt-agent".into(), worker.into());
+            agent.role = cas_types::AgentRole::Worker;
+            agent.factory_session = Some(daemon.session_name.clone());
+            agent.pid = Some(std::process::id());
+            crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, std::process::id());
+            agent.metadata.insert("clone_path".into(), temp.path().display().to_string());
+            let account = temp.path().join("claude-account");
+            agent.metadata.insert("worker_account_dir".into(), account.display().to_string());
+            agents.register(&agent).unwrap();
+            let transcript = account.join("projects")
+                .join(temp.path().to_str().unwrap().replace(['/', '.'], "-"))
+                .join(format!("{}.jsonl", agent.id));
+            std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+            // Even a recent write of an old turn cannot activate this launch.
+            let turn = |at: chrono::DateTime<chrono::Utc>| format!("{}\n", serde_json::json!({
+                "type":"user", "timestamp":at.to_rfc3339(),
+                "message":{"role":"user", "content":"first prompt"},
+            }));
+            std::fs::write(&transcript, turn(chrono::DateTime::<chrono::Utc>::from(launched_wall) - chrono::Duration::seconds(1))).unwrap();
+            daemon.spawn_verifications.insert(worker.into(), SpawnVerification {
+                request_id: Some(request), launched_at: Instant::now() - Duration::from_secs(400),
+                registered_at: Some(Instant::now() - Duration::from_secs(61)),
+                task_id: Some(task_id.into()), launched_wall,
+            });
+            daemon.reconcile_spawn_verifications().await;
+            assert!(daemon.spawn_verifications.contains_key(worker));
+            assert!(!daemon.dead_workers.contains(worker));
+            if takes_prompt {
+                let now = chrono::Utc::now();
+                let mut records = turn(now);
+                if long_turn {
+                    let record = |kind: &str, body: serde_json::Value| format!("{}\n", serde_json::json!({
+                        "type": kind, "timestamp": now.to_rfc3339(), "message": body }));
+                    records += &record("attachment", serde_json::json!("x".repeat(300 * 1024)));
+                    records += &record("assistant", serde_json::json!({"role": "assistant", "content": []}));
+                }
+                std::fs::write(&transcript, records).unwrap();
+            }
+            daemon.spawn_verifications.get_mut(worker).unwrap().registered_at =
+                Some(Instant::now() - Duration::from_secs(301));
+            daemon.reconcile_spawn_verifications().await;
+            assert!(!daemon.spawn_verifications.contains_key(worker));
+            assert_eq!(daemon.dead_workers.contains(worker), !takes_prompt);
+            let row = spawns.recent_spawn_lifecycle(&daemon.session_name, 10).unwrap()
+                .into_iter().find(|row| row.id == request).unwrap();
+            assert_eq!(row.state, if takes_prompt { cas_store::SpawnLifecycleState::Registered }
+                else { cas_store::SpawnLifecycleState::Failed });
+            let task = tasks.get(task_id).unwrap();
+            assert_eq!(task.status, TaskStatus::Open);
+            assert_eq!(task.assignee.as_deref(), if has_pane && !takes_prompt { None } else { Some(worker) });
+            let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+            let notices = || queue.peek_all(20).unwrap().into_iter()
+                .filter(|row| crate::prompt_revalidation::parse_blocker_envelope(&row.prompt)
+                    .is_some_and(|envelope| envelope.task_id.as_deref() == Some(task_id)))
+                .collect::<Vec<_>>();
+            assert_eq!(notices().len(), usize::from(!takes_prompt));
+            // A later sweep/reopen sees the same durable outcome, never a new alarm.
+            daemon.reconcile_spawn_verifications().await;
+            assert_eq!(notices().len(), usize::from(!takes_prompt));
+            assert_eq!(agents.get(&agent.id).unwrap().status,
+                if takes_prompt { AgentStatus::Active } else { AgentStatus::Stale });
         }
     }
 

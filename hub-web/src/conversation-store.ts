@@ -371,7 +371,7 @@ export function validCachedSession(raw: unknown): HubSession | undefined {
   if (!name || supervisor === undefined || !liveness || !LIVENESS.has(liveness)) return undefined;
   if (!Array.isArray(row.workers) || !row.workers.every((worker) => typeof worker === "string")) return undefined;
   const session: HubSession = { name, supervisor, workers: [...(row.workers as string[])], liveness: liveness as HubSession["liveness"] };
-  for (const key of ["project_dir", "epic_id", "last_activity_at", "last_activity", "started_at", "cloud_project_id", "mcp_version", "installed_version"] as const) {
+  for (const key of ["project_dir", "epic_id", "last_activity_at", "last_activity", "started_at", "cloud_project_id", "mcp_version", "mcp_loaded_at", "installed_version"] as const) {
     const value = text(key);
     if (value !== undefined) session[key] = value;
   }

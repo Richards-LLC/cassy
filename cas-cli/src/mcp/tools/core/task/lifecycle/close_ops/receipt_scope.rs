@@ -110,14 +110,42 @@ pub(super) fn park_refusal(
     (!refusals.is_empty()).then(|| super::gate_preflight::park_reply(refusals))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The OS park judges `cfg(target_os)` gates against, so one host can
+    /// replay a park from the other (GH #2320).
+    static PARK_HOST_OS: std::cell::Cell<&'static str> = const { std::cell::Cell::new(std::env::consts::OS) };
+}
+
+fn park_host_os() -> &'static str {
+    #[cfg(test)]
+    return PARK_HOST_OS.get();
+    #[cfg(not(test))]
+    std::env::consts::OS
+}
+
 /// The class selector the last request_changes recorded for this task.
 fn recorded_class_audit(cas_root: &Path, task_id: &str) -> Option<String> {
     crate::mcp::tools::core::task::repair_class::recorded_class(
         crate::store::open_task_store(cas_root).ok()?.as_ref(), task_id)
 }
 
-/// Every receipt-scope refusal at this tip, not just the first.
+/// Every receipt-scope refusal at this tip, not just the first. Each runner
+/// config is listed once for the whole judgement (GH #2331).
 pub(super) fn park_refusals(
+    cas_root: &Path,
+    proof_repo: &Path,
+    task: &Task,
+    changed_paths: &[String],
+    head: &str,
+    target: &str,
+    delivery_ranges: Option<&[(String, String)]>,
+) -> Vec<String> {
+    crate::factory_worker_check::javascript::with_listing_cache(||
+        listed_park_refusals(cas_root, proof_repo, task, changed_paths, head, target, delivery_ranges))
+}
+
+fn listed_park_refusals(
     cas_root: &Path,
     proof_repo: &Path,
     task: &Task,
@@ -129,6 +157,7 @@ pub(super) fn park_refusals(
     let short = &head[..head.len().min(12)];
     let mut refusals: Vec<_> =
         changelog_refusal(proof_repo, task, changed_paths, head, target, delivery_ranges).into_iter().collect();
+    refusals.extend(super::doc_fragment_gate::park_refusals(cas_root, proof_repo, task, changed_paths, head));
     // Judge the immutable delivery delta as well as caller paths: an earlier
     // push can introduce a retained checkpoint absent from a later path list.
     // A project-owned file already present at the base remains inherited.
@@ -158,14 +187,17 @@ pub(super) fn park_refusals(
         ));
     }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
-    let passing = crate::factory_worker_check::PassingTests::new(cas_root, proof_repo, head).with_target(target);
+    // A receipt minted on the machine that can build a platform-gated test
+    // travels on the task row (cas-289b), so park reads it too.
+    let passing = crate::factory_worker_check::PassingTests::new(cas_root, proof_repo, head).with_target(target)
+        .with_synced(&task.deliverables.test_receipts);
     if proof_repo.join(".git").exists() {
         use crate::factory_worker_check::stability;
         let started = std::time::Instant::now();
         let requirements = stability::requirements(proof_repo, head, target, changed_paths, delivery_ranges);
         tracing::info!(task_id = %task.id, gate = "G-61", phase = "changed_test_discovery", head,
             elapsed_ms = started.elapsed().as_millis() as u64, "Close gate phase");
-        let (tests, widened) = match requirements {
+        let (mut tests, widened) = match requirements {
             Ok(requirements) => requirements,
             Err(error) => {
                 // A declared Rust test absent from every Cargo target is
@@ -174,21 +206,72 @@ pub(super) fn park_refusals(
                 (Vec::new(), Vec::new())
             }
         };
-        let missing = stability::missing(&passing, &tests);
-        if !missing.is_empty() {
+        // GH #2362, #2380: a registered journey against a deployed host follows
+        // its declared lane, so neither it nor a helper only such journeys
+        // import owes a worker run here; a locally served journey stays owed.
+        use crate::factory_worker_check::widened::{self as widen, Scope};
+        let journeys = widen::deployed_journey_specs(cas_root, proof_repo, head);
+        tests.retain(|test| !journeys.contains(&test.path));
+        let widened: Vec<Scope> = widened.into_iter().flat_map(|scope| match &scope {
+            Scope::File(spec) if journeys.contains(spec) => Vec::new(),
+            Scope::Related(helper) => match crate::factory_worker_check::javascript::related_tests(proof_repo, helper) {
+                Some(("playwright", specs)) if specs.iter().any(|spec| journeys.contains(spec)) =>
+                    specs.into_iter().filter(|spec| !journeys.contains(spec)).map(Scope::File).collect(),
+                _ => vec![scope],
+            },
+            _ => vec![scope],
+        }).collect();
+        // GH #2355: a deleted file owes nothing and is no package input.
+        let present: Vec<String> = changed_paths.iter().filter(|path| std::process::Command::new("git")
+            .args(["cat-file", "-e", &format!("{head}:{path}")]).current_dir(proof_repo)
+            .output().is_ok_and(|output| output.status.success())).cloned().collect();
+        let mut missing = stability::missing(&passing, &tests);
+        // GH #2369: a selection that could not run a test ran its package.
+        missing.retain(|test| !widen::package_proves(&passing, &test.path));
+        // GH #2320: a test gated to another OS selects nothing here, so this
+        // host can never run it. Lane CI's Rust test job, green at this tip,
+        // proves the lane OS's tests; any other OS needs five passes recorded
+        // on that OS.
+        let gates = stability::rust::platform_gates(proof_repo, head, &missing).unwrap_or_default();
+        let (foreign, missing): (Vec<_>, Vec<_>) = missing.into_iter()
+            .partition(|test| gates.get(test).is_some_and(|os| !os.contains(park_host_os())));
+        let lane = foreign.iter().any(|test| gates[test].contains(stability::LANE_CI_OS))
+            .then(|| crate::mcp::tools::core::workflow::delivery_tip_rust_tests(head, proof_repo));
+        let foreign = foreign.into_iter()
+            .filter(|test| !(lane.is_some_and(|(_, tested)| tested) && gates[test].contains(stability::LANE_CI_OS)))
+            .collect::<Vec<_>>();
+        if !foreign.is_empty() {
             refusals.push(crate::gates::tag("G-61", format!(
-                "CHANGED_TEST_STABILITY_REQUIRED: task {} needs five consecutive capped passes at {short} for: {}. Fix or delete a failing test; never retry-wrap it. Run only these changed tests through the capped runner: {}. Then retry park.",
-                task.id, missing.iter().map(|test| format!("{}::{}", test.path, test.name)).collect::<Vec<_>>().join(", "),
-                stability::rerun_commands(cas_root, proof_repo, &missing).join("; "),
+                "PLATFORM_TEST_PROOF_REQUIRED: task {} changes tests that this {host} host cannot build: {}. Do not run them here; the capped runner selects 0 of them. A test that builds on {lane_os} is proven when lane CI's Rust test job passes at {short} (lane CI now: {state}); a test for any other OS needs five consecutive capped passes recorded on that OS at {short}. Then retry park.",
+                task.id,
+                foreign.iter().map(|test| format!("{}::{} (target_os {})", test.path, test.name,
+                    gates[test].iter().cloned().collect::<Vec<_>>().join(" or "))).collect::<Vec<_>>().join(", "),
+                host = park_host_os(), lane_os = stability::LANE_CI_OS, state = lane.map_or("not needed", |(conclusion, tested)| if conclusion == "success" && !tested { "green without a Rust test job" } else { conclusion }),
             )));
         }
-        let missing = crate::factory_worker_check::widened::missing(&passing, &widened);
+        if !missing.is_empty() {
+            // GH #2288: name why an earlier five-pass proof did not carry.
+            let voided = stability::invalidated(&passing, &missing).into_iter().map(|(tested, inputs)| {
+                let tested = &tested[..tested.len().min(12)];
+                match inputs {
+                    Some(inputs) => format!(" Proof at {tested} does not carry: {short} changes its inputs {}.", inputs.join(", ")),
+                    None => format!(" Proof at {tested} does not carry: not an ancestor of {short}."),
+                }
+            }).collect::<String>();
+            refusals.push(crate::gates::tag("G-61", format!(
+                "CHANGED_TEST_STABILITY_REQUIRED: task {} needs five consecutive capped passes at {short} for: {}.{voided} Fix or delete a failing test; never retry-wrap it. Run only these changed tests through the capped runner: {}. Then retry park.",
+                task.id, missing.iter().map(|test| format!("{}::{}", test.path, test.name)).collect::<Vec<_>>().join(", "),
+                stability::rerun_commands(cas_root, proof_repo, head, &missing).join("; "),
+            )));
+        }
+        let covering = widen::covering(proof_repo, head, &present, &widened);
+        let missing = widen::missing(&passing, &widened, &covering);
         if !missing.is_empty() {
             // Classification is uncertain, but the broader capped receipt is
             // proven missing. Park reads proof; it never starts a test process.
             refusals.push(crate::gates::tag("G-61", format!(
                 "FOCUSED PROOF REQUIRED: task {} widened uncertain test selection to {missing:?}; one passing capped run is missing at {short}. Run: {}. Identified changed tests still require five passes.",
-                task.id, crate::factory_worker_check::widened::commands(cas_root, proof_repo, changed_paths, &missing).join("; ")
+                task.id, widen::commands(cas_root, proof_repo, &present, &missing, &covering).join("; ")
             )));
         }
     }
@@ -241,7 +324,7 @@ pub(super) fn park_refusals(
 }
 
 
-fn product_source_path(path: &str) -> bool {
+pub(super) fn product_source_path(path: &str) -> bool {
     if path.starts_with("cas-cli/src/builtins/skills/") {
         return true;
     }
@@ -336,6 +419,11 @@ pub(super) fn has_fragment_dir_at(repo: &Path, commit: &str, dir: &str) -> bool 
 }
 
 fn has_no_changelog_decision(notes: &str) -> bool {
+    has_reasoned_decision(notes, "no changelog:")
+}
+
+/// A timestamped `✅ DECISION <prefix> <reason>` note with a real reason.
+pub(super) fn has_reasoned_decision(notes: &str, prefix: &str) -> bool {
     notes.lines().any(|line| {
         let Some((stamp, body)) = line
             .strip_prefix('[')
@@ -346,7 +434,7 @@ fn has_no_changelog_decision(notes: &str) -> bool {
         if chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M").is_err() {
             return false;
         }
-        body.strip_prefix("no changelog:").is_some_and(|reason| {
+        body.strip_prefix(prefix).is_some_and(|reason| {
             let reason = reason.trim();
             !reason.is_empty() && !is_changelog_template_value(reason)
         })
@@ -1057,11 +1145,13 @@ mod tests {
 
     #[test]
     fn park_requires_owned_test_stability_with_shared_carry_forward_cas_9e02e() {
-        use crate::factory_worker_check::stability::{self, Identity, Proof};
+        use crate::factory_worker_check::{PassingTests, widened, stability::{self, Identity, Proof}};
         for runner in ["nextest", "vitest", "jest", "playwright"] {
             let repo = changelog_fixture();
             let root = tempfile::tempdir().unwrap();
             let rust = runner == "nextest";
+            // GH #2243: the reported Vitest proof covered one `.each` template.
+            let each = matches!(runner, "vitest" | "jest");
             let path = if rust { "src/child.rs" } else { "owned.test.js" };
             if rust {
                 std::fs::create_dir_all(repo.path().join("src")).unwrap();
@@ -1069,12 +1159,14 @@ mod tests {
                 std::fs::write(repo.path().join("src/lib.rs"), "mod child;\n").unwrap();
             }
             let old = if rust { "#[test]\nfn untouched() {}\n" } else { "test('untouched', () => {});\n" };
-            let added = if rust { "#[test]\nfn owned() {}\n" } else { "test('owned', () => {});\n" };
+            let added = if rust { "#[test]\nfn owned() {}\n" }
+                else if each { "test.each([1, 2])('owned %s', () => {});\n" } else { "test('owned', () => {});\n" };
             std::fs::write(repo.path().join(path), old).unwrap();
             let base = commit_changelog_fixture(repo.path(), "base test");
             assert!(std::process::Command::new("git").args(["update-ref", "refs/heads/main", &base])
                 .current_dir(repo.path()).status().unwrap().success());
-            let identity = Identity::exact(path, if rust { "child::owned" } else { "owned" });
+            let identity = if each { Identity { path: path.into(), name: "owned %s".into(), parameterized: true } }
+                else { Identity::exact(path, if rust { "child::owned" } else { "owned" }) };
             stability::record(root.path(), repo.path(), &base, Proof { runner: runner.into(),
                 tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
             std::fs::write(repo.path().join(path), format!("{old}{added}")).unwrap();
@@ -1093,15 +1185,28 @@ mod tests {
             assert_eq!(packages, if rust { vec!["fixture".to_string()] } else { vec![] });
             let admitted = park_refusal(root.path(), repo.path(), &task, &paths, &head, "main", None);
             assert!(admitted.is_none(), "{runner}: {admitted:?}");
-            std::fs::write(repo.path().join("README.md"), "new delivery tip\n").unwrap();
+            let scope = if rust { widened::Scope::Crate("fixture".into()) } else { widened::Scope::Package(String::new()) };
+            widened::record(root.path(), repo.path(), &head, widened::Proof { runner: runner.into(),
+                scope: scope.clone(), reason: "widened:unclassified".into(), configs: Default::default() }, 1).unwrap();
+            // GH #2243/#2288: the docs-only child a close itself asks for,
+            // replayed from cas-e705's be8ba51e0c.
+            for (fragment, body) in [("changelog.d/cas-9e02e.md", "### Fixed\n- fixture\n"),
+                ("docs/product-overview.d/cas-9e02e.md", "fixture\n"),
+                ("docs/qa/bug-families/fixture-family.yaml", "tasks:\n  - cas-9e02e\nsummary: fixture\n")] {
+                std::fs::create_dir_all(repo.path().join(fragment).parent().unwrap()).unwrap();
+                std::fs::write(repo.path().join(fragment), body).unwrap();
+            }
             let moved = commit_changelog_fixture(repo.path(), "move source tip");
             assert!(park_refusal(root.path(), repo.path(), &task, &paths, &moved, "main", None).is_none(),
                 "{runner}: a docs-only commit must carry the tested input proof forward");
+            let carried = PassingTests::new(root.path(), repo.path(), &moved).with_target("main");
+            assert!(widened::missing(&carried, std::slice::from_ref(&scope), &Default::default()).is_empty(), "{runner}: widened run carries");
             // The product work is now on the target. A test-only correction
             // still owes stability, including when the test name is unchanged.
             assert!(std::process::Command::new("git").args(["update-ref", "refs/heads/main", &moved])
                 .current_dir(repo.path()).status().unwrap().success());
             let edited = if rust { "#[test]\nfn owned() { assert_eq!(1, 1); }\n" }
+                else if each { "test.each([1, 2])('owned %s', (row) => { expect(row).toBe(row); });\n" }
                 else { "test('owned', () => { expect(1).toBe(1); });\n" };
             std::fs::write(repo.path().join(path), format!("{old}{edited}")).unwrap();
             let changed = commit_changelog_fixture(repo.path(), "edit only the owned test");
@@ -1119,6 +1224,83 @@ mod tests {
             stability::invalidate(root.path(), repo.path(), &retry, &[identity.clone()]).unwrap();
             let held = park_refusal(root.path(), repo.path(), &task, &test_paths, &retry, "main", None).unwrap();
             assert!(crate::gates::codes_in(&held).contains(&"G-61") && held.contains(&identity.name), "{held}");
+            widened::invalidate(root.path(), repo.path(), &moved, &scope).unwrap();
+            let withdrawn = PassingTests::new(root.path(), repo.path(), &moved).with_target("main");
+            assert_eq!(widened::missing(&withdrawn, std::slice::from_ref(&scope), &Default::default()), [scope], "{runner}: failed rerun withdraws");
+        }
+    }
+
+    /// GH #2320 (cas-2e53 at 6e0b5d82ed): park demanded five local capped
+    /// passes for a changed `#[cfg(target_os = "linux")]` test on a macOS
+    /// worker, where the capped runner selects 0 tests. Replayed for that
+    /// host and its mirror, with the gate on the test and on its module: a
+    /// test gated to the other OS owes proof on that OS, from green
+    /// lane CI's Rust test job (not a lint-only green) when it builds there,
+    /// else from a five-pass receipt synced from that OS, never a local run.
+    #[test]
+    fn changed_test_gated_to_another_os_is_proven_on_that_os_gh2320() {
+        use crate::factory_worker_check::stability::{self, Identity, Proof};
+        let mut env = crate::test_support::TestEnvGuard::new();
+        // The incident (a Linux-only test parked from macOS), then its mirror.
+        for (host, other) in [("macos", "linux"), ("linux", "macos")] {
+            PARK_HOST_OS.set(host);
+            let repo = changelog_fixture();
+            let root = tempfile::tempdir().unwrap();
+            let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args)
+                .current_dir(repo.path()).status().unwrap().success(), "git {args:?}");
+            std::fs::create_dir_all(repo.path().join("src")).unwrap();
+            std::fs::write(repo.path().join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
+            std::fs::write(repo.path().join("src/lib.rs"), "mod child;\n").unwrap();
+            std::fs::write(repo.path().join("src/child.rs"), "#[test]\nfn host() {}\n").unwrap();
+            let base = commit_changelog_fixture(repo.path(), "base test");
+            git(&["update-ref", "refs/heads/main", &base]);
+            git(&["remote", "add", "origin", "https://github.com/acme/fixture.git"]);
+            std::fs::write(repo.path().join("src/child.rs"), format!(
+                "#[test]\nfn host() {{}}\n#[cfg(target_os = \"{other}\")]\n#[test]\nfn planted() {{ assert!(true); }}\n\
+                 #[cfg(all(unix, target_os = \"{other}\"))]\nmod gated {{\n    #[test]\n    fn nested() {{ assert!(true); }}\n}}\n")).unwrap();
+            let head = commit_changelog_fixture(repo.path(), "change a test gated to the other OS");
+            crate::factory_worker_check::record_passing_test_for_tests(root.path(), repo.path(), &head, "fixture", "test(child)");
+            let mut task = Task::new("cas-a0c0".into(), "platform-gated fixture".into());
+            task.notes = "[2026-11-23 01:20] ✅ DECISION no changelog: test-only fixture".into();
+            let paths = vec!["src/child.rs".to_string()];
+
+            let gh = root.path().join("gh");
+            let checks = root.path().join("checks.json");
+            std::fs::write(&gh, format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then echo '{{\"nameWithOwner\":\"acme/fixture\"}}'; exit 0; fi\n\
+                 [ \"$4\" = 'repos/acme/fixture/commits/{head}/check-runs' ] && cat '{}' && exit 0\nexit 97\n",
+                checks.display())).unwrap();
+            std::fs::set_permissions(&gh, <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755)).unwrap();
+            env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+            let lane = |name: &str, status: &str, conclusion: Option<&str>| std::fs::write(&checks, serde_json::json!({"check_runs": [{
+                "name": name, "status": status, "conclusion": conclusion,
+                "html_url": "https://github.com/acme/fixture/actions/runs/1/job/1"}]}).to_string()).unwrap();
+            let codes = |refusals: Vec<String>| refusals.iter()
+                .flat_map(|refusal| ["PLATFORM_TEST_PROOF_REQUIRED", "CHANGED_TEST_STABILITY_REQUIRED"]
+                    .into_iter().filter(|code| refusal.contains(code)))
+                .collect::<Vec<_>>();
+
+            let rust_job = "Scoped Validation — impact own tests";
+            lane(rust_job, "in_progress", None);
+            assert_eq!(codes(park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None)),
+                ["PLATFORM_TEST_PROOF_REQUIRED"], "no local run is owed, and pending lane CI proves nothing");
+            lane("Lint", "completed", Some("success"));
+            assert_eq!(codes(park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None)),
+                ["PLATFORM_TEST_PROOF_REQUIRED"], "a green lint-only lane ran no test");
+            lane(rust_job, "completed", Some("success"));
+            let lane_proves = other == stability::LANE_CI_OS;
+            assert_eq!(park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), lane_proves,
+                "lane CI's Rust test job proves only a test that builds on the lane's OS");
+            // The five passes ran on the machine that builds the test; only its
+            // exported receipt reaches this host, on the task row.
+            let producer = tempfile::tempdir().unwrap();
+            stability::record(producer.path(), repo.path(), &head, Proof { runner: "nextest".into(),
+                tests: ["child::planted", "child::gated::nested"].map(|name| Identity::exact("src/child.rs", name)).into(),
+                consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+            task.deliverables.test_receipts =
+                crate::factory_worker_check::PassingTests::new(producer.path(), repo.path(), &head).portable();
+            let refusals = park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None);
+            assert!(refusals.is_empty(), "a five-pass receipt synced from the test's OS proves it: {refusals:?}");
         }
     }
 
@@ -1320,9 +1502,9 @@ mod tests {
             std::fs::write(repo.join(path), source.replace("appendFileSync('runs', 'x');", "throw new Error('seeded');")).unwrap();
             git(&["commit", "-qam", "failing delivery"]);
             let failed = git(&["rev-parse", "HEAD"]);
-            assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes), scopes);
+            assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes, &Default::default()), scopes);
             assert!(javascript::execute(root.path(), &args, &repo, &[]).is_err());
-            assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes), scopes);
+            assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes, &Default::default()), scopes);
             assert!(!park_refusals(root.path(), &repo, &task, &paths, &failed, "main", Some(&[(base, failed.clone())])).is_empty());
         }
         // GH #2175: the widened Playwright producer feeds the same park reader.
@@ -1379,7 +1561,7 @@ raise SystemExit(1 if failed else 0)
             let result = javascript::execute(root.path(), &args, &repo, &[]);
             assert_eq!(result.is_ok(), inherited, "{result:?}");
             let scopes = [widened::Scope::File(path.into())];
-            let missing = widened::missing(&PassingTests::new(root.path(), &repo, &head), &scopes);
+            let missing = widened::missing(&PassingTests::new(root.path(), &repo, &head), &scopes, &Default::default());
             let repairs: Vec<_> = tasks.list(None).unwrap().into_iter()
                 .filter(|task| task.labels.iter().any(|label| label == "release-repair")).collect();
             if inherited {
@@ -1451,10 +1633,10 @@ raise SystemExit(1 if failed else 0)
                 // This is the producer's expected crate receipt, independent
                 // of the scope the park classifier just returned.
                 widened::record(root.path(), repo.path(), &head,
-                    widened::Proof { runner: "nextest".into(), scope: expected_scope, reason: "widened:fixture-unclassified-input".into() }, 1).unwrap();
+                    widened::Proof { runner: "nextest".into(), scope: expected_scope, reason: "widened:fixture-unclassified-input".into(), configs: Default::default() }, 1).unwrap();
             }
             let passing = PassingTests::new(root.path(), repo.path(), &head);
-            assert!(widened::missing(&passing, &scopes).is_empty(), "{row}");
+            assert!(widened::missing(&passing, &scopes, &Default::default()).is_empty(), "{row}");
             assert_eq!(stability::missing(&passing, &tests), tests, "{row}");
             if !tests.is_empty() {
                 assert!(!park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), "{row}");
@@ -1467,15 +1649,13 @@ raise SystemExit(1 if failed else 0)
         assert!(failures.is_empty(), "{failures:?}");
     }
 
-    /// Source advice, native related selection and the park reader share one
-    /// fixture; each runner must exclude an unrelated failure in its package.
-    #[cfg(unix)]
-    fn source_related_tests_fixture(runner: &str, source: &str, changed: &str) {
-        use crate::factory_worker_check::{javascript, stability, widened, PassingTests};
-        use std::os::unix::fs::PermissionsExt;
-        let mut env = crate::test_support::TestEnvGuard::temp_home();
-        env.set("CAS_FACTORY_BUILD_GUARD", "off");
-        env.remove("CAS_SESSION_ID");
+    /// GH #2266, #2224: a migration rename, a catalogue edit and a fixture
+    /// edit widen the package; park names the specs that read those inputs
+    /// in one runnable command and accepts their whole-file passes for it.
+    #[test]
+    fn package_proof_resolves_and_accepts_covering_specs_gh2266() {
+        use crate::factory_worker_check::{stability, widened};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("worktrees/worker");
         let write = |path: &str, body: &str| {
@@ -1485,28 +1665,92 @@ raise SystemExit(1 if failed else 0)
         };
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git").current_dir(&repo)
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
                 .args(args).output().unwrap();
             assert!(output.status.success(), "{output:?}");
             String::from_utf8(output.stdout).unwrap().trim().to_owned()
         };
-        let package = source.split('/').take(2).collect::<Vec<_>>().join("/");
-        let (test_dir, parent) = if runner == "vitest" { ("app/test", "../../") } else { ("test", "../") };
-        let consumer = format!("{package}/{test_dir}/consumer.spec.ts");
-        let binding = if source.ends_with(".vue") { "value" } else { "{ value }" };
-        let consumer_source = format!("import {binding} from '{parent}{}';\nit('claims', () => {{ void value; }});\n", source.strip_prefix(&format!("{package}/")).unwrap());
-        write(".gitignore", "node_modules/\ntarget/\n");
-        write(&format!("{package}/package.json"), &format!(r#"{{"devDependencies":{{"{runner}":"3"}}}}"#));
-        write(&format!("{package}/{runner}.config.js"), if runner == "vitest" {
-            "module.exports = { root: 'app' };\n"
-        } else { "module.exports = {};\n" });
-        write(source, if source.ends_with(".vue") { "<template><div>one</div></template>\n" } else { "export const value = 1;\n" });
-        // The consuming spec is elsewhere; a sibling-name heuristic cannot find it.
-        write(&consumer, &consumer_source);
-        write(&format!("{package}/{test_dir}/unrelated.spec.ts"), "it('unrelated', () => { throw 0; });\n");
-        // Framework boundary: implement the import-graph selection predicate,
-        // report unrelated failures and report an empty selection as empty.
-        write(&format!("{package}/node_modules/.bin/{runner}"), r#"#!/usr/bin/env python3
+        let specs = ["apps/backend/src/__scenarios__/acceptance.spec.ts", "apps/backend/test/migration-timestamps.spec.ts",
+            "apps/backend/test/patterns.spec.ts"];
+        write("apps/backend/package.json", "{}");
+        write("apps/backend/prisma/migrations/1_init/migration.sql", "CREATE TABLE a (id int);\n");
+        write("apps/backend/src/__scenarios__/scenarios.json", "[[\"sms\", false]]");
+        write("apps/backend/test/fixtures/patterns.ts", "export const pattern = /^a$/;\n");
+        write(specs[0], "import cases from './scenarios.json';\nfor (const [name] of cases) it(name, () => {});\n");
+        write(specs[1], "import { readdirSync } from 'fs';\nimport { join } from 'path';\n\
+            it('orders migrations', () => { readdirSync(join(__dirname, '../prisma/migrations')); });\n");
+        write(specs[2], "import { pattern } from './fixtures/patterns';\nit('matches', () => { pattern.test('a'); });\n");
+        write("apps/backend/src/unrelated.spec.ts", "import { x } from '../lib/x';\nit('unrelated', () => { void x; });\n");
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "."]); git(&["commit", "-qm", "base"]);
+        git(&["checkout", "-qb", "delivery"]);
+        git(&["mv", "apps/backend/prisma/migrations/1_init", "apps/backend/prisma/migrations/2_init"]);
+        write("apps/backend/src/__scenarios__/scenarios.json", "[[\"sms\", false], [\"email\", true]]");
+        write("apps/backend/test/fixtures/patterns.ts", "export const pattern = /^a+$/;\n");
+        git(&["commit", "-qam", "rename migration, extend catalogue, widen fixture"]);
+        std::fs::write(root.path().join("config.toml"), "[factory]\nepic_base_branch='main'\n").unwrap();
+        let head = git(&["rev-parse", "HEAD"]);
+        let paths = ["apps/backend/prisma/migrations/2_init/migration.sql", "apps/backend/src/__scenarios__/scenarios.json",
+            "apps/backend/test/fixtures/patterns.ts"].map(String::from).to_vec();
+        let task = Task::new("cas-5afc".into(), "covering spec proof".into());
+        let (_, scopes) = stability::requirements(&repo, &head, "main", &paths, None).unwrap();
+        let package = widened::Scope::Package("apps/backend".into());
+        // GH #2221: the changed catalogue also owes its importing spec a whole-file run.
+        assert_eq!(scopes, [widened::Scope::File(specs[0].into()), package.clone()]);
+        let covering = widened::covering(&repo, &head, &paths, &scopes);
+        let found = covering.get(&package).unwrap();
+        assert_eq!(found.specs, specs.map(String::from));
+        assert!(found.unresolved.is_empty(), "every changed input is read by a covering spec");
+        // Every prescribed package command targets exactly the covering specs.
+        let commands = widened::commands(root.path(), &repo, &paths, &[package.clone()], &covering);
+        assert!(!commands.is_empty());
+        for command in &commands {
+            let (_, args) = command.split_once(" -- ").unwrap();
+            assert_eq!(args.split_whitespace().filter(|arg| arg.ends_with(".ts")).collect::<Vec<_>>(), specs, "{command}");
+        }
+        let g61 = |head: &str| park_refusals(root.path(), &repo, &task, &paths, head, "main", None).iter()
+            .any(|reply| crate::gates::codes_in(reply).contains(&"G-61"));
+        let pass = |at: &str, spec: &str| widened::record(root.path(), &repo, at, widened::Proof {
+            runner: "jest".into(), scope: widened::Scope::File(spec.into()), reason: "widened:no static changed-test selection".into(),
+            configs: Default::default(),
+        }, 1).unwrap();
+        assert!(g61(&head));
+        pass(&head, specs[0]);
+        pass(&head, specs[1]);
+        assert!(g61(&head), "two of three covering specs must not prove the package");
+        pass(&head, specs[2]);
+        assert!(!g61(&head));
+
+        // A mixed package: the same inputs plus seed data that no spec reads.
+        // The covering specs say nothing about it, so their passes do not
+        // prove the package; the refusal names the input and keeps the
+        // package's own proof as the way out.
+        let unread = "apps/backend/prisma/seeds/seed.sql";
+        write(unread, "INSERT INTO a VALUES (1);\n");
+        git(&["add", "."]); git(&["commit", "-qm", "seed data no spec reads"]);
+        let mixed = git(&["rev-parse", "HEAD"]);
+        let paths: Vec<String> = paths.into_iter().chain([unread.to_string()]).collect();
+        let (_, scopes) = stability::requirements(&repo, &mixed, "main", &paths, None).unwrap();
+        let covering = widened::covering(&repo, &mixed, &paths, &scopes);
+        let found = covering.get(&package).unwrap();
+        assert_eq!((found.specs.as_slice(), found.unresolved.as_slice()), (&specs.map(String::from)[..], &[unread.to_string()][..]));
+        for spec in specs { pass(&mixed, spec); }
+        let refusals = park_refusals(root.path(), &repo, &task, &paths, &mixed, "main", None);
+        assert!(refusals.iter().any(|reply| crate::gates::codes_in(reply).contains(&"G-61") && reply.contains(unread)), "{refusals:?}");
+        assert_eq!(widened::missing(&crate::factory_worker_check::PassingTests::new(root.path(), &repo, &mixed), &scopes, &covering), [package.clone()]);
+        let commands = widened::commands(root.path(), &repo, &paths, &[package.clone()], &covering);
+        assert!(commands.iter().any(|command| command.contains(unread)));
+        for command in &commands {
+            let args = command.split_once(" -- ").map_or("", |(_, args)| args);
+            assert!(specs.iter().all(|spec| !args.contains(spec)), "{command}: a covering spec is not the package's proof");
+        }
+    }
+
+    /// Framework boundary: implement the import-graph selection predicate,
+    /// report unrelated failures and report an empty selection as empty.
+    #[cfg(unix)]
+    const FIXTURE_RUNNER: &str = r#"#!/usr/bin/env python3
 import json, pathlib, re, sys
 a = sys.argv[1:]
 test_root = pathlib.Path.cwd()
@@ -1540,14 +1784,65 @@ elif 'related' in a:
 elif '--runTestsByPath' in a:
     target = pathlib.Path(a[a.index('--runTestsByPath') + 1]).resolve()
     specs = [p for p in specs if p == target]
+def assertions(p):
+    # Real Jest registers one test per expanded it.each row, titled by its interpolation.
+    status = 'failed' if 'throw 0' in p.read_text() else 'passed'
+    names = []
+    for table, title in re.findall(r"it\.each\(\[(.*?)\]\)\('([^']*)'", p.read_text()):
+        for row in re.findall(r"\{([^}]*)\}", table):
+            name = title
+            for key, value in re.findall(r"(\w+):\s*'([^']*)'", row):
+                name = name.replace('$' + key, value)
+            names.append(name)
+    return [{'fullName': name, 'status': status} for name in names or ['claims']]
 results = [{'name': str(p), 'status': 'failed' if 'throw 0' in p.read_text() else 'passed',
-    'assertionResults': [{'fullName': 'claims', 'status': 'failed' if 'throw 0' in p.read_text() else 'passed'}]} for p in specs]
+    'assertionResults': assertions(p)} for p in specs]
 ok = bool(results) and all(r['status'] == 'passed' for r in results)
 pathlib.Path(a[a.index('--outputFile') + 1]).write_text(json.dumps({'success': ok, 'testResults': results}))
 pathlib.Path('target').mkdir(exist_ok=True)
 with pathlib.Path('target/executed.jsonl').open('a') as out: out.write(json.dumps([str(p) for p in specs]) + '\n')
 sys.exit(0 if ok else 1)
-"#);
+"#;
+
+    /// Source advice, native related selection and the park reader share one
+    /// fixture; each runner must exclude an unrelated failure in its package.
+    #[cfg(unix)]
+    fn source_related_tests_fixture(runner: &str, source: &str, changed: &str) {
+        use crate::factory_worker_check::{javascript, stability, widened, PassingTests};
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.remove("CAS_SESSION_ID");
+        let root = tempfile::tempdir().unwrap();
+        // cas-253d: the fixture runner reports resolved paths; macOS temp
+        // roots (/tmp, /var) are symlinks, so keep the checkout physical.
+        let repo = root.path().canonicalize().unwrap().join("worktrees/worker");
+        let write = |path: &str, body: &str| {
+            let file = repo.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, body).unwrap();
+        };
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").current_dir(&repo)
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let package = source.split('/').take(2).collect::<Vec<_>>().join("/");
+        let (test_dir, parent) = if runner == "vitest" { ("app/test", "../../") } else { ("test", "../") };
+        let consumer = format!("{package}/{test_dir}/consumer.spec.ts");
+        let consumer_source = format!("import {{ value }} from '{parent}{}';\nit('claims', () => {{ void value; }});\n", source.strip_prefix(&format!("{package}/")).unwrap());
+        write(".gitignore", "node_modules/\ntarget/\n");
+        write(&format!("{package}/package.json"), &format!(r#"{{"devDependencies":{{"{runner}":"3"}}}}"#));
+        write(&format!("{package}/{runner}.config.js"), if runner == "vitest" {
+            "module.exports = { root: 'app' };\n"
+        } else { "module.exports = {};\n" });
+        write(source, "export const value = 1;\n");
+        // The consuming spec is elsewhere; a sibling-name heuristic cannot find it.
+        write(&consumer, &consumer_source);
+        write(&format!("{package}/{test_dir}/unrelated.spec.ts"), "it('unrelated', () => { throw 0; });\n");
+        write(&format!("{package}/node_modules/.bin/{runner}"), FIXTURE_RUNNER);
         std::fs::set_permissions(repo.join(format!("{package}/node_modules/.bin/{runner}")), std::fs::Permissions::from_mode(0o755)).unwrap();
         git(&["init", "-q", "-b", "main"]);
         git(&["add", "."]); git(&["commit", "-qm", "base"]);
@@ -1559,7 +1854,7 @@ sys.exit(0 if ok else 1)
         let paths = vec![source.to_owned()];
         let task = Task::new("cas-1587".into(), "related source proof".into());
         let scopes = vec![widened::scope(&repo, source)];
-        let commands = widened::commands(root.path(), &repo, &paths, &scopes);
+        let commands = widened::commands(root.path(), &repo, &paths, &scopes, &Default::default());
         assert_eq!(commands.len(), 1);
         // These bytes are the runnable command consumed by worker-check.
         let (_, command) = commands[0].split_once(" -- ").unwrap();
@@ -1578,20 +1873,20 @@ sys.exit(0 if ok else 1)
         let runs = std::fs::read_to_string(repo.join(format!("{package}/target/executed.jsonl"))).unwrap();
         let executed = runs.lines().map(|line| serde_json::from_str::<Vec<String>>(line).unwrap()).collect::<Vec<_>>();
         assert_eq!(executed, [vec![repo.join(&consumer).to_str().unwrap().to_owned()]]);
-        assert!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &scopes).is_empty());
+        assert!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &scopes, &Default::default()).is_empty());
         assert!(park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty());
         // A receipt for this source cannot cover a second source in the package.
         let other_source = format!("{package}/src/other.ts");
         write(&other_source, "export const value = 3;\n");
         let other = widened::scope(&repo, &other_source);
-        assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &[other.clone()]), [other]);
+        assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &[other.clone()], &Default::default()), [other]);
         std::fs::remove_file(repo.join(&other_source)).unwrap();
         // A failing related spec must withdraw the old proof at the new tip.
         write(&consumer, &consumer_source.replace("void value;", "throw 0;"));
         git(&["commit", "-qam", "related failure"]);
         let failed = git(&["rev-parse", "HEAD"]);
         assert!(javascript::execute(root.path(), &args, &repo, &[]).is_err());
-        assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes), scopes);
+        assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes, &Default::default()), scopes);
         assert!(!park_refusals(root.path(), &repo, &task, &paths, &failed, "main", None).is_empty());
     }
 
@@ -1602,11 +1897,62 @@ sys.exit(0 if ok else 1)
             "export function value(it: { claim: () => number }) { return it.claim(); }\n");
     }
 
+    /// GH #2252: an unclassifiable test helper widens to its package, beside a
+    /// changed Prisma schema that sorts first. Every focused command the
+    /// refusal prints must be one worker-check accepts; running it satisfies park.
     #[cfg(unix)]
     #[test]
-    fn vitest_vue_related_tests_command_and_park_receipt_gh2265() {
-        source_related_tests_fixture("vitest", "apps/frontend/app/src/components/chat/ChatLinkPreview.vue",
-            "<script setup lang=\"ts\">const value = 2;</script><template>{{ value }}</template>\n");
+    fn jest_package_scope_command_runs_and_proves_gh2252() {
+        use crate::factory_worker_check::{javascript, stability, widened, PassingTests};
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.remove("CAS_SESSION_ID");
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().canonicalize().unwrap().join("worktrees/worker");
+        let write = |path: &str, body: &str| {
+            let file = repo.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, body).unwrap();
+        };
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").current_dir(&repo)
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let schema = "apps/backend/prisma/schema.prisma";
+        write(".gitignore", "node_modules/\ntarget/\n");
+        let helper = "apps/backend/test/caption-cases.ts";
+        // Both runners declared and no config: no single runner owns the helper.
+        write("apps/backend/package.json", r#"{"devDependencies":{"jest":"29","vitest":"3"}}"#);
+        write(schema, "model Post { id Int @id }\n");
+        write(helper, "export const check = (name: string) => it(name, () => {});\n");
+        write("apps/backend/src/comparison.spec.ts", "it.each([{ delivery: 'spoken' }, { delivery: 'text_on_screen' }])('ignores caption-only edits for $delivery', () => {});\n");
+        write("apps/backend/node_modules/.bin/jest", FIXTURE_RUNNER);
+        std::fs::set_permissions(repo.join("apps/backend/node_modules/.bin/jest"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "."]); git(&["commit", "-qm", "base"]);
+        git(&["checkout", "-qb", "delivery"]);
+        write(schema, "model Post { id Int @id\n  caption String }\n");
+        write(helper, "export const check = (name: string) => it(name, async () => {});\n");
+        git(&["commit", "-qam", "change schema and helper"]);
+        std::fs::write(root.path().join("config.toml"), "[factory]\nepic_base_branch='main'\n").unwrap();
+        let head = git(&["rev-parse", "HEAD"]);
+        let paths = vec![schema.to_owned(), helper.to_owned()];
+        let (tests, scopes) = stability::requirements(&repo, &head, "main", &paths, None).unwrap();
+        assert!(tests.is_empty());
+        assert_eq!(scopes, [widened::Scope::Package("apps/backend".into())]);
+        let commands = widened::commands(root.path(), &repo, &paths, &scopes, &Default::default());
+        assert!(!commands.is_empty());
+        for command in &commands {
+            let (_, command) = command.split_once(" -- ").unwrap();
+            let args = command.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+            assert!(crate::factory_worker_check::allowed_args(&args), "{command}");
+            if args[0] == "jest" { javascript::execute(root.path(), &args, &repo, &[]).unwrap(); }
+        }
+        assert!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &scopes, &Default::default()).is_empty());
     }
 
     #[cfg(unix)]

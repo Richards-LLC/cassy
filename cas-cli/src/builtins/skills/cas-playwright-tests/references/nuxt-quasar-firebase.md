@@ -15,7 +15,7 @@ Read nuxt.config and routeRules, app route middleware and auth persistence befor
 
 ## Reuse state, isolate tests
 
-A setup project signs in for each needed role and saves storageState with indexedDB: true for Firebase SDK state. A fresh test-scoped context loads that file for each test. For mutating tests, allocate distinct identities/data per run/shard/worker, or isolate with a documented shared-resource lock within the run. Do not share a worker-scoped page or DOM.
+A setup project signs in for each persona in the [shared persona list](configuration.md#personas-and-gated-lanes) and saves storageState with indexedDB: true for Firebase SDK state. A fresh test-scoped context loads that file for each test. For mutating tests, allocate distinct identities/data per run/shard/worker, or isolate with a documented shared-resource lock within the run. Do not share a worker-scoped page or DOM.
 
 ```ts
 import { test as setup, expect } from '@playwright/test';

@@ -2777,7 +2777,7 @@ impl CasService {
         provisioner_build: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
         self.factory_spawn_workers_in_with_name_source(ctx, req, provisioner_build,
-            &mut || crate::orchestration::names::generate_unique(1).remove(0)).await
+            &mut crate::orchestration::names::generate).await
     }
 
     // gate-audit[force_build_guard]: bypass G-135 Admits a spawn despite measured builder-capacity refusal.
@@ -2819,6 +2819,10 @@ impl CasService {
         })?;
         let requested_delivery_mode = validate_delivery_mode(req.delivery_mode.as_deref())
             .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        if req.branch.is_some() && req.task_id.is_none() {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                "spawn_workers branch requires task_id; persist the task target before requesting its launch branch"));
+        }
 
         let workers_len = spawn_worker_entries_len(req.workers.as_deref())
             .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
@@ -2919,6 +2923,22 @@ impl CasService {
                     ),
                 )
             })?;
+            if let Some(requested) = req.branch.as_deref() {
+                let epic = task_store.get_parent_epic(task_id)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                let target = crate::mcp::tools::core::task::repo_context::effective_task_work_target(&task, epic.as_ref());
+                let effective = target.as_ref().map(|target| target.target_branch.as_str());
+                let normalize = crate::ui::factory::daemon::runtime::ci_watch::normalize_external_target_branch;
+                if requested.trim().is_empty() || effective.is_none_or(|target| normalize(requested) != normalize(target)) {
+                    let mut error = Self::error(ErrorCode::INVALID_PARAMS, format!(
+                        "Spawn target mismatch for {task_id}: requested branch {requested:?}, effective task target {}. Nothing was queued. Persist the intended target with task action=update id={task_id} target_branch=<branch>, then retry spawn_workers. A spawn brief does not change delivery authority.",
+                        effective.unwrap_or("(undeclared)"),
+                    ));
+                    error.data = Some(serde_json::json!({"code":"spawn_target_mismatch", "task_id":task_id,
+                        "requested_branch":requested, "effective_target":effective}));
+                    return Err(error);
+                }
+            }
             // cas-bc25: a repair for recorded failing tests needs its class audit.
             if let Some(class) = crate::mcp::tools::core::task::repair_class::require_class(
                 task_store.as_ref(),
@@ -6121,6 +6141,10 @@ impl CasService {
                     || "\n    account: default/inherited".to_string(),
                     |account| format!("\n    account: {account}"),
                 );
+                let account_info = match agent.metadata.get("worker_transport") {
+                    Some(transport) => format!("{account_info}\n    transport: {transport}"),
+                    None => account_info,
+                };
                 let account_info = if usage_limited {
                     format!("{account_info}{}", worker_usage_reset_lines(agent, transcript_path_for_worker.as_deref(), now))
                 } else { account_info };
@@ -13873,9 +13897,9 @@ mod spawn_lifecycle_tests {
         std::fs::write(repo.join("base"), "fixture").unwrap();
         git(&["add", "base"]);
         git(&["commit", "-m", "fixture"]);
-        let local = "occupied-local";
-        let remote = "occupied-origin";
-        let fresh = "fresh-worker";
+        let local = "quick-otter-12";
+        let remote = "jolly-panda-42";
+        let fresh = "brave-owl-88";
         git(&["branch", &format!("factory/{local}")]);
         git(&["update-ref", &format!("refs/remotes/origin/factory/{remote}"), "HEAD"]);
         let root = crate::store::init_cas_dir(repo).unwrap();
@@ -13892,7 +13916,17 @@ mod spawn_lifecycle_tests {
             "action":"spawn_workers","count":1,"cli":"grok","isolate":true,"worker_names":name
         })).unwrap();
         let ctx = crate::ops::fleet::FleetContext::operator("collision-fixture");
-        let mut candidates = [local, remote, fresh].into_iter();
+        // cas-dc08 (N1): generated names also skip any that would share a
+        // custom-named worker's namespace (registered `swift`, origin
+        // `factory/brave-hawk`) or own another's branch
+        // (`factory/calm-lark-3-hotfix`); a branch of the same name's own
+        // known task does not block it.
+        crate::store::open_agent_store(&root).unwrap().register(&cas_types::Agent::new_with_role(
+            "swift-id".into(), "swift".into(), cas_types::AgentRole::Worker)).unwrap();
+        git(&["update-ref", "refs/remotes/origin/factory/brave-hawk", "HEAD"]);
+        git(&["update-ref", "refs/remotes/origin/factory/calm-lark-3-hotfix", "HEAD"]);
+        git(&["update-ref", &format!("refs/remotes/origin/factory/{fresh}-cas-spawn-epic"), "HEAD"]);
+        let mut candidates = [local, remote, "brave-hawk-5", "swift-falcon-7", "calm-lark-3", fresh].into_iter();
         service.factory_spawn_workers_in_with_name_source(&ctx, request(None), None,
             &mut || candidates.next().expect("bounded fixture candidates").to_owned()).await.expect("spawn is admitted");
         let queue = crate::store::open_spawn_queue_store(&root).unwrap();
@@ -13907,6 +13941,9 @@ mod spawn_lifecycle_tests {
         let explicit = service.factory_spawn_workers_in_with_name_source(&ctx, request(Some(local)), None,
             &mut || panic!("an explicit name must not be regenerated")).await.expect_err("explicit collisions refuse before enqueue");
         assert!(explicit.message.contains(&format!("factory/{local}")), "{explicit}");
+        let overlap = service.factory_spawn_workers_in_with_name_source(&ctx, request(Some("swift-hawk-3")), None,
+            &mut || panic!("an explicit name must not be regenerated")).await.expect_err("explicit overlaps refuse before enqueue");
+        assert!(overlap.message.contains("WORKER_NAME_OVERLAPS"), "{overlap}");
         assert_eq!(queue.peek(10).unwrap().len(), 1, "explicit refusal creates no second queue row");
     }
 

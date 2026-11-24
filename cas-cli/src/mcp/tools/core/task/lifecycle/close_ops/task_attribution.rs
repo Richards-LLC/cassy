@@ -215,7 +215,17 @@ pub(super) fn validated_started_delivery(
     }
     // cas-985f: a worker told to merge the released trunk into its lane brings
     // in other tasks' already-released commits. They are upstream, not foreign.
-    let upstream = released_trunk_ref(repo, &target).map(|reference| format!("^{reference}"));
+    // cas-faa9: so is history from an earlier epic/train target of this task.
+    if !git_ref_exists(repo, &target) {
+        return Err(refuse(&format!(
+            "its target `{}` no longer exists; retarget the task or restore that branch",
+            current_target.target_branch,
+        )));
+    }
+    let upstream: Vec<String> = released_trunk_ref(repo, &target).into_iter()
+        .chain(gated_prior_target_refs(repo, &target, task))
+        .map(|reference| format!("^{reference}"))
+        .collect();
     let mut identity = task_commit_identity(task, None);
     include_superseded_commits(repo, task, &mut identity)?;
     include_cycle_anchors(repo, task, &mut identity);
@@ -315,7 +325,8 @@ pub(super) fn validated_started_delivery(
         }
         if on_lane
             && (merged.is_empty()
-                || !merge_brings_foreign_work(repo, &parents[0], merged, &target, &identity))
+                || !merge_brings_foreign_work(repo, &parents[0], merged, &target,
+                    &upstream.iter().map(|reference| reference[1..].to_string()).collect::<Vec<_>>(), &identity))
             // The inherited repository identity can recover real WIP, but
             // cannot make an unnamed, unrecorded empty checkpoint task-owned.
             // Such metadata-only commits still need their own attribution.
@@ -588,12 +599,14 @@ pub(crate) fn branch_task_claims(
 /// or another lane's commit already on the target, imports someone else's
 /// content: its first-parent diff is theirs. Unnamed commits off the target
 /// stay attributable (a worker's own side branch). Unknowable Git state keeps
-/// the merge, as before.
+/// the merge, as before. GH #2163: an unnamed commit already on the released
+/// trunk is upstream work too, like one on the target.
 fn merge_brings_foreign_work(
     repo: &Path,
     first_parent: &str,
     merged_parents: &[String],
     target: &str,
+    released: &[String],
     identity: &TaskCommitIdentity,
 ) -> bool {
     for parent in merged_parents {
@@ -614,9 +627,13 @@ fn merge_brings_foreign_work(
         ) else {
             return false;
         };
+        let exclude_released: Vec<String> = released.iter().map(|reference| format!("^{reference}")).collect();
         let Some(off_target) = git_text(
             repo,
-            &["rev-list", "--no-merges", parent, &exclude_first, &exclude_target],
+            &["rev-list", "--no-merges", parent, &exclude_first, &exclude_target]
+                .into_iter()
+                .chain(exclude_released.iter().map(String::as_str))
+                .collect::<Vec<_>>(),
         ) else {
             return false;
         };
@@ -652,7 +669,45 @@ pub(super) fn upstream_refs(repo: &Path, target: &str, task: &Task) -> Vec<Strin
         .map(|reference| format!("^{reference}"))
         .into_iter()
         .collect();
+    refs.extend(gated_prior_target_refs(repo, target, task).into_iter().map(|reference| format!("^{reference}")));
     refs.extend(authorized_merge_parents(task).into_iter().map(|sha| format!("^{sha}")));
+    refs
+}
+
+/// cas-faa9: refs of this task's earlier targets that are epic or release
+/// train lanes. Their history passed that lane's gates, so a lane cut from
+/// one (a briefed train, the predecessor after a G-100 retarget) carries
+/// upstream, not foreign, work. An arbitrary branch name never qualifies:
+/// the store must hold an epic that owns the lane, in the same repository.
+pub(crate) fn gated_prior_target_refs(repo: &Path, target: &str, task: &Task) -> Vec<String> {
+    let Some(current) = task.deliverables.work_target.as_ref() else { return Vec::new() };
+    let target = target.strip_prefix("origin/").unwrap_or(target);
+    let mut candidates: Vec<&str> = task.deliverables.prior_work_targets.iter()
+        .chain(task.deliverables.factory_branch_start.as_ref().map(|start| &start.work_target))
+        .filter(|prior| prior.repo_selector == current.repo_selector)
+        .map(|prior| prior.target_branch.as_str())
+        .filter(|branch| *branch != target && *branch != current.target_branch && is_safe_git_refname(branch))
+        .collect();
+    candidates.dedup();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let Ok((primary, _)) = crate::mcp::tools::core::task::repo_context::git_layout(repo) else { return Vec::new() };
+    let root = primary.join(".cas");
+    if !root.join("cas.db").is_file() {
+        return Vec::new();
+    }
+    let Ok(store) = crate::store::open_task_store_local(&root) else { return Vec::new() };
+    let mut refs = Vec::new();
+    for branch in candidates {
+        if !store.epic_for_branch(branch).ok().flatten().is_some_and(|epic| epic.task_type == TaskType::Epic) {
+            continue;
+        }
+        let reference = preferred_diff_target_ref_for_delivery(repo, branch, task.delivery_mode);
+        if git_ref_exists(repo, &reference) && !refs.contains(&reference) {
+            refs.push(reference);
+        }
+    }
     refs
 }
 
@@ -757,6 +812,7 @@ fn task_delivery_selection(
     }
     let historical_receipt = tip.is_some() && window.supervisor_override_reason.is_some();
     let target = preferred_diff_target_ref(repo, parent);
+    let released = released_trunk_ref(repo, parent);
     let tip = tip.unwrap_or("HEAD");
     let base = git_text(repo, &["merge-base", tip, &target])?;
     // GH #1382: an unmerged start base can carry the preceding task's UI.
@@ -866,6 +922,7 @@ fn task_delivery_selection(
                         &c.parent,
                         &c.merged_parents,
                         &target,
+                        released.as_slice(),
                         &window.identity,
                     ))
             {
@@ -1194,12 +1251,22 @@ fn final_snapshot_delivery_ranges(
     }
     let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", &tip])?;
     let parents: Vec<_> = parents.split_whitespace().collect();
-    let [_, _, target_parent] = parents.as_slice() else {
+    let [_, first_parent, target_parent] = parents.as_slice() else {
         return Some(ranges);
     };
-    if git_text(repo, &["diff", "--name-only", target_parent, &tip, "--"])?.is_empty() {
-        return Some(ranges);
-    }
+    // GH #2222/#2236: merging duplicate content can leave both parents
+    // identical to the parked tree. Its target-parent delta is empty, but
+    // the task's earlier content still lies after their common base. Require
+    // both snapshots to match so a merge that drops one side's work cannot
+    // claim this recovery. Ordinary range and content fences still apply.
+    let comparison = if git_text(repo, &["diff", "--name-only", target_parent, &tip, "--"])?.is_empty() {
+        if !git_text(repo, &["diff", "--name-only", first_parent, &tip, "--"])?.is_empty() {
+            return Some(ranges);
+        }
+        git_text(repo, &["merge-base", first_parent, target_parent])?
+    } else {
+        target_parent.to_string()
+    };
     // The recorded anchor binds the earlier cycle after a restart. Match the
     // merge-tip content proof's creation floor, keeping the immutable start
     // exclusion and foreign-task fences from ordinary range selection.
@@ -1207,7 +1274,7 @@ fn final_snapshot_delivery_ranges(
         not_before: window.task_floor,
         ..window.clone()
     };
-    task_delivery_ranges(repo, target_parent, &anchored_window, Some(&tip))
+    task_delivery_ranges(repo, &comparison, &anchored_window, Some(&tip))
 }
 
 pub(super) fn final_snapshot_delivery_base(
@@ -1666,7 +1733,14 @@ fn merge_tip_content_presence_selected(
     let mut commits = match explicit_commits {
         Some(commits) => commits.to_vec(),
         None => {
-            let ranges = task_delivery_ranges(repo, target, window, Some(merge_tip))?;
+            // Snapshot recovery needs a real work window: its anchored range
+            // uses the window's creation floor, which the identity fallback
+            // sets to the epoch, so it would claim any unnamed commit (cas-988f).
+            let ranges = if has_work_window {
+                final_snapshot_delivery_ranges(repo, target, window, merge_tip)?
+            } else {
+                task_delivery_ranges(repo, target, window, Some(merge_tip))?
+            };
             attributed_content_commits(repo, merge_tip, window, identity, &ranges)?
         }
     };
@@ -4457,6 +4531,42 @@ mod tests {
             has_task_attributable_reviewable_changes(p, "main", &window()),
             Some(false)
         );
+    }
+
+    /// GH #2163: a lane bound to an epic is told to merge the released trunk,
+    /// whose unnamed commits changed other specs. Park and the capped runner
+    /// must own only the task's spec edits, before and after that sync.
+    #[test]
+    fn released_trunk_merge_brings_no_stability_obligation_gh2163() {
+        use crate::factory_worker_check::{PassingTests, diff_base, javascript, stability::{self, Identity, Proof}};
+        let dir = fixture();
+        let p = dir.path();
+        let case = |name: &str| format!("test('{name}', () => {{}});\n");
+        git(p, &["checkout", "-qb", "epic", "main"]);
+        commit(p, "own.test.js", &case("kept"), "cas-taska: epic work");
+        git(p, &["checkout", "-q", "main"]);
+        commit(p, "qbo.test.js", &(case("kept") + &case("released")), "Update QBO sync spec (#412)");
+        git(p, &["checkout", "-q", "-B", "factory/worker", "epic"]);
+        commit(p, "own.test.js", &(case("kept") + &case("typed")), "cas-taskb: type the renderer spec");
+        git(p, &["merge", "-q", "--no-ff", "main", "-m", "Merge remote-tracking branch 'origin/main'"]);
+        let tip = commit(p, "own.test.js", &(case("kept") + &case("typed") + &case("synced")),
+            "cas-taskb: retype after sync");
+        let window = window();
+        let paths = paths(p, "epic", &window, Some(&tip)).unwrap();
+        assert_eq!(paths, ["own.test.js"]);
+        let ranges = range_bounds(p, "epic", &window, Some(&tip)).unwrap();
+        let (tests, widened) = stability::requirements(p, &tip, "epic", &paths, Some(&ranges)).unwrap();
+        let owned = vec![Identity::exact("own.test.js", "synced"), Identity::exact("own.test.js", "typed")];
+        assert_eq!((tests, widened), (owned.clone(), vec![]));
+        // The runner selects the same tests from the file the worker names,
+        // and its receipt alone satisfies park.
+        let base = diff_base(p, Some("epic")).unwrap();
+        assert_eq!(javascript::changed_tests(p, &base, &tip, &paths, None).unwrap(), owned);
+        let root = tempfile::tempdir().unwrap();
+        stability::record(root.path(), p, &tip, Proof { runner: "jest".into(), tests: owned.clone(),
+            consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+        let passing = PassingTests::new(root.path(), p, &tip).with_target("epic");
+        assert!(stability::missing(&passing, &owned).is_empty());
     }
 
     /// cas-24d8: the ownership walk skips edges that leave the path's blob

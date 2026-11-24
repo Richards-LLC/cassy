@@ -3512,6 +3512,36 @@ fn test_09d0_held_worker_never_flags_idle() {
 /// a deliberate supervisor pause, so neither idle nor stale-activity signals
 /// should contact the worker until release.
 #[test]
+fn cas_6de2e_own_task_bound_reminder_is_a_declared_wait_not_a_stall() {
+    // GH #1728: an in-progress worker set a 60-minute remind bound to its task
+    // and ended its turn; worker_stalled still fired at 10 minutes.
+    let base_utc = chrono::Utc::now();
+    let mut detector =
+        DirectorEventDetector::new(vec!["lively-crow".to_string()], "supervisor".to_string());
+    detector.set_stall_threshold_secs(300);
+    let mut data = stalled_data_for(make_agent_working_stalled(
+        "agent-1", "lively-crow", "cas-1728", 5, Some(600), base_utc,
+    ));
+    data.reminders = vec![serde_json::from_value(serde_json::json!({
+        "id": 1, "owner_id": "agent-1", "target_id": "agent-1", "message": "check the external event",
+        "trigger_type": "time", "trigger_at": base_utc + chrono::Duration::minutes(50),
+        "trigger_event": null, "trigger_filter": null, "status": "pending", "ttl_secs": 0,
+        "created_at": base_utc - chrono::Duration::minutes(10), "fired_at": null, "cancelled_at": null,
+        "fired_event": null, "task_id": "cas-1728",
+    })).expect("reminder")];
+    detector.initialize(&data);
+    let stalls = |events: Vec<DirectorEvent>| events.into_iter()
+        .filter(|event| matches!(event, DirectorEvent::WorkerStalled { .. })).count();
+    for _ in 0..2 {
+        assert_eq!(stalls(detector.detect_changes_at(&data, None, std::time::Instant::now(), base_utc)), 0);
+    }
+    // Once the reminder has fired and the worker is still quiet, the stall
+    // ladder starts again.
+    data.reminders[0].status = cas_store::ReminderStatus::Fired;
+    assert_eq!(stalls(detector.detect_changes_at(&data, None, std::time::Instant::now(), base_utc)), 1);
+}
+
+#[test]
 fn test_60dd_held_worker_never_flags_stalled() {
     let base_utc = chrono::Utc::now();
     let mut detector =

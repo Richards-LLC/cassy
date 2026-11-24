@@ -565,10 +565,7 @@ pub fn check(path: &Path, min_rows: usize) -> Report {
         let readable = root
             .as_ref()
             .ok()
-            .and_then(|root| {
-                crate::qa_evidence::resolve_bundle_file(root, "ledger capture", &row.evidence_path)
-                    .ok()
-            })
+            .and_then(|root| evidence_cell_path(root, &row.evidence_path))
             .is_some_and(|p| p.is_file() && std::fs::File::open(p).is_ok());
         if !readable {
             failures.push((row.line, row.id.clone()));
@@ -587,6 +584,51 @@ pub fn check(path: &Path, min_rows: usize) -> Report {
     report.diagnostics.sort_by_key(|d| d.line);
     report.ok = report.diagnostics.is_empty();
     report
+}
+
+/// Where a row's evidence cell points inside `ledger_dir` (canonical): one
+/// path, relative to the ledger directory, absolute but inside it, or another
+/// machine's artifacts path (cas-ddc4). `None` when it names nothing that
+/// exists inside the directory. The ledger check and the park publisher
+/// (cas-fd1c) both read the cell this way.
+pub fn evidence_cell_path(ledger_dir: &Path, cell: &str) -> Option<std::path::PathBuf> {
+    let resolve = |cited: &str| {
+        crate::qa_evidence::resolve_bundle_file(ledger_dir, "ledger capture", cited).ok()
+    };
+    resolve(cell).or_else(|| {
+        // cas-ddc4: a ledger written on another machine cites its captures by
+        // that machine's absolute path.
+        foreign_capture(ledger_dir, cell).and_then(|local| resolve(local.to_str()?))
+    })
+}
+
+/// Where a capture cited by another machine's absolute artifacts path sits in
+/// this ledger's own task directory (cas-ddc4). A path of the form
+/// `<home>/.cas/artifacts/<project-key>/<task>/<file>` names `<task>/<file>`
+/// under the same project's artifacts root on any machine, and the project key
+/// differs per machine. The task directory is the ledger directory or the
+/// nearest ancestor with the task's name; the caller still requires the result
+/// to resolve inside the ledger directory. `None` for a relative path or one
+/// that is not under an artifacts root.
+fn foreign_capture(ledger_dir: &Path, cited: &str) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let cited = Path::new(cited);
+    if !cited.is_absolute() {
+        return None;
+    }
+    let parts: Vec<_> = cited.components().collect();
+    let artifacts = parts
+        .windows(2)
+        .position(|pair| pair[0].as_os_str() == ".cas" && pair[1].as_os_str() == "artifacts")?;
+    // [.., ".cas", "artifacts", <project-key>, <task>, <file>, ..]
+    let under_project = parts.get(artifacts + 3..)?;
+    if under_project.len() < 2 || !under_project.iter().all(|part| matches!(part, Component::Normal(_))) {
+        return None;
+    }
+    let task_dir = ledger_dir
+        .ancestors()
+        .find(|dir| dir.file_name() == Some(under_project[0].as_os_str()))?;
+    Some(task_dir.parent()?.join(under_project.iter().collect::<std::path::PathBuf>()))
 }
 
 /// The task a canonical ledger was written for: the id in its
@@ -759,6 +801,36 @@ mod tests {
                 } else {
                     Verdict::NotExercised
                 }));
+        }
+    }
+
+    /// cas-ddc4: ledgers written on prowl cite captures by `/Users/...` paths.
+    /// Restored on soundwave, the same files sit in this task's directory.
+    #[test]
+    fn a_capture_cited_by_another_machines_artifacts_path_resolves_to_the_local_file_cas_ddc4() {
+        let home = tempfile::tempdir().unwrap();
+        let task_dir = home.path().join(".cas/artifacts/cassy-local/cas-7555a");
+        std::fs::create_dir_all(task_dir.join("logs")).unwrap();
+        std::fs::write(task_dir.join("selected-tests-UkVUFi.log"), "test: PASS").unwrap();
+        std::fs::write(task_dir.join("logs/nested.log"), "test: PASS").unwrap();
+        let path = task_dir.join("LEDGER.md");
+        let ledger = |cited: &str| format!(
+            "cells=1; PASS=1; FAIL=0; NOT EXERCISED=0\nlabels: real-build=1\n{HEADER}\n| M01 | tests | pass | pass | PASS | real-build | {cited} | - |\n"
+        );
+        let foreign = "/Users/pippenz/.cas/artifacts/cassy-ee10/cas-7555a";
+        for (cited, accepted) in [
+            (format!("{foreign}/selected-tests-UkVUFi.log"), true),
+            (format!("{foreign}/logs/nested.log"), true),
+            (format!("{foreign}/missing.log"), false),
+            (format!("{foreign}/../../../etc/passwd"), false),
+            ("/Users/pippenz/.cas/artifacts/cassy-ee10/cas-other/selected-tests-UkVUFi.log".to_string(), false),
+            ("/Users/pippenz/elsewhere/cas-7555a/selected-tests-UkVUFi.log".to_string(), false),
+        ] {
+            let body = ledger(&cited);
+            std::fs::write(&path, &body).unwrap();
+            let report = check(&path, 1);
+            assert_eq!(report.ok, accepted, "{cited}: {}", report.refusal());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), body, "the check never rewrites the ledger");
         }
     }
 

@@ -508,6 +508,9 @@ pub struct HubSession {
     /// The live supervisor's fingerprinted MCP daemon epoch, not the hub binary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_version: Option<String>,
+    /// When that MCP process started, so its build has been loaded since then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_loaded_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Installed CLI on this machine; may be newer than a connected MCP server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_version: Option<String>,
@@ -619,6 +622,14 @@ const MCP_VERSION_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 struct CachedVersions {
     read_at: std::time::Instant,
     snapshot: Option<crate::factory_binary_skew::Snapshot>,
+    /// The MCP front reports' directory stamp when read. A reload starts a new
+    /// front, so a changed stamp means this snapshot predates it (cas-8c4f).
+    fronts: Option<std::time::SystemTime>,
+}
+
+/// When any MCP front last reported; it changes whenever a new MCP process serves.
+fn mcp_fronts_stamp(cas_root: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(cas_root.join("mcp-fronts")).and_then(|meta| meta.modified()).ok()
 }
 
 /// How long a session's last activity is reused before it is read again.
@@ -772,6 +783,9 @@ impl LocalSessionReadModel {
                     // Different observations are unknown, never an arbitrary version.
                     projected.mcp_version = matches.first().and_then(|server| server.version.clone())
                         .filter(|version| matches.iter().all(|server| server.version.as_ref() == Some(version)));
+                    projected.mcp_loaded_at = projected.mcp_version.as_ref().and(matches.as_slice().first())
+                        .filter(|_| matches.len() == 1)
+                        .and_then(|server| crate::factory_binary_skew::process_started_at(server.pid));
                 }
                 if let Some((at, label)) = self.last_activity(session) {
                     projected.last_activity_at = Some(at);
@@ -808,6 +822,7 @@ impl LocalSessionReadModel {
             rows.push(HubSession {
                 name: receipt.metadata.name,
                 mcp_version: None,
+                mcp_loaded_at: None,
                 installed_version: None,
                 harness: identity.harness,
                 model: identity.model,
@@ -839,8 +854,10 @@ impl LocalSessionReadModel {
 
     fn mcp_versions(&self, cas_root: &std::path::Path) -> Option<crate::factory_binary_skew::Snapshot> {
         let mut cache = self.versions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fronts = mcp_fronts_stamp(cas_root);
         if let Some(cached) = cache.get(cas_root)
             && cached.read_at.elapsed() < MCP_VERSION_TTL
+            && cached.fronts == fronts
         {
             return cached.snapshot.clone();
         }
@@ -849,7 +866,7 @@ impl LocalSessionReadModel {
             cas_root, installed.as_deref().unwrap_or("unknown"), chrono::Utc::now(),
         ).ok();
         cache.insert(cas_root.to_path_buf(), CachedVersions {
-            read_at: std::time::Instant::now(), snapshot: snapshot.clone(),
+            read_at: std::time::Instant::now(), snapshot: snapshot.clone(), fronts,
         });
         snapshot
     }
@@ -962,6 +979,7 @@ fn hub_session(session: &SessionInfo) -> HubSession {
     HubSession {
         name: session.name.clone(),
         mcp_version: None,
+        mcp_loaded_at: None,
         installed_version: None,
         harness,
         model,
@@ -1252,6 +1270,7 @@ pub fn fixture_session(name: &str) -> HubSession {
     HubSession {
         name: name.to_owned(),
         mcp_version: None,
+        mcp_loaded_at: None,
         installed_version: None,
         harness: None,
         model: None,

@@ -5,8 +5,8 @@ import { joinSpoken } from "./spoken-names";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 import { plainTextMarkdown } from "./markdown-renderer";
 import { providerAvatarMarkup } from "./provider-mark";
-import { supervisorVersion } from "./machine-version";
-import type { CommandReceipt } from "./supervisor-commands";
+import { cassyLoaded, cassyLoadedBadge, supervisorVersion } from "./machine-version";
+import { CODEX_RELOAD_CONFIRM, reloadWaitNode, type CommandReceipt } from "./supervisor-commands";
 import type { ProjectStatusLine } from "./progress-model";
 
 export interface ConversationRow {
@@ -60,6 +60,8 @@ export interface ConversationRow {
   projectName?: string;
   machine_online?: boolean;
   mcp_version?: string;
+  /** When that MCP process loaded its build (cas-8c4f). */
+  mcp_loaded_at?: string;
   installed_version?: string;
   reloadReceipt?: CommandReceipt;
   reloadPending?: boolean;
@@ -288,7 +290,7 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const note = outage ? row.connection : row.ended || row.unreachable || row.interrupted || draft ? truncateConversationPreview(plainTextMarkdown(rowPreviewText(row, row.connection))) : "";
   // cas-6acf: assistive tech hears the time in words ("20 minutes ago"), not "20m".
   const time = row.when
-    ? `<span class="conversation-when${waiting ? " hot" : ""}" title="${escapeHtml(row.freshness)}"${row.whenSpoken ? ' aria-hidden="true"' : ""}>${escapeHtml(row.when)}</span>`
+    ? `<span class="conversation-when${waiting ? " hot" : ""}" data-testid="conversation-when" title="${escapeHtml(row.freshness)}"${row.whenSpoken ? ' aria-hidden="true"' : ""}>${escapeHtml(row.when)}</span>`
     : "";
   const spoken = row.when && row.whenSpoken ? `<span class="sr-only">, ${escapeHtml(row.whenSpoken)}</span>` : "";
   const count = unread > 0 ? `<span class="conversation-unread" aria-label="${unread} unread">${unread}</span>` : "";
@@ -296,19 +298,23 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const marks = count || flag ? `<span class="conversation-marks">${count}${flag}</span>` : "";
   const version = rowVersion(row);
   const standby = row.standby ? `<span class="conversation-standby" title="Workers stopped; resume to bring them back">Standby</span>` : "";
-  const badge = standby + (version?.update ? `<span class="supervisor-version update-available" title="${escapeHtml(version.description)}">${escapeHtml(version.version)} <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span></span>` : "");
+  // cas-8c4f: a current supervisor keeps its loaded build on the card until the next reload; cas-0d58: the
+  // pill shows the version alone so it never ellipsises, and its title carries the Eastern load time.
+  const loaded = version && !version.update ? cassyLoaded(row.mcp_version, row.mcp_loaded_at) : undefined;
+  const badge = standby + (version?.update ? `<span class="supervisor-version update-available" data-testid="supervisor-version" title="${escapeHtml(version.description)}">${escapeHtml(version.version)} <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span></span>`
+    : loaded ? `<span class="supervisor-version loaded" data-testid="supervisor-version" title="${escapeHtml(cassyLoadedBadge(row.mcp_version, row.mcp_loaded_at)!)}">${escapeHtml(loaded.version)}</span>` : "");
   // Two sessions of one project on one machine read apart by their codename.
   // cas-6faf: such siblings reserve the same Most recent slot; inactive slots have no spoken name.
-  const mark = row.showCodename && row.group ? `<span class="conversation-session-slot"${row.group.active ? "" : ' aria-hidden="true"'}><span class="conversation-session-mark">Most recent</span></span>` : "";
+  const mark = row.showCodename && row.group ? `<span class="conversation-session-slot"${row.group.active ? "" : ' aria-hidden="true"'}><span class="conversation-session-mark" data-testid="conversation-session-mark">Most recent</span></span>` : "";
   const name = row.supervisor.trim();
   const hasName = name && name.toLowerCase() !== "supervisor";
   const supervisorLabel = row.showSupervisorName && hasName ? name : "Supervisor";
   const codename = row.showCodename ? `${row.showSupervisorName ? "" : `<span class="conversation-supervisor-name codename">${escapeHtml(name)}</span>`}${mark}` : "";
   return providerAvatarMarkup({ harness: row.harness, fallback: machineMonogram(row.host), state: row.supervisorState, className: "conversation-avatar" })
-    + `<span class="conversation-who" title="${escapeHtml(row.supervisor)}"><span class="conversation-role">${escapeHtml(supervisorLabel)}</span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span>${codename}${badge}</span>`
+    + `<span class="conversation-who" title="${escapeHtml(row.supervisor)}"><span class="conversation-role" data-testid="conversation-role">${escapeHtml(supervisorLabel)}</span><span class="conversation-machine-name" data-testid="conversation-machine-name">${escapeHtml(machineName(row.host))}</span>${codename}${badge}</span>`
     + time
     + marks
-    + (note ? `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : draft ? " draft" : ""}">${emojiMarkup(note)}</span>` : "")
+    + (note ? `<span data-testid="conversation-preview" class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : draft ? " draft" : ""}">${emojiMarkup(note)}</span>` : "")
     + spoken;
 }
 
@@ -362,6 +368,8 @@ export class ConversationList {
    * conversation opens, and repainting into that detached list emptied the
    * live one until the next catalog poll.
    */
+  /** Codex rows whose Reload Cassy is waiting for its restart confirmation. */
+  private readonly reloadConfirming = new Set<string>();
   private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: (row: ConversationRow, event?: MouseEvent) => void; end?: (row: ConversationRow) => Promise<void>; reload?: (row: ConversationRow) => void; resume?: (row: ConversationRow) => void };
   /**
    * cas-f60a: the session that just ended, said where its row was and through
@@ -402,7 +410,7 @@ export class ConversationList {
     };
     for (const row of rows) {
       if (row.group?.first) {
-        const head = extra(`group:${row.group.key}`, () => { const node = document.createElement("p"); node.className = "conversation-group-head"; return node; });
+        const head = extra(`group:${row.group.key}`, () => { const node = document.createElement("p"); node.className = "conversation-group-head"; node.dataset.testid = "conversation-group-head"; return node; });
         if (head.textContent !== row.group.label) head.textContent = row.group.label;
         const group = extra(`container:${row.group.key}`, () => {
           const node = document.createElement("div");
@@ -438,7 +446,7 @@ export class ConversationList {
       if (node.getAttribute("aria-label") !== spoken) node.setAttribute("aria-label", spoken);
       ordered.push(node);
       if (row.canEnd && end) {
-        const control = extra(`end:${row.key}`, () => { const node = document.createElement("div"); node.className = "conversation-end"; return node; });
+        const control = extra(`end:${row.key}`, () => { const node = document.createElement("div"); node.className = "conversation-end"; node.dataset.testid = "conversation-end"; return node; });
         this.renderEnd(control, row, end);
         ordered.push(control);
 
@@ -448,22 +456,33 @@ export class ConversationList {
           const node = document.createElement("div"); node.className = "conversation-reload";
           // Secondary actions stay in the existing conversation-header menu.
           // Ordinary rows must keep their height and one navigation Tab stop.
-          node.innerHTML = '<button type="button" tabindex="-1" data-reload-cassy="direct">Reload Cassy</button><p class="conversation-reload-receipt" role="status"></p>';
+          node.innerHTML = '<button type="button" tabindex="-1" data-reload-cassy="direct">Reload Cassy</button><button type="button" tabindex="-1" data-reload-cassy="confirm" hidden>Restart and reload</button><p class="conversation-reload-receipt" role="status"></p>';
           return node;
         });
         const receipt = row.reloadReceipt;
         const pending = row.reloadPending || receipt?.phase === "queued" || receipt?.phase === "submitted";
-        const unavailable = row.harness !== "claude" ? `Reload Cassy requires Claude Code; this supervisor uses ${row.harness ?? "an unknown harness"}.`
+        const unavailable = row.harness !== "claude" && row.harness !== "codex" ? `Reload Cassy requires Claude Code or Codex; this supervisor uses ${row.harness ?? "an unknown harness"}.`
           : row.reloadUnavailable ?? (row.machine_online === false ? "Reconnect this machine to reload Cassy." : undefined);
+        // Codex reloads by restarting its supervisor: say so before it happens (cas-8c4f).
+        const confirming = row.harness === "codex" && this.reloadConfirming.has(row.key) && !pending && !unavailable;
+        if (!confirming) this.reloadConfirming.delete(row.key);
         const direct = control.querySelector<HTMLButtonElement>('[data-reload-cassy="direct"]')!;
+        const confirm = control.querySelector<HTMLButtonElement>('[data-reload-cassy="confirm"]')!;
         direct.hidden = !rowVersion(row)?.update;
-        for (const action of control.querySelectorAll<HTMLButtonElement>("button")) {
-          action.disabled = Boolean(unavailable || pending);
-          action.onclick = () => reload(row);
-        }
+        confirm.hidden = !confirming;
+        direct.textContent = confirming ? "Cancel" : "Reload Cassy";
+        for (const action of [direct, confirm]) action.disabled = Boolean(unavailable || pending);
+        direct.onclick = () => {
+          if (confirming) { this.reloadConfirming.delete(row.key); this.repaint(); return; }
+          if (row.harness === "codex") { this.reloadConfirming.add(row.key); this.repaint(); return; }
+          reload(row);
+        };
+        confirm.onclick = () => { this.reloadConfirming.delete(row.key); reload(row); };
         control.setAttribute("aria-label", `Cassy controls for ${row.supervisor} on ${machineName(row.host)}`);
         const status = control.querySelector<HTMLElement>(".conversation-reload-receipt")!;
-        status.textContent = receipt ? `${receipt.phase === "observed" ? "" : `${receipt.phase}: `}${receipt.detail}` : row.reloadPending ? "Connecting to reload Cassy…" : !direct.hidden ? unavailable ?? "" : "";
+        status.textContent = confirming ? CODEX_RELOAD_CONFIRM
+          : receipt ? `${receipt.phase === "observed" ? "" : `${receipt.phase}: `}${receipt.detail}` : row.reloadPending ? "Connecting to reload Cassy…" : !direct.hidden ? unavailable ?? "" : "";
+        if (pending) status.prepend(reloadWaitNode(document));
         status.hidden = !status.textContent;
         control.hidden = direct.hidden && status.hidden;
         ordered.push(control);
@@ -487,12 +506,14 @@ export class ConversationList {
     }
     if (this.ended) {
       const notice = this.endedNode ??= Object.assign(document.createElement("p"), { className: "conversation-ended" });
+      notice.dataset.testid = "conversation-ended";
       if (notice.textContent !== this.ended.text) notice.textContent = this.ended.text;
       ordered.splice(this.endedPlace(ordered, rows, this.ended), 0, notice);
     } else this.endedNode?.remove();
     if (end) {
       const announcer = this.announcer ??= Object.assign(document.createElement("p"), { className: "sr-only conversation-ended-status" });
       announcer.setAttribute("role", "status");
+      announcer.setAttribute("aria-label", "Session ended");
       if (container.nextElementSibling !== announcer && container.parentElement) container.after(announcer);
     }
     // Keep the flat row/control order (including ended notices), but give each
@@ -688,6 +709,7 @@ export class ConversationList {
         const error = document.createElement("span");
         error.id = `conversation-end-error:${row.key}`;
         error.className = "conversation-end-error";
+        error.dataset.testid = "conversation-end-error";
         // Said once (cas-9ae6): an alert when focus stays where the operator
         // went; as End session's description when focus is brought back to it.
         if (state.announce) error.setAttribute("role", "alert");
@@ -698,7 +720,7 @@ export class ConversationList {
       control.replaceChildren(...children);
       return;
     }
-    const question = document.createElement("span"); question.className = "conversation-end-question";
+    const question = document.createElement("span"); question.className = "conversation-end-question"; question.dataset.testid = "conversation-end-question";
     question.textContent = state === "ending"
       ? `Ending ${row.supervisor}…`
       : `End ${row.supervisor} on ${machineName(row.host)}? Its supervisor and workers stop.`;

@@ -39,7 +39,7 @@ export function workerTimelineDialog(document: Document, handlers: WorkerTimelin
     const header = document.createElement("header"); header.className = "raw-output-header";
     const heading = document.createElement("div"); heading.className = "raw-output-heading";
     const title = document.createElement("h2"); title.id = "worker-timeline-title";
-    const subject = document.createElement("p"); subject.id = "worker-timeline-subject"; subject.className = "raw-output-subject";
+    const subject = document.createElement("p"); subject.id = "worker-timeline-subject"; subject.dataset.testid = "worker-timeline-subject"; subject.className = "raw-output-subject";
     heading.append(title, subject);
     const close = document.createElement("button"); close.type = "button"; close.className = "raw-output-close"; close.setAttribute("aria-label", "Close timeline"); close.textContent = "×";
     close.onclick = () => dialog!.close();
@@ -60,7 +60,7 @@ export function renderWorkerTimeline(dialog: HTMLDialogElement, subject: WorkerT
   dialog.querySelector<HTMLElement>("#worker-timeline-title")!.textContent = `${subject.worker} timeline`;
   const state = subject.stateLabel ?? statusLabel(subject.status);
   const line = dialog.querySelector<HTMLElement>("#worker-timeline-subject")!;
-  const chip = document.createElement("span"); chip.className = `status-chip status-chip--${statusClass(state)}`; chip.textContent = state;
+  const chip = document.createElement("span"); chip.className = `status-chip status-chip--${statusClass(state)}`; chip.dataset.testid = "status-chip"; chip.textContent = state;
   line.replaceChildren();
   line.title = subject.task ?? "";
   if (subject.task) line.append(subject.taskTitle?.trim() || "Task title not reported", " ", chip);

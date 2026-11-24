@@ -1652,7 +1652,29 @@ pub(crate) fn build_worker_worktree_assertion(cwd: &str, context: String) -> Str
                 {switch}"
             ));
         }
-        Some(_) => {} // factory/* — allowed
+        // cas-dc08: a factory branch is allowed only when the one ownership
+        // resolver calls it this worker's own; a sibling's or an unrecognized
+        // suffix warns like any other wrong branch.
+        Some(ref branch) => {
+            let registered = crate::store::find_cas_root_ignoring_env(cwd_path)
+                .map(|root| crate::factory_isolation::registered_factory_names(&root))
+                .unwrap_or_default();
+            use crate::factory_isolation::BranchOwnership;
+            let owner = match crate::factory_isolation::branch_ownership(&worker_name, Some(branch), &registered) {
+                ownership if ownership.is_own() => None,
+                BranchOwnership::Sibling { owner } => Some(format!("worker {owner}'s branch")),
+                _ => Some("not one of your factory branches".to_string()),
+            };
+            if let Some(owner) = owner {
+                let switch = switch.unwrap_or_else(|refusal| refusal);
+                let branch = crate::worktree::GitOperations::visible_git_label(branch);
+                warnings.push(format!(
+                    "⚠️  WRONG BRANCH: HEAD is on '{branch}' ({owner}) — DO NOT commit here!\n   \
+                    Workers may only commit on factory/{worker_name} or \
+                    factory/{worker_name}-<task-id>. Switch first:\n   {switch}"
+                ));
+            }
+        }
     }
 
     if warnings.is_empty() {
@@ -3068,21 +3090,25 @@ mod worker_worktree_assertion_tests {
         );
     }
 
-    /// CWD inside worktree on factory branch → no warning
+    /// CWD inside worktree on the worker's own factory branch → no warning;
+    /// a factory branch the worker does not own warns (cas-dc08).
     #[test]
     fn factory_branch_is_clean() {
         let tmp = make_git_repo();
         let p = tmp.path();
-
-        std::process::Command::new("git")
-            .args(["checkout", "-b", "factory/test-w"])
-            .current_dir(p)
-            .output()
-            .unwrap();
+        let checkout = |branch: &str| {
+            std::process::Command::new("git")
+                .args(["checkout", "-b", branch])
+                .current_dir(p)
+                .output()
+                .unwrap();
+        };
+        checkout("factory/test-w");
 
         let ps = p.to_string_lossy().to_string();
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_AGENT_NAME", Some("test-w")),
             ("CAS_CLONE_PATH", Some(&ps)),
         ]);
 
@@ -3092,6 +3118,12 @@ mod worker_worktree_assertion_tests {
             result, original_ctx,
             "no warning on factory branch, got: {result}"
         );
+
+        for foreign in ["factory/test-w-scratch", "factory/other-worker"] {
+            checkout(foreign);
+            let result = build_worker_worktree_assertion(&ps, original_ctx.clone());
+            assert!(result.starts_with("<worker-worktree-alert"), "{foreign}: {result}");
+        }
     }
 
     /// Existing context is preserved (warning is prepended, not replacing)

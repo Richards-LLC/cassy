@@ -10,17 +10,25 @@ describe("supervisor slash commands", () => {
     }
     expect(commandsForHarness("grok")).toEqual([]);
   });
-  it("routes /mcp to Reload Cassy only for Claude and names unsupported harnesses", async () => {
-    for (const harness of ["claude", "codex", "grok", "other", undefined]) {
+  it("routes /mcp to Reload Cassy for Claude, confirms Codex's supervisor restart, and names unsupported harnesses", async () => {
+    for (const [harness, typed] of [["claude", " /mcp \n"], ["claude", "/reload-cassy"], ["codex", "/mcp"], ["codex", " /reload-cassy\n"], ["grok", "/mcp"], ["other", "/mcp"], [undefined, "/mcp"]] as const) {
       document.body.innerHTML = '<section><textarea></textarea></section>';
       const input = document.querySelector("textarea")!;
       const run = vi.fn().mockResolvedValue(undefined);
       const commands = new SlashCommands(input, { harness: () => harness, unavailable: () => undefined, label: () => "test supervisor", run });
-      input.value = " /mcp \n";
+      input.value = typed;
       expect(commands.submit()).toBe(true);
       if (harness === "claude") {
         await Promise.resolve();
         expect(run).toHaveBeenCalledWith("mcp", false);
+        await vi.waitFor(() => expect(input.value).toBe(""));
+      } else if (harness === "codex") {
+        // cas-8c4f: a Codex reload restarts the supervisor, so it runs only after confirmation.
+        expect(run).not.toHaveBeenCalled();
+        document.querySelector<HTMLButtonElement>('[data-command-confirm="mcp"]')!.click();
+        await Promise.resolve();
+        expect(run).toHaveBeenCalledWith("mcp", true);
+        await vi.waitFor(() => expect(input.value).toBe(""));
       } else {
         expect(run).not.toHaveBeenCalled();
         if (harness) expect(document.querySelector('[role="status"]')?.textContent).toContain(harness);
@@ -28,6 +36,16 @@ describe("supervisor slash commands", () => {
       }
       commands.dispose();
     }
+    // An alias needs its slash: "\\reload-cassy" is ordinary chat text.
+    document.body.innerHTML = '<section><textarea></textarea></section>';
+    const input = document.querySelector("textarea")!;
+    const run = vi.fn().mockResolvedValue(undefined);
+    const commands = new SlashCommands(input, { harness: () => "claude", unavailable: () => undefined, label: () => "test supervisor", run });
+    input.value = "\\reload-cassy";
+    expect(commands.submit()).toBe(false);
+    await Promise.resolve();
+    expect(run).not.toHaveBeenCalled();
+    commands.dispose();
   });
   it("filters command suggestions but submits only an exact supported command", async () => {
     document.body.innerHTML = '<section><textarea aria-label="Message"></textarea></section>';
@@ -124,6 +142,10 @@ describe("supervisor slash commands", () => {
     expect(row.querySelector("p")?.textContent).toBe(detail);
     expect(row.querySelector("unsafe")).toBeNull();
     expect(row.querySelector("pre")?.textContent).toBe("<unsafe>");
+    // cas-8c4f: Reload Cassy animates only while it waits for a quiet moment or its proof.
+    for (const [phase, waiting] of [["queued", true], ["submitted", true], ["observed", false], ["unconfirmed", false]] as const) {
+      expect(Boolean(commandReceiptNode({ client_ref: "r", command: "mcp", phase, detail: "", output: "", interactive: false }).querySelector(".reload-wait"))).toBe(waiting);
+    }
     const send = vi.fn().mockReturnValue(true);
     const session = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {} });
     await session.run("usage", false);
@@ -241,6 +263,28 @@ describe("supervisor command receipts", () => {
     updateCommandReceipts(parent, [{ ...receipt, output: "Usage updated" }], () => {});
     expect(parent.querySelector("details")!.open).toBe(true);
     expect(document.activeElement).toBe(parent.querySelector("summary"));
+  });
+
+  it("keeps a held Reload Cassy's own status through a reconnecting status read (cas-6b21)", async () => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn().mockReturnValue(true);
+      const session = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {} });
+      await session.run("mcp", true);
+      const ref = [...session.receipts.keys()][0];
+      const reconnecting = "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again.";
+      for (const phase of ["queued", "submitted"] as const) {
+        const held = { client_ref: ref, command: "mcp" as const, phase, detail: `daemon ${phase}`, output: "", interactive: false };
+        session.receive(held);
+        expect(session.reject(ref, reconnecting, true)).toBe(true);
+        expect(session.receipts.get(ref)).toEqual(held);
+      }
+      const reads = send.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(send.mock.calls.length).toBeGreaterThan(reads);
+      session.receive({ client_ref: ref, command: "mcp", phase: "observed", detail: "Cassy reloaded", output: "", interactive: false });
+      expect(session.receipts.get(ref)?.phase).toBe("observed");
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
   });
 
   it("settles a recent Exit after disconnect or late status without claiming other commands completed", async () => {

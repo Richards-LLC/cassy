@@ -625,6 +625,13 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub work_target_pinned: bool,
 
+    /// Targets this task was bound to before its current one, oldest first.
+    /// The task store appends on every retarget, so no caller can skip it.
+    /// History reachable from a prior release-train or epic target is gated
+    /// upstream, not another task's foreign work (GH #1442, cas-faa9).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prior_work_targets: Vec<WorkTarget>,
+
     /// cas-3b42: a live supervisor cleared this no-code task's code target
     /// (`proof_scope_fix target_repo=""`). Only then is the task's work
     /// target absent by review rather than by default, so only commits that
@@ -877,6 +884,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     work_target_pinned: bool,
     #[serde(default)]
+    prior_work_targets: Vec<WorkTarget>,
+    #[serde(default)]
     work_target_cleared: bool,
     #[serde(default)]
     pre_close_hook: Option<PreCloseHookEvidence>,
@@ -943,6 +952,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             integration_batch: value.integration_batch,
             work_target: value.work_target,
             work_target_pinned: value.work_target_pinned,
+            prior_work_targets: value.prior_work_targets,
             work_target_cleared: value.work_target_cleared,
             pre_close_hook: value.pre_close_hook,
             negative_result: value.negative_result,
@@ -1013,6 +1023,21 @@ pub struct TaskBlockedHold {
     pub when: DateTime<Utc>,
 }
 
+/// GH #2278: a supervisor's hold on one parked delivery for an external
+/// review. It names who owes the next step and lapses at `until` or when the
+/// delivery is re-parked at another `anchor`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskMergeHold {
+    pub owner: String,
+    pub reason: String,
+    pub until: DateTime<Utc>,
+    /// The supervisor that recorded the hold.
+    pub supervisor: String,
+    /// The parked delivery anchor the hold covers.
+    pub anchor: String,
+}
+
 /// Supervisor ownership of an unchanged worker blocker. The ask is a bounded
 /// fingerprint, not a second copy of the conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1047,6 +1072,7 @@ const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
     "decisions",
     "next_step",
     "blocked_hold",
+    "merge_hold",
     "answered_blocker",
     "blocker_ask",
     "qa_impact",
@@ -1249,6 +1275,20 @@ fn validate_task_execution_state_field(field: &str, value: &Value) -> Result<(),
             validate_state_string("blocked_hold.reason", &Value::String(hold.reason))?;
             validate_state_string("blocked_hold.who", &Value::String(hold.who))
         }
+        "merge_hold" => {
+            let hold: TaskMergeHold = serde_json::from_value(value.clone())
+                .map_err(|error| format!("invalid merge_hold: {error}"))?;
+            if !(hold.anchor.len() == 40 && hold.anchor.bytes().all(|byte| byte.is_ascii_hexdigit())) {
+                return Err("merge_hold requires a full anchor".into());
+            }
+            for (field, text) in [("owner", hold.owner), ("reason", hold.reason), ("supervisor", hold.supervisor)] {
+                if text.trim().is_empty() {
+                    return Err(format!("merge_hold requires {field}"));
+                }
+                validate_state_string(field, &Value::String(text))?;
+            }
+            Ok(())
+        }
         _ => unreachable!("field checked against TASK_EXECUTION_STATE_FIELDS"),
     }
 }
@@ -1283,6 +1323,17 @@ fn validate_state_string_array(field: &str, value: &Value) -> Result<(), String>
 }
 
 impl TaskDeliverables {
+    /// Record `previous` as a prior target when this task now targets
+    /// something else. Keeps order, never duplicates, ignores no-ops.
+    pub fn record_prior_work_target(&mut self, previous: Option<&WorkTarget>) {
+        let Some(previous) = previous else { return };
+        if self.work_target.as_ref() != Some(previous)
+            && !self.prior_work_targets.contains(previous)
+        {
+            self.prior_work_targets.push(previous.clone());
+        }
+    }
+
     /// cas-e33f: remember the branch of an agent handing this task off.
     /// Blank names and repeats are ignored so repeated transfers between the
     /// same agents do not grow the list.
@@ -1906,6 +1957,16 @@ mod tests {
         let refused = merge_task_execution_state_patch(&state,
             &serde_json::json!({"close_refusal": refusal})).unwrap();
         assert_eq!(refused["close_refusal"]["code"], "phase_outcome_gate");
+        // GH #2278: a stored merge hold carries its stamped supervisor and full anchor.
+        let merge_hold = serde_json::json!({"owner": "Ben", "reason": "GitHub review",
+            "until": "2026-11-22T14:00:00Z", "supervisor": "lead", "anchor": "a".repeat(40)});
+        assert!(merge_task_execution_state_patch(&state, &serde_json::json!({"merge_hold": merge_hold})).is_ok());
+        for (field, value) in [("anchor", serde_json::json!("abc")), ("supervisor", serde_json::json!(" ")),
+            ("owner", serde_json::json!("")), ("extra", serde_json::json!(1))] {
+            let mut hold = merge_hold.clone();
+            hold[field] = value;
+            assert!(merge_task_execution_state_patch(&state, &serde_json::json!({"merge_hold": hold})).is_err(), "{field}");
+        }
         assert_eq!(merge_task_execution_state_patch(&refused,
             &serde_json::json!({"close_refusal": null})).unwrap(), state);
         for (field, invalid) in [
@@ -2189,10 +2250,19 @@ mod tests {
         deliverables.record_handoff_branch("factory/worker");
         deliverables.record_handoff_branch("  ");
         assert_eq!(deliverables.handoff_branches, vec!["factory/worker"]);
+        // cas-faa9: prior targets follow the same record-once rule and skip
+        // the current target.
+        let train = WorkTarget { repo_selector: "project:p".into(), target_branch: "epic/a".into() };
+        deliverables.work_target = Some(WorkTarget { target_branch: "epic/b".into(), ..train.clone() });
+        for previous in [Some(&train), Some(&train), deliverables.work_target.clone().as_ref(), None] {
+            deliverables.record_prior_work_target(previous);
+        }
+        assert_eq!(deliverables.prior_work_targets, vec![train.clone()]);
 
         let encoded = serde_json::to_value(&deliverables).unwrap();
         let decoded: TaskDeliverables = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded.handoff_branches, vec!["factory/worker"]);
+        assert_eq!(decoded.prior_work_targets, vec![train]);
         let legacy: TaskDeliverables = serde_json::from_str("{}").unwrap();
         assert!(legacy.handoff_branches.is_empty());
         assert!(

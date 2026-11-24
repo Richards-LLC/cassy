@@ -815,8 +815,8 @@ pub struct FactoryRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub clear: Option<bool>,
 
-    /// Branch/ref target for sync operations
-    #[schemars(description = "Target branch/ref for sync actions (e.g., 'epic/my-epic')")]
+    /// Branch/ref target for sync, or a read-only task-target assertion at spawn.
+    #[schemars(description = "Target branch/ref for sync. spawn_workers with task_id: expected effective task target; refuses disagreement before enqueue, without retargeting. origin/<branch> and refs/heads/<branch> are accepted aliases. Persist target changes with task action=update target_branch= first; spawn_brief is not target authority.")]
     #[serde(default)]
     pub branch: Option<String>,
 

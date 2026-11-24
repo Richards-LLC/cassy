@@ -29,9 +29,10 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
         let (record, path) = crate::artifacts::proof::fetch_task(&core.cas_root, &task.id, &artifact.id)
             .map_err(|error| format!("Verifier artifact {} unavailable: {error:#}", artifact.id))?;
         artifacts.push(serde_json::json!({
-            "artifact_id":record.id, "path":path, "sha256":record.sha256,
+            "task_id":record.task_id, "artifact_id":record.id, "path":path, "sha256":record.sha256,
         }));
     }
+    artifacts.extend(materialize_parent_plan_artifacts(&core.cas_root, task)?);
     let inherited = candidate_for_dispatch(&core.cas_root, dispatch)?
         .and_then(|candidate| candidate.inherited_supervisor_call);
     let supervisor_calls = core.open_verification_store().map_err(|e| e.to_string())?
@@ -650,7 +651,11 @@ fn review(
     // cas-2b80b: keep what the harness printed, so a refused response can be
     // diagnosed from the dispatch audit instead of rerunning the review.
     std::fs::write(&stdout_log, &result.stdout).map_err(|e| e.to_string())?;
-    if !result.status.success() {
+    // GH #2141: a provider safety refusal is this dispatch's infrastructure
+    // ERROR, never a code verdict; the refused output stays in the logs.
+    let refused = !result.status.success()
+        && (provider_policy_refusal(&result.stderr) || provider_policy_refusal(&result.stdout));
+    if !result.status.success() && !refused {
         return Err(format!(
             "harness exited {}; stderr tail ({}):\n{}",
             result.status,
@@ -658,7 +663,12 @@ fn review(
             tail(&result.stderr),
         ));
     }
-    let bytes = if output.exists() {
+    let bytes = if refused {
+        serde_json::json!({"status": "error", "summary": format!(
+            "{PROVIDER_POLICY_CODE}: the provider's safety filter refused this review before any verdict; refused output kept at {}",
+            stderr_log.display(),
+        )}).to_string().into_bytes()
+    } else if output.exists() {
         std::fs::read(output).map_err(|e| e.to_string())?
     } else {
         result.stdout
@@ -688,10 +698,14 @@ fn review(
         return Err("invalid terminal verifier status".into());
     }
     std::fs::write(output, &bytes).map_err(|e| e.to_string())?;
-    let held = (request.status != "approved").then(|| format!(
-        "Automatic verifier recorded {}: {}. Findings: {}. The close stays held; answer or resolve this exact verdict on dispatch {}.",
-        request.status, request.summary, request.issues.as_deref().unwrap_or("[]"), dispatch.id,
-    ));
+    let held = (request.status != "approved").then(|| if refused {
+        format!("Automatic verifier recorded an infrastructure ERROR, not a code verdict: {}. {}", request.summary, direct_verdict(dispatch))
+    } else {
+        format!(
+            "Automatic verifier recorded {}: {}. Findings: {}. The close stays held; answer or resolve this exact verdict on dispatch {}.",
+            request.status, request.summary, request.issues.as_deref().unwrap_or("[]"), dispatch.id,
+        )
+    });
     let verifier = CasCore::with_daemon(core.cas_root.clone(), None, core.daemon.clone());
     verifier
         .bind_agent_identity(
@@ -714,12 +728,24 @@ fn review(
     // A candidate verdict continues or holds its merge and notifies there.
     // A close dispatch's approval resumes its close; anything else needs
     // the owner, who would otherwise never see this daemon-recorded verdict.
+    // A refusal holds either kind until the supervisor records the verdict.
     if let Some(held) = held
-        && candidate_for_dispatch(&core.cas_root, dispatch)?.is_none()
+        && (refused || candidate_for_dispatch(&core.cas_root, dispatch)?.is_none())
     {
         attention(core, dispatch, &held)?;
     }
     Ok(())
+}
+
+/// The provider's safety filter refused the review prompt itself (GH #2141,
+/// Codex `exec`). It is the provider's wording, not a Cassy code, and only
+/// decides that the run is infrastructure; it never becomes a code verdict.
+const PROVIDER_POLICY_REFUSAL: &str = "flagged for possible cybersecurity risk";
+const PROVIDER_POLICY_CODE: &str = "verifier_provider_policy";
+
+fn provider_policy_refusal(output: &[u8]) -> bool {
+    String::from_utf8_lossy(output).lines()
+        .any(|line| line.trim_start().starts_with("ERROR:") && line.contains(PROVIDER_POLICY_REFUSAL))
 }
 
 /// The final eight lines within a 2 KiB window, redacted. The full output
@@ -804,6 +830,7 @@ pub(super) async fn approved(
         )
     })
     .await;
+    let landed = matches!(&result, Ok(result) if result.is_error != Some(true));
     let detail = match result {
         Ok(result) if result.is_error != Some(true) => {
             "Approved; the merge continued automatically.".to_string()
@@ -817,8 +844,25 @@ pub(super) async fn approved(
             return Ok(detail);
         }
     };
-    // A readable receipt without a prompt: approval must not start another
-    // supervisor turn merely to acknowledge an automatic continuation.
+    // GH #2365: this merge runs from the verdict, inside no supervisor tool
+    // call, so no merge receipt reports it. Its landing opens the supervisor's
+    // next step (promotion, notes, dependents): one wake per dispatch.
+    if landed {
+        let status = core.open_task_store().ok().and_then(|tasks| tasks.get(&dispatch.task_id).ok())
+            .map_or_else(|| "unknown".to_string(), |task| task.status.to_string());
+        let woke = (|| -> Result<(), String> {
+            let rows = core.open_agent_store().map_err(|e| e.to_string())?.list(None).map_err(|e| e.to_string())?;
+            let recipient = crate::supervisor_notices::resolve(&rows, Some(&dispatch.owner_agent_id), None);
+            crate::supervisor_notices::enqueue(&core.cas_root, &recipient, "merge_outcome",
+                &format!("Task {} dispatch {}: approved; the merge landed automatically and the task status is now `{status}`.",
+                    dispatch.task_id, dispatch.id),
+                &format!("automatic-approval:{}", dispatch.id)).map_err(|e| e.to_string())
+        })();
+        if let Err(error) = woke {
+            tracing::warn!(task = %dispatch.task_id, %error, "automatic merge landed; supervisor wake not recorded");
+        }
+    }
+    // A readable receipt without a prompt; a landed merge already woke the supervisor above.
     let queue = crate::store::open_supervisor_queue_store(&core.cas_root).map_err(fail)?;
     let notification = queue.notify_idempotent(&dispatch.owner_agent_id, "verification_approved",
         &serde_json::json!({"task_id":dispatch.task_id,"dispatch_id":dispatch.id,"detail":detail}).to_string(),
@@ -842,7 +886,14 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let bytes = b"peer design evidence\n";
-        for mode in ["good", "corrupt", "missing"] {
+        for (parent_scope, mode) in [
+            (false, "good"), (false, "corrupt"), (false, "missing"),
+            (true, "good"), (true, "corrupt"), (true, "missing"),
+            (true, "revoked"), (true, "foreign-artifact"),
+            (true, "foreign-project"), (true, "id-only"), (true, "unreferenced"),
+            // GH #2397 (Nov 23): the epic's prose names an artifact another in-scope task published.
+            (true, "other-task"),
+        ] {
             let server = MockServer::start().await;
             let (_dir, core, _owner, mut rows) = contention_fixture(&["cas-f6ca-fixture"]);
             env.set("CAS_ROOT", &core.cas_root);
@@ -851,20 +902,65 @@ mod tests {
                 "endpoint":server.uri(), "token":"fixture-token"
             }).to_string()).unwrap();
             let (mut task, dispatch) = rows.pop().unwrap();
+            let publisher_dir = tempfile::tempdir().unwrap();
+            let publisher = crate::store::init_cas_dir(publisher_dir.path()).unwrap();
+            let mut parent = Task::new("cas-peer-parent".into(), "Peer epic plan".into());
+            parent.task_type = cas_types::TaskType::Epic;
+            parent.design = if mode == "unreferenced" { String::new() } else {
+                format!("Plan: {}", if mode == "id-only" { "art-id-only" } else { "art-peer-plan" })
+            };
+            // Keep the identity with which contention_fixture created the
+            // child; changing the receiver's pin afterwards makes it foreign.
+            let project = crate::cloud::resolve_canonical_id(&core.cas_root).unwrap();
+            parent.origin_project = Some(if mode == "foreign-project" { "foreign".into() } else { project });
+            let mut sibling = Task::new("cas-peer-sibling".into(), "Another task's design brief".into());
+            sibling.origin_project = parent.origin_project.clone();
+            let owner = if mode == "other-task" { &sibling } else { &parent };
             let record = cas_store::PublishedArtifact {
-                id:"art-peer-plan".into(), task_id:task.id.clone(), name:"decision-brief.md".into(),
+                id:"art-peer-plan".into(), task_id:if parent_scope { owner.id.clone() } else { task.id.clone() }, name:"decision-brief.md".into(),
                 mime:"text/markdown".into(), size_bytes:bytes.len() as u64,
                 sha256:format!("{:x}", Sha256::digest(bytes)),
                 cloud_artifact_id:Some("cloud-peer-plan".into()), status:"committed".into(),
                 cloud_url:None, slack_permalink:None, created_at:"2026-11-21T15:00:00Z".into(), revocation:None,
             };
-            let note = format!("ARTIFACT_PROOF: {}", serde_json::to_string(&record).unwrap());
-            core.open_task_store().unwrap().append_trusted_note(&task.id, &note).unwrap();
+            if parent_scope {
+                // Only publication notes cross machines: the reviewer never
+                // shares the publisher's artifact database or cached bytes.
+                let publishing_tasks = crate::store::open_task_store(&publisher).unwrap();
+                publishing_tasks.add(owner).unwrap();
+                let publishing_artifacts = cas_store::SqliteArtifactStore::open(&publisher).unwrap();
+                publishing_artifacts.record_local(&cas_store::NewArtifact {
+                    id:record.id.clone(), task_id:record.task_id.clone(), name:record.name.clone(),
+                    mime:record.mime.clone(), size_bytes:record.size_bytes, sha256:record.sha256.clone(),
+                }).unwrap();
+                publishing_artifacts.mark_uploaded(&record.id, record.cloud_artifact_id.as_deref().unwrap()).unwrap();
+                publishing_artifacts.mark_committed(&record.id, None).unwrap();
+                crate::artifacts::proof::record_published(&publisher, &record).unwrap();
+                let mut synced = publishing_tasks.get(&owner.id).unwrap();
+                let mut notes = std::mem::take(&mut synced.notes);
+                if mode == "foreign-artifact" {
+                    notes = notes.replace(&parent.id, "cas-unrelated-owner");
+                }
+                let receiving_tasks = core.open_task_store().unwrap();
+                receiving_tasks.add(&synced).unwrap();
+                receiving_tasks.append_trusted_note(&owner.id, &notes).unwrap();
+                if mode == "other-task" {
+                    // The epic only mentions the sibling's artifact in an appended note.
+                    receiving_tasks.add(&parent).unwrap();
+                    receiving_tasks.append_trusted_note(&parent.id, "Design sign-off cites art-peer-plan from the sibling task").unwrap();
+                }
+                receiving_tasks.add_dependency(&cas_types::Dependency::new(
+                    task.id.clone(), parent.id.clone(), cas_types::DependencyType::ParentChild,
+                )).unwrap();
+            } else {
+                let note = format!("ARTIFACT_PROOF: {}", serde_json::to_string(&record).unwrap());
+                core.open_task_store().unwrap().append_trusted_note(&task.id, &note).unwrap();
+            }
             task = core.open_task_store().unwrap().get(&task.id).unwrap();
             let expected = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(
-                &core.cas_root, &task).unwrap().join("art-peer-plan-decision-brief.md");
+                &core.cas_root, if parent_scope { owner } else { &task }).unwrap().join("art-peer-plan-decision-brief.md");
             assert!(!expected.exists());
-            let view = if mode == "missing" { ResponseTemplate::new(404) } else {
+            let view = if mode == "missing" { ResponseTemplate::new(404) } else if mode == "revoked" { ResponseTemplate::new(410) } else {
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "artifact_id":"cloud-peer-plan", "url":format!("{}/blob",server.uri()), "size_bytes":bytes.len()
                 }))
@@ -887,17 +983,53 @@ mod tests {
                 }).unwrap().unwrap();
                 handle.join().unwrap();
                 let prepared = received.try_recv().ok();
-                if mode == "good" {
-                    assert_eq!(prepared.unwrap().unwrap(), bytes, "attempt {attempt}");
+                if matches!(mode, "good" | "other-task") {
+                    assert!(prepared.as_ref().is_some_and(|result| result.is_ok()),
+                        "parent={parent_scope} attempt={attempt}: {prepared:?}; notices={:?}",
+                        crate::store::open_prompt_queue_store(&core.cas_root).unwrap().peek_all(10).unwrap());
+                    assert_eq!(prepared.unwrap().unwrap(), bytes, "parent={parent_scope} attempt {attempt}");
                     assert!(cas_store::SqliteArtifactStore::open(&core.cas_root).unwrap().get(&record.id).unwrap().is_some());
+                    let input = std::fs::read_to_string(core.cas_root.join("prompt.txt")).unwrap();
+                    let inputs: serde_json::Value = input.lines()
+                        .filter_map(|line| serde_json::from_str(line).ok())
+                        .find(|value: &serde_json::Value| value.get("artifacts").is_some()).unwrap();
+                    let reference = inputs["artifacts"].as_array().unwrap().iter()
+                        .find(|reference| reference["artifact_id"] == record.id).unwrap();
+                    assert_eq!(Path::new(reference["path"].as_str().unwrap()), expected);
+                    if parent_scope { assert_eq!(reference["task_id"], owner.id); }
                     std::fs::remove_file(&expected).unwrap();
+                    if parent_scope && attempt == 1 && mode == "good" {
+                        let before = context_digest(&core.cas_root, &task).unwrap();
+                        let mut sequence = record.clone();
+                        sequence.id = "art-peer-sequence".into();
+                        sequence.cloud_artifact_id = Some("cloud-peer-sequence".into());
+                        core.open_task_store().unwrap().append_trusted_note(&parent.id, &format!(
+                            "Sequence art-peer-sequence\nARTIFACT_PROOF: {}", serde_json::to_string(&sequence).unwrap(),
+                        )).unwrap();
+                        assert_ne!(context_digest(&core.cas_root, &task).unwrap(), before,
+                            "new referenced parent proof invalidates the candidate context");
+                    }
+                } else if mode == "unreferenced" {
+                    assert!(prepared.is_some());
+                    assert!(!expected.exists());
+                    assert!(server.received_requests().await.unwrap().is_empty());
+                } else if matches!(mode, "foreign-artifact" | "id-only") {
+                    // GH #2397: a mention no in-scope task owns is missing context, not a refusal.
+                    assert!(prepared.is_some(), "an unresolvable mention refused the merge: {mode}");
+                    assert!(!expected.exists());
+                    assert!(server.received_requests().await.unwrap().is_empty());
+                    let input = std::fs::read_to_string(core.cas_root.join("prompt.txt")).unwrap();
+                    let inputs: serde_json::Value = input.lines()
+                        .filter_map(|line| serde_json::from_str(line).ok())
+                        .find(|value: &serde_json::Value| value.get("artifacts").is_some()).unwrap();
+                    assert!(inputs["artifacts"].as_array().unwrap().iter()
+                        .any(|reference| reference["missing_context"].is_string()), "{mode}: {inputs}");
                 } else {
                     assert!(prepared.is_none(), "unverified bytes reached verifier preparation: {mode}");
                     assert!(!expected.exists());
-                    let prompts = crate::store::open_prompt_queue_store(&core.cas_root).unwrap().peek_all(10).unwrap();
-                    let body = format!("{prompts:?}");
-                    assert!(body.contains(&record.id));
-                    assert!(body.contains(if mode == "corrupt" { "artifact_checksum_mismatch" } else { "404" }));
+                    if mode == "foreign-project" {
+                        assert!(server.received_requests().await.unwrap().is_empty());
+                    }
                 }
                 assert_eq!(cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id).unwrap().state,
                     cas_types::VerificationDispatchState::Pending);
@@ -1424,6 +1556,52 @@ mod tests {
         assert_eq!(recovered.state, cas_types::VerificationDispatchState::Pending);
     }
 
+    /// GH #2141: Codex's safety filter refused a review of a credential-read
+    /// guard; the harness exited 1 and the dispatch was released with no
+    /// review. The refusal is now the dispatch's infrastructure ERROR, its
+    /// output stays on disk, and the supervisor gets the exact-dispatch route.
+    #[test]
+    fn provider_policy_refusal_is_an_infrastructure_error_with_a_supervisor_route_gh_2141() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let daemon = crate::mcp::daemon::EmbeddedDaemon::new(crate::mcp::daemon::EmbeddedDaemonConfig {
+            cas_root: root.clone(),
+            ..Default::default()
+        });
+        let core = CasCore::with_daemon(root.clone(), None, Some(std::sync::Arc::new(daemon)));
+        let owner = cas_types::Agent::new_with_role(
+            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        let task = Task::new("cas-2141-guard".into(), "Credential-read guard".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, &owner.id, &owner.id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        let directory = root.join("verification-runs").join(&dispatch.id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("verdict.json");
+        // The captured provider failure from the incident.
+        let mut refused = Command::new("sh");
+        refused.args(["-c", "echo 'ERROR: This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.' >&2; exit 1"]);
+        launch_with_preparation(&core, &task, &dispatch, output.clone(), move |_| Ok((refused, None)))
+            .unwrap().unwrap().join().unwrap();
+
+        let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().unwrap();
+        assert_eq!(verdict.status, VerificationStatus::Error);
+        assert!(verdict.summary.starts_with(PROVIDER_POLICY_CODE), "{}", verdict.summary);
+        let pending = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert_eq!(pending.state, cas_types::VerificationDispatchState::Pending);
+        assert!(std::fs::read_to_string(output.with_file_name("harness.log")).unwrap().contains(PROVIDER_POLICY_REFUSAL));
+        let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert!(prompts[0].prompt.contains(&format!("dispatch_id={}", dispatch.id)), "{:?}", prompts[0]);
+    }
+
     #[test]
     fn automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f() {
         let child = std::env::var_os("CAS_TEST_PREMERGE_ACCOUNT_CHILD").is_some();
@@ -1566,6 +1744,8 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             )
             .unwrap();
             let mut task = Task::new("cas-381f-auto".into(), "Automatic verifier fixture".into());
+            // This fixture has a local-only target and no publication remote.
+            task.delivery_mode = cas_types::DeliveryMode::LocalMerge;
             task.status = cas_types::TaskStatus::AwaitingMerge;
             task.depth = cas_types::TaskDepth::Deep;
             task.assignee = Some("worker".into());
@@ -1671,7 +1851,8 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                             .current_dir(repo)
                             .args(["merge-base", "--is-ancestor", &source, "epic/train"])
                             .status()
-                            .is_ok_and(|s| s.success()),
+                            .is_ok_and(|s| s.success())
+                            && !crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().is_empty(),
                         "target_move" => cas_store::get_latest_verification_dispatch(&root, &task.id)
                             .unwrap().is_some_and(|latest| latest.id != dispatch.id
                                 && cas_store::get_verification_for_dispatch(&root, &latest.id).unwrap()
@@ -1757,12 +1938,10 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                     )
                     .is_empty()
                 );
-                if status == "approved" {
-                    assert!(
-                        prompts.is_empty(),
-                        "approval must not wake the supervisor: {prompts:?}"
-                    );
-                }
+                // GH #2365: the landed merge opens the supervisor's next step,
+                // so it wakes it exactly once.
+                assert_eq!(prompts.len(), 1, "a landed automatic merge wakes the supervisor once: {prompts:?}");
+                assert!(prompts[0].prompt.contains(&dispatch.id), "{prompts:?}");
             } else if status == "late_error" {
                 // A late verifier error on a settled dispatch stays silent.
                 assert!(prompts.is_empty(), "no recovery notice: {prompts:?}");

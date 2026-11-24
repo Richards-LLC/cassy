@@ -7,6 +7,9 @@ mod shell_effects;
 pub(super) struct ShellReadContext {
     pub command: String,
     pub directories: Vec<Option<std::path::PathBuf>>,
+    /// Literal values the command binds to its variables (GH #2171), so a
+    /// `$VAR` operand is judged at its value rather than as a relative path.
+    pub values: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// Not a valid file name, so no real directory entry has this spelling.
@@ -474,6 +477,60 @@ fn verifier_rust_build_denial(what: &str, cas_root: Option<&Path>) -> String {
     )
 }
 
+/// cas-3751a: text guards replaced by the worker OS sandbox (capability-guard
+/// stage A). While a Claude worker runs under the generated sandbox profile in
+/// shadow mode, these only record a would-deny for the Bash tool, where the
+/// OS enforces the same boundary. Write, Edit and other harness tools run
+/// outside the sandbox, so the guards keep refusing them.
+pub(crate) const SANDBOX_SHADOWED_GUARDS: [&str; 8] =
+    ["H-11", "H-12", "H-14", "H-16", "H-22", "H-28", "H-29", "H-33"];
+
+/// The harness process's sandbox mode, set only by the Claude worker launch
+/// that applies the generated profile. A tool call cannot change it: hooks
+/// inherit the harness environment, not the sandboxed shell's.
+fn worker_sandbox_shadow(input: &HookInput, tool_name: &str) -> bool {
+    tool_name == "Bash"
+        && std::env::var("CAS_WORKER_SANDBOX").is_ok_and(|mode| mode == "shadow")
+        && crate::harness_policy::is_factory_agent(input)
+        && !crate::harness_policy::is_supervisor(input)
+}
+
+/// H-33 is shadowed only for a secret file the generated profile itself
+/// denies: one of its names, inside the worker checkout. Other protected
+/// names and paths keep the text guard.
+fn sandbox_denies_secret(path: &str) -> bool {
+    let path = Path::new(path);
+    std::env::var_os("CAS_CLONE_PATH").is_some_and(|worktree| path.starts_with(worktree))
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(cas_mux::worker_sandbox::secret_write_denied)
+}
+
+/// Record a stage-A guard's would-deny instead of refusing. Returns `true`
+/// when the refusal is shadowed and the call should proceed.
+fn shadowed_by_sandbox(input: &HookInput, tool_name: &str, cas_root: Option<&Path>, reason: &str) -> bool {
+    if !worker_sandbox_shadow(input, tool_name) {
+        return false;
+    }
+    let Some(code) = crate::gates::codes_in(reason)
+        .into_iter()
+        .find(|code| SANDBOX_SHADOWED_GUARDS.contains(code))
+    else {
+        return false;
+    };
+    if let Some(root) = cas_root {
+        let recorded = crate::store::open_event_store(root)
+            .map_err(anyhow::Error::from)
+            .and_then(|store| crate::gates::facts::record_shadowed(store.as_ref(), code, reason));
+        if let Err(error) = recorded {
+            tracing::warn!(%error, code, "could not record sandbox shadow fact");
+        }
+    }
+    tracing::info!(code, "worker sandbox shadow: text guard would deny; OS sandbox enforces");
+    true
+}
+
 /// Pure admission selection; safe before logging, DB discovery or telemetry.
 pub(crate) fn worker_cargo_request(input: &HookInput) -> bool {
     crate::harness_policy::is_worker(input)
@@ -582,13 +639,16 @@ fn handle_pre_tool_use_checked(
                     .map(|reason| crate::gates::tag("H-11", reason))
                     .or_else(|| role_env_tampering_denial(command).map(|reason| crate::gates::tag("H-12", reason)))
             })
+        && !shadowed_by_sandbox(input, tool_name, cas_root, &reason)
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
     // cas-0d4f0: no agent writes a Cassy config file directly, for every role.
     // gate[H-14 pre-tool]: Cassy config file direct write
-    if let Some(reason) = cas_config_file_write_denial(input) {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-14", reason)));
+    if let Some(reason) = cas_config_file_write_denial(input).map(|reason| crate::gates::tag("H-14", reason))
+        && !shadowed_by_sandbox(input, tool_name, cas_root, &reason)
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
 
     // cas-803f: a supervisor in a long foreground Bash call cannot hear the
@@ -632,6 +692,7 @@ fn handle_pre_tool_use_checked(
             .and_then(|tool_input| tool_input.get("command"))
             .and_then(|command| command.as_str())
             .is_some_and(worker_command_pattern_kill)
+        && !shadowed_by_sandbox(input, tool_name, cas_root, &crate::gates::tag("H-16", "FACTORY PROCESS SIGNAL"))
     {
         return Ok(HookOutput::with_pre_tool_permission(
             "deny",
@@ -859,7 +920,10 @@ fn handle_pre_tool_use_checked(
                         if let Some(root) = cas_root {
                             log_factory_git_scope_rejection(root, input, &target, cmd);
                         }
-                        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-22", deny_msg)));
+                        let reason = crate::gates::tag("H-22", deny_msg);
+                        if !shadowed_by_sandbox(input, tool_name, cas_root, &reason) {
+                            return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+                        }
                     }
                 }
             }
@@ -979,16 +1043,16 @@ fn handle_pre_tool_use_checked(
             crate::harness_policy::is_supervisor(input),
             Some(&worktree_root),
         ) {
-            return Ok(HookOutput::with_pre_tool_permission(
-                "deny",
-                &crate::gates::tag("H-28", factory_workspace_contract_denial(
-                    input,
-                    &violation,
-                    artifacts_root.as_deref(),
-                    None,
-                    Some(&worktree_root),
-                )),
+            let reason = crate::gates::tag("H-28", factory_workspace_contract_denial(
+                input,
+                &violation,
+                artifacts_root.as_deref(),
+                None,
+                Some(&worktree_root),
             ));
+            if !shadowed_by_sandbox(input, tool_name, None, &reason) {
+                return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+            }
         }
     }
 
@@ -1091,18 +1155,18 @@ fn handle_pre_tool_use_checked(
             }
             FactoryWriteDecision::Denied(violation) => {
                 log_factory_workspace_rejection(cas_root, input, &violation);
-                return Ok(HookOutput::with_pre_tool_permission(
-                    "deny",
-                    &crate::gates::tag("H-29", factory_workspace_contract_denial_with_roots(
-                        input,
-                        &violation,
-                        artifacts_root.as_deref(),
-                        scratch_root.as_deref(),
-                        Some(&worktree_root),
-                        &write_policy,
-                        &write_task_ids,
-                    )),
+                let reason = crate::gates::tag("H-29", factory_workspace_contract_denial_with_roots(
+                    input,
+                    &violation,
+                    artifacts_root.as_deref(),
+                    scratch_root.as_deref(),
+                    Some(&worktree_root),
+                    &write_policy,
+                    &write_task_ids,
                 ));
+                if !shadowed_by_sandbox(input, tool_name, Some(cas_root), &reason) {
+                    return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+                }
             }
         }
     }
@@ -1469,10 +1533,10 @@ fn handle_pre_tool_use_checked(
             // Block access to protected files (e.g., .env files)
             for pattern in &protection.files {
                 if path.ends_with(pattern) || path.contains(&format!("/{pattern}")) {
-                    return Ok(HookOutput::with_pre_tool_permission(
-                        "deny",
-                        &crate::gates::tag("H-33", format!("Protected file: {pattern} files may contain secrets")),
-                    ));
+                    let reason = crate::gates::tag("H-33", format!("Protected file: {pattern} files may contain secrets"));
+                    if !(sandbox_denies_secret(path) && shadowed_by_sandbox(input, tool_name, Some(cas_root), &reason)) {
+                        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+                    }
                 }
             }
 
@@ -1482,10 +1546,10 @@ fn handle_pre_tool_use_checked(
             }
             for pattern in &protection.patterns {
                 if path.ends_with(pattern) || path.contains(pattern) {
-                    return Ok(HookOutput::with_pre_tool_permission(
-                        "deny",
-                        &crate::gates::tag("H-33", "Protected file: may contain credentials or private keys"),
-                    ));
+                    let reason = crate::gates::tag("H-33", "Protected file: may contain credentials or private keys");
+                    if !(sandbox_denies_secret(path) && shadowed_by_sandbox(input, tool_name, Some(cas_root), &reason)) {
+                        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+                    }
                 }
             }
         }
@@ -3608,13 +3672,31 @@ fn check_worker_git_commit_scope_at_target(
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
     {
-        match crate::factory_isolation::classify_worker_binding(&registered_name, Some(&branch)) {
+        // cas-ea31: allow/deny is the shared syntactic rule; the checkout's
+        // own registry only names a real owner, never one read off the branch.
+        match crate::factory_isolation::classify_worker_binding_at(
+            &registered_name,
+            Some(&branch),
+            std::path::Path::new(&cwd),
+        ) {
             crate::factory_isolation::WorkerBinding::Own => {}
             crate::factory_isolation::WorkerBinding::Sibling { owner } => {
+                // cas-ea31 (takeover case 1): inside the worker's own registered
+                // checkout the refusal carries the admitted way back.
+                let recovery = is_isolated.then(|| takeover_patch(&cwd, &registered_name));
                 return Some(crate::factory_isolation::sibling_misbinding_message(
                     &registered_name,
                     &owner,
+                    &branch,
                     &cwd,
+                    recovery.as_ref(),
+                ));
+            }
+            crate::factory_isolation::WorkerBinding::Unowned => {
+                return Some(crate::factory_isolation::branch_not_owned_message(
+                    &registered_name,
+                    &branch,
+                    &takeover_patch(&cwd, &registered_name),
                 ));
             }
             crate::factory_isolation::WorkerBinding::Other if !is_isolated => {
@@ -3638,6 +3720,33 @@ fn check_worker_git_commit_scope_at_target(
     }
 
     None
+}
+
+/// Where a recovery refusal tells the worker to save its edits: the project's
+/// artifact root, which the workspace guard admits; else the checkout itself,
+/// where `git restore` leaves the untracked patch alone.
+fn takeover_patch(cwd: &str, worker: &str) -> crate::factory_isolation::TakeoverPatch {
+    let dir = crate::store::find_cas_root_ignoring_env(std::path::Path::new(cwd))
+        .ok()
+        .map(|root| {
+            let configured = crate::config::Config::load(&root)
+                .ok()
+                .and_then(|config| config.factory().artifacts_root.clone());
+            crate::config::resolved_factory_artifact_paths(&root, configured.as_deref()).project_root
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let quote = |path: &std::path::Path| {
+        let path = path.display().to_string();
+        if path.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+@".contains(c)) {
+            path
+        } else {
+            format!("'{}'", path.replace('\'', "'\\''"))
+        }
+    };
+    crate::factory_isolation::TakeoverPatch {
+        file: quote(&dir.join(format!("takeover-{worker}.patch"))),
+        dir: quote(&dir),
+    }
 }
 
 /// Filesystem tool families auto-approved for factory agents (supervisor and
@@ -4782,7 +4891,7 @@ fn is_shell_variable_name(name: &str) -> bool {
 /// The bounded Cartesian product prevents a crafted command from making the
 /// hook allocate without limit; retaining the original word on overflow keeps
 /// the containment check fail-closed.
-fn expand_factory_shell_word(
+pub(super) fn expand_factory_shell_word(
     word: &str,
     values: &std::collections::HashMap<String, Vec<String>>,
 ) -> Vec<String> {
@@ -9418,6 +9527,43 @@ mod workspace_contract_tests {
         }
     }
 
+    /// cas-3751a: under the worker OS sandbox (shadow mode) a stage-A guard
+    /// lets a worker's Bash call through and counts the would-deny, because the
+    /// OS enforces the same write boundary. Harness file tools run outside the
+    /// sandbox, so the same write through `Write` is still refused, and a
+    /// worker without the sandbox marker is refused as before.
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_shadow_logs_stage_a_denials_for_bash_only_cas_3751a() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        let project = tempfile::tempdir().unwrap();
+        env.set("CAS_CLONE_PATH", project.path());
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("p");
+        let bash = bash_input(&format!("touch {}", target.display()), project.path());
+        let write = HookInput {
+            tool_name: Some("Write".to_string()),
+            tool_input: Some(serde_json::json!({ "file_path": target, "content": "x" })),
+            ..bash_input("", project.path())
+        };
+        let decide = |input: &HookInput| {
+            let output = handle_pre_tool_use_inner(input, Some(&root), None, project.path()).unwrap();
+            crate::gates::facts::hook_denial(&output).map(crate::gates::codes_in)
+        };
+
+        assert_eq!(decide(&bash), Some(vec!["H-29"]), "unsandboxed worker keeps the guard");
+        env.set("CAS_WORKER_SANDBOX", "shadow");
+        assert_eq!(decide(&bash), None, "sandboxed Bash is shadowed");
+        assert_eq!(decide(&write), Some(vec!["H-29"]), "harness Write is not sandboxed");
+
+        let store = crate::store::open_event_store(&root).unwrap();
+        let counts = crate::gates::facts::summarize(store.as_ref(), chrono::Utc::now() - chrono::Duration::hours(1)).unwrap();
+        assert_eq!(counts.get("H-29").map(|count| count.shadowed), Some(1));
+    }
+
     #[test]
     fn cas_3147_heredoc_expansions_obey_workspace_contract() {
         let mut env = TestEnvGuard::temp_home();
@@ -12484,8 +12630,10 @@ mod worker_commit_guard_tests {
         let cwd = repo.path().to_str().unwrap();
         assert!(std::process::Command::new("git").args(["switch", "-c", "factory/worker-staging"])
             .current_dir(repo.path()).output().unwrap().status.success());
+        let home = tempfile::tempdir().unwrap();
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_CLONE_PATH", Some(cwd)), ("CAS_AGENT_NAME", Some("worker")),
+            ("HOME", home.path().to_str()),
         ]);
         for command in ["git cherry-pick --abort", "git merge --abort", "git rebase --abort", "git reset --merge", "git switch main", "git switch -C factory/worker"] {
             assert!(check_worker_git_commit_scope_for_command(cwd, command).is_none(), "{command}");
@@ -12498,6 +12646,57 @@ mod worker_commit_guard_tests {
         assert!(check_worker_git_commit_scope_for_command(cwd, "git cherry-pick HEAD").is_some());
         assert!(check_worker_git_commit_scope_for_command(cwd, "git reset --hard").is_some());
         assert!(check_worker_git_commit_scope_for_command(cwd, "git switch -C factory/sibling").is_some());
+        // cas-ea31 / cas-7e76a: no worker named worker-staging exists, so the
+        // refusal must not invent one, and every way out it prints must pass.
+        let refused = check_worker_git_commit_scope_for_command(cwd, "git commit -m wip")
+            .expect("an unowned suffix branch is not committable");
+        assert!(refused.starts_with("WORKER_BRANCH_NOT_OWNED"), "{refused}");
+        let remedies: Vec<&str> = refused.lines().map(str::trim)
+            .filter(|line| line.starts_with("git ")).collect();
+        for remedy in ["git restore --staged --worktree .", "git switch factory/worker"] {
+            assert!(remedies.contains(&remedy), "{refused}");
+        }
+        assert!(remedies.iter().any(|line| line.starts_with("git diff --binary HEAD > ")), "{refused}");
+        for remedy in remedies {
+            assert!(check_worker_git_commit_scope_for_command(cwd, remedy).is_none(), "{remedy}");
+        }
+
+        // Takeover case 1 with a registered sibling (cas-7e76a): the refusal
+        // names the real owner, and running its printed steps in order keeps
+        // the staged and unstaged edits and returns to the worker's branch.
+        let root = crate::store::init_cas_dir(repo.path()).unwrap();
+        crate::store::open_agent_store(&root).unwrap().register(&cas_types::Agent::new_with_role(
+            "sibling-id".into(), "sibling".into(), cas_types::AgentRole::Worker,
+        )).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["switch", "-C", "factory/worker", "main"]);
+        git(&["switch", "-c", "factory/sibling"]);
+        // Binary contents (NUL bytes) must survive too: a plain diff drops them.
+        let (staged, unstaged) = (b"cas-ea31\0staged\xff".as_slice(), b"cas-ea31\0unstaged\x01".as_slice());
+        std::fs::write(repo.path().join("untracked.bin"), b"\0untracked").unwrap();
+        std::fs::write(repo.path().join("staged.txt"), staged).unwrap();
+        git(&["add", "staged.txt"]);
+        std::fs::write(repo.path().join("f.txt"), unstaged).unwrap();
+        let refused = check_worker_git_commit_scope_for_command(cwd, "git commit -m wip")
+            .expect("a registered sibling's branch is not committable");
+        assert!(refused.contains("WORKER ISOLATION MISBINDING") && refused.contains("'sibling'"), "{refused}");
+        let steps: Vec<&str> = refused.lines().map(str::trim)
+            .filter(|line| line.starts_with("git ") || line.starts_with("mkdir ")).collect();
+        assert!(steps.len() >= 5, "{refused}");
+        for step in steps {
+            assert!(check_worker_git_commit_scope_for_command(cwd, step).is_none(), "{step}");
+            let output = std::process::Command::new("sh").arg("-c").arg(step).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "{step}: {output:?}");
+        }
+        assert_eq!(git(&["branch", "--show-current"]), "factory/worker");
+        assert_eq!(std::fs::read(repo.path().join("staged.txt")).unwrap(), staged);
+        assert_eq!(std::fs::read(repo.path().join("f.txt")).unwrap(), unstaged);
+        // The printed sequence restores tracked paths only; untracked files stay.
+        assert_eq!(std::fs::read(repo.path().join("untracked.bin")).unwrap(), b"\0untracked");
         let redirected = format!("git --git-dir '{}' --work-tree '{cwd}' merge --abort", outside.path().join(".git").display());
         assert!(check_worker_git_commit_scope_for_command(cwd, &redirected).is_some());
     }

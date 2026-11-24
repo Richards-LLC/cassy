@@ -16,7 +16,7 @@ import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
 import { withRequestDeadline } from "./request-deadline";
 import { projectTitle } from "./cloud-brand";
-import { LatestRelease, RELEASE_CHECK_INTERVAL } from "./machine-version";
+import { cassyLoaded, cassyLoadedBadge, LatestRelease, RELEASE_CHECK_INTERVAL } from "./machine-version";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { pendingSessionLabel, reconcileCatalog, sessionReachable, sessionRunning, sessionStopped, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
@@ -227,8 +227,9 @@ function runPendingReload(machineId: string, session: string): void {
   }
   if (conversationConnection(machineId, session)?.phase !== "live") return;
   pendingReload = undefined;
-  if (current.harness !== "claude") { toast("Reload Cassy requires Claude Code."); renderConversationList(); return; }
-  void supervisorCommandSession(machineId, session).run("mcp", false)
+  if (current.harness !== "claude" && current.harness !== "codex") { toast("Reload Cassy requires Claude Code or Codex."); renderConversationList(); return; }
+  // The row's Restart and reload button is the Codex confirmation (cas-8c4f).
+  void supervisorCommandSession(machineId, session).run("mcp", current.harness === "codex")
     .then(() => countUsage("supervisor.command"))
     .catch(error => { toast(String(error)); renderConversationList(); });
 }
@@ -347,6 +348,8 @@ let conversationSearchQuery = "";
 const conversationList = new ProjectNavigation();
 const latestRelease = new LatestRelease();
 const pendingSubmissions = new Set<string>();
+/** cas-400a2 (GH #2321): the end of each thread's line of Sends; a Send made while one is held waits its turn. */
+const submissionTurns = new Map<string, Promise<void>>();
 /**
  * The thread for machine:session. With `session`, the thread learns which
  * supervisor session it is attached to, so questions a session that has since
@@ -1023,6 +1026,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         });
       }
       render();
+      // The open conversation's command palette reads this connection too.
+      if (machine.id === selectedMachineId && wasLive !== (state.phase === "live")) slashCommands?.palette.sync();
     },
     onAttachState: (session, state) => {
       const key = sessionKey(machine.id, session);
@@ -1057,7 +1062,12 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         if (recovered.length) void acknowledgeAttentionGroup(recovered);
       }
       else restateAttachmentNotes(document, machine.id);
-      if (selectedMachineId === machine.id && selectedSession === session) render();
+      if (selectedMachineId === machine.id && selectedSession === session) {
+        render();
+        // A slash command typed before the socket was live lists its commands
+        // the moment it connects, without the operator changing the text.
+        if (attachWasLive !== (state.phase === "live")) slashCommands?.palette.sync();
+      }
       // The list row and the footer read the session's connection too.
       else renderConversationList();
     },
@@ -1178,7 +1188,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (selectedMachineId === machine.id && selectedSession === session) render();
     },
     onMessageRejected: async (session, clientRef, detail, rejection) => {
-      if (supervisorCommandSession(machine.id, session).reject(clientRef, detail)) return;
+      if (supervisorCommandSession(machine.id, session).reject(clientRef, detail, rejection?.retryable === true)) return;
       const key = sessionKey(machine.id, session);
       // cas-0653: the hub could not reach the session's daemon, so the
       // message never arrived there. It waits in the thread and goes out once
@@ -1429,6 +1439,7 @@ function openAccounts(): void {
     machines: () => [...machines.values()].map(machine => ({ id: machine.id, label: machine.label, scopes: machine.scopes })),
     checkUsage: (machineId, account, signal) => launchConnection(machineId).checkAccountUsage(account, signal),
     list: (machineId, signal) => launchConnection(machineId).accounts(signal),
+    gateway: (machineId, signal) => launchConnection(machineId).gatewayAccounts(signal),
     change: (machineId, change) => launchConnection(machineId).changeAccount(change),
     changed: machineId => launchSheet.accountsChanged(machineId),
     copy: text => navigator.clipboard.writeText(text),
@@ -2113,7 +2124,7 @@ function openConnectionLog(machineId: string): void {
     dialog.id = "connection-log";
     dialog.className = "connection-log";
     dialog.setAttribute("aria-label", "Connection log");
-    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow"></p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><p class="connection-log-summary" aria-live="off"></p><button type="button" class="connection-log-export" disabled>Export safe diagnostics</button><details class="connection-log-technical"><summary>Technical details</summary><p class="connection-log-evidence"></p><pre>Running diagnostics…</pre></details></section>';
+    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow"></p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><p class="connection-log-summary" data-testid="connection-log-summary" aria-live="off"></p><button type="button" class="connection-log-export" disabled>Export safe diagnostics</button><details class="connection-log-technical" data-testid="connection-log-technical"><summary>Technical details</summary><p class="connection-log-evidence" data-testid="connection-log-evidence"></p><pre data-testid="connection-log-output">Running diagnostics…</pre></details></section>';
     document.body.append(dialog);
   }
   const output = dialog.querySelector("pre")!;
@@ -2212,6 +2223,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     if (!banner) {
       banner = document.createElement("div");
       banner.className = "terminal-disconnected-banner";
+      banner.dataset.testid = "terminal-disconnected-banner";
       grid.prepend(banner);
     }
     // A fatal failure is not reconnecting, so the banner must not claim it is.
@@ -2231,6 +2243,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
       // Announce the cause once; adjacent recovery controls stay discoverable
       // without becoming part of the live-region announcement.
       words.setAttribute("role", "status");
+      words.setAttribute("aria-label", "Outage");
       banner.replaceChildren(words);
     }
     // cas-a6f0: still live but its heartbeats go unanswered: not lost yet.
@@ -2610,6 +2623,7 @@ function skipToConversation(): void {
 function syncConversationActions(): void {
   retireStaleToast();
   syncControlHolder();
+  syncCassyBadge();
   applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-interrupt"), document.querySelector<HTMLElement>("#conversation-interrupt-reason"), interruptUnavailableReason());
   applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-raw-output"), document.querySelector<HTMLElement>("#conversation-raw-output-reason"), rawOutputUnavailableReason());
   const showWork = document.querySelector<HTMLButtonElement>("#conversation-show-work");
@@ -2643,6 +2657,29 @@ function toggleShowWork(): void {
  * header says which ("· Studio iPad in control"), so Interrupt taking it over,
  * or being refused, is never the first the operator hears of it.
  */
+/**
+ * cas-8c4f: the open supervisor's durable Reload Cassy result in its header,
+ * read from the live catalog each sync. cas-0d58: a pill that never shrinks
+ * ("9.99.2 · 5:44 PM"); the machine and codename text beside it truncates
+ * first, and its title and spoken text say "cassy 4.52.0 · loaded 5:44 PM ET".
+ */
+function syncCassyBadge(): void {
+  const host = document.querySelector<HTMLElement>(".conversation-identity .conversation-host");
+  if (!host) return;
+  const item = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find(session => session.name === selectedSession) : undefined;
+  const live = item && !item.ended && !item.dormant && item.liveness === "live";
+  const text = live ? cassyLoadedBadge(item.mcp_version, item.mcp_loaded_at) : undefined;
+  const parts = live ? cassyLoaded(item.mcp_version, item.mcp_loaded_at) : undefined;
+  let badge = host.querySelector<HTMLElement>(":scope > #conversation-cassy");
+  if (!text || !parts) { if (badge) { badge.remove(); scheduleConversationLayout(); } return; }
+  if (badge?.dataset.badge === text) return;
+  if (!badge) { badge = document.createElement("span"); badge.id = "conversation-cassy"; badge.className = "supervisor-version loaded"; badge.dataset.testid = "conversation-cassy"; host.append(badge); }
+  badge.dataset.badge = text; badge.title = text;
+  const spoken = (words: string) => { const span = document.createElement("span"); span.className = "sr-only"; span.textContent = words; return span; };
+  badge.replaceChildren(spoken("cassy "), `${parts.version} · `, spoken("loaded "), parts.time, spoken(" ET"));
+  scheduleConversationLayout();
+}
+
 function syncControlHolder(): void {
   const host = document.querySelector<HTMLElement>(".conversation-identity .conversation-host");
   if (!host) return;
@@ -2654,7 +2691,7 @@ function syncControlHolder(): void {
     if (note) { note.remove(); scheduleConversationLayout(); }
     return;
   }
-  if (!note) { note = document.createElement("span"); note.id = "conversation-control"; host.append(note); }
+  if (!note) { note = document.createElement("span"); note.id = "conversation-control"; note.dataset.testid = "conversation-control"; host.append(note); }
   if (note.dataset.holder === holder) return;
   note.dataset.holder = holder;
   const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";
@@ -3054,6 +3091,7 @@ function toast(message: string, scope?: { thread?: string; until?: () => boolean
     output = document.createElement("div");
     output.id = "toast";
     output.setAttribute("role", "status");
+    output.setAttribute("aria-label", "Notice");
     document.body.append(output);
   }
   output.textContent = message;
@@ -4322,7 +4360,7 @@ function supervisorPhrase(machineId: string, session: string): string {
   return project ? `the ${project} supervisor` : "the supervisor";
 }
 
-async function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, destination: { birth?: string; attach?: AttachSnapshot }, replyTo?: number, retryOf?: string, editOf?: string): Promise<boolean> {
+async function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, destination: { birth?: string; attach?: AttachSnapshot }, release: () => void, replyTo?: number, retryOf?: string, editOf?: string): Promise<boolean> {
   await restoredMachines.get(machine.id);
   if (!sessionIsUp(machine.id, session) && !machineWillReconnect(machine.id)) {
     showComposerStatus(connectionStates.get(machine.id)?.authFailure ? `${pairingRefusal(machine.label)} Your message is kept; re-pair, then send it.` : outageRefusal(machine.label), "error", true);
@@ -4401,6 +4439,8 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
     else showHeldSendStatus(machine.id, session);
     composer?.focus();
   }
+  // The message is held, so the next Send may be held behind it while this one flushes.
+  release();
   if (sessionIsUp(machine.id, session)) await flushHeldSends(machine, session);
   return true;
 }
@@ -4455,7 +4495,22 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   const supervisor = machine && session ? supervisorTarget(sessions.get(machine.id)?.find((item) => item.name === session)) : undefined;
   if (!machine || !session || !supervisor) return;
   const submissionKey = sessionKey(machine.id, session);
-  if (pendingSubmissions.has(submissionKey)) return;
+  // cas-400a2 (GH #2321): a Send made while an earlier one is still being held
+  // is queued behind it, not dropped with its text left in the composer.
+  const previousTurn = submissionTurns.get(submissionKey);
+  let endTurn!: () => void;
+  const turn = new Promise<void>(resolve => { endTurn = resolve; });
+  submissionTurns.set(submissionKey, turn);
+  // Idempotent: delivery ends the turn before its flush, and the finally below again.
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    if (submissionTurns.get(submissionKey) === turn) submissionTurns.delete(submissionKey);
+    pendingSubmissions.delete(submissionKey);
+    endTurn();
+  };
+  await previousTurn;
   pendingSubmissions.add(submissionKey);
   try {
   // cas-0b3d: a chip answers an ask; a composer send was spoken if dictation
@@ -4475,7 +4530,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
       }
     });
   }
-  const sent = await deliverSupervisorMessage(machine, session, supervisor, text, destination, replyTo, quick?.retryOf, editOf);
+  const sent = await deliverSupervisorMessage(machine, session, supervisor, text, destination, release, replyTo, quick?.retryOf, editOf);
   if (sent && uploads && hasAttachments) {
     uploads.clear();
     if (messageStatus?.session === submissionKey && !messageStatus?.held) clearComposerStatus();
@@ -4492,7 +4547,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
       showComposerStatus(error instanceof Error ? error.message : "Files were not sent. Try again.", "error");
     }
   } finally {
-    pendingSubmissions.delete(submissionKey);
+    release();
   }
 }
 
@@ -4708,17 +4763,17 @@ function render(captureDraft = true, stoppedSelection = false): void {
   app.innerHTML = `
     ${browserNotice ? `<p class="browser-unsupported" role="alert">${escapeHtml(browserNotice)}</p>` : ""}
     <div id="conversation-shell-anchor" hidden></div>
-    <dialog id="command-palette" class="command-palette">
+    <dialog id="command-palette" class="command-palette" aria-label="Commands">
       <section>
         <header><strong>Commands</strong><button id="command-palette-close" type="button" aria-label="Close command palette">×</button></header>
         <input id="command-palette-query" type="search" aria-label="Filter commands" placeholder="Type a command or conversation">
-        <div class="palette-commands">
+        <div class="palette-commands" data-testid="palette-commands">
           <section class="palette-group" data-palette-group="conversations" aria-labelledby="palette-group-conversations">
-            <h3 id="palette-group-conversations" class="palette-group-heading">Conversations</h3>
+            <h3 id="palette-group-conversations" class="palette-group-heading" data-testid="palette-group-heading">Conversations</h3>
             ${sessionCommands || '<p class="palette-empty">No live conversations yet.</p>'}
           </section>
           <section class="palette-group" data-palette-group="machines" aria-labelledby="palette-group-machines">
-            <h3 id="palette-group-machines" class="palette-group-heading">Machines</h3>
+            <h3 id="palette-group-machines" class="palette-group-heading" data-testid="palette-group-heading">Machines</h3>
             ${launchAvailability() === "ready" ? '<button type="button" class="palette-command" data-palette-action="new-session"><span>New session</span><small>Start a supervisor on a project</small></button>' : ""}
             <button type="button" class="palette-command" id="palette-paired-machines"><span>Paired machines</span><small>Hosts, connection and last seen</small></button>
             ${selectedMachineId && selectedSession ? `<button type="button" class="palette-command" data-palette-action="quality"><span>Quality</span><small>${escapeHtml(conversationLabel(selectedMachineId, selectedSession))}, release over release</small></button>` : ""}
@@ -4726,14 +4781,14 @@ function render(captureDraft = true, stoppedSelection = false): void {
             ${infoItems.length > 0 ? `<button type="button" class="palette-command" data-palette-action="dismiss-info"><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>` : ""}
           </section>
           <section class="palette-group" data-palette-group="appearance" aria-labelledby="palette-group-appearance">
-            <h3 id="palette-group-appearance" class="palette-group-heading">Appearance</h3>
-            ${(["system", "light", "dark"] as const).map((scheme) => `<button type="button" class="palette-command" data-palette-scheme="${scheme}"><span><span class="palette-check" aria-hidden="true" hidden>✓</span>Appearance · ${scheme === "system" ? "System" : scheme === "light" ? "Light" : "Dark"}</span><small>${scheme === "system" ? "Follow this device" : "Use this scheme"}</small></button>`).join("")}
+            <h3 id="palette-group-appearance" class="palette-group-heading" data-testid="palette-group-heading">Appearance</h3>
+            ${(["system", "light", "dark"] as const).map((scheme) => `<button type="button" class="palette-command" data-palette-scheme="${scheme}"><span><span class="palette-check" data-testid="palette-check" aria-hidden="true" hidden>✓</span>Appearance · ${scheme === "system" ? "System" : scheme === "light" ? "Light" : "Dark"}</span><small data-testid="palette-command-hint">${scheme === "system" ? "Follow this device" : "Use this scheme"}</small></button>`).join("")}
           </section>
           <details class="palette-group palette-advanced" data-palette-group="advanced">
-            <summary class="palette-group-heading">Advanced</summary>
+            <summary class="palette-group-heading" data-testid="palette-group-heading">Advanced</summary>
             <button type="button" class="palette-command" data-palette-action="dormant"><span>${escapeHtml(dormantCommandLabel(revealDormant).title)}</span><small>${escapeHtml(dormantCommandLabel(revealDormant).hint)}</small></button>
           </details>
-          <p class="palette-empty" id="palette-no-match" role="status" hidden></p>
+          <p class="palette-empty" id="palette-no-match" role="status" aria-label="No match" hidden></p>
         </div>
       </section>
     </dialog>
@@ -4795,12 +4850,12 @@ function conversationRegions(preservedGrid: HTMLElement | undefined, threadKey: 
     template.innerHTML = markup;
     return template.content.firstElementChild as HTMLElement;
   };
-  const grid = preservedGrid ?? build(`<section id="conversation-stage" class="conversation-stage"${threadKey ? ` data-session-key="${escapeAttr(threadKey)}"` : ""}><div class="empty"></div></section>`);
+  const grid = preservedGrid ?? build(`<section id="conversation-stage" class="conversation-stage" data-testid="conversation-stage"${threadKey ? ` data-session-key="${escapeAttr(threadKey)}"` : ""}><div class="empty"></div></section>`);
   return {
     grid,
     composer: build(composerMarkup(supervisor)),
-    status: build('<div id="status-view"></div>'),
-    attention: build('<section id="attention-panel" class="attention-panel"></section>'),
+    status: build('<div id="status-view" data-testid="status-view"></div>'),
+    attention: build('<section id="attention-panel" class="attention-panel" data-testid="attention-panel"></section>'),
   };
 }
 
@@ -4999,6 +5054,7 @@ function returnToConversationRow(openedKey: string | undefined): void {
 
 function renderConversationList(): void {
   renderMachineRegister();
+  syncCassyBadge();
   const container = document.querySelector<HTMLElement>("#conversation-list");
   if (!container) return;
   const rows: ConversationRow[] = [...machines.values()].flatMap((machine) => visibleSessions(machine.id).filter((session) => supervisorTarget(session)).map((session) => {
@@ -5051,7 +5107,7 @@ function renderConversationList(): void {
     const machineOutage = !machineOnline && !machineState?.authFailure && machineState?.fatal !== true && !machineState?.networkAccessHelp;
     const history = conversationHistories.get(key);
     const working = history && supervisorWorking(history, connectionStates.get(machine.id), [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${key}:`) && Date.now() - at < WORKING_WINDOW_MS));
-    return { key, reloadReceipt: (supervisorCommands.get(key)?.visibleReceipts ?? []).filter(receipt => receipt.command === "mcp").at(-1), reloadPending: pendingReload?.machineId === machine.id && pendingReload.session === session.name, reloadUnavailable: !machine.scopes.includes("pane-input") ? "This browser was paired without command control. Pair again with pane:input." : undefined, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: waiting > 0 ? "Waiting for your answer" : undefined, operatorQuestion: waiting > 0 ? waitingQuestion(history) : undefined, statusLine: projectStatusLine(statuses.get(key), [session.supervisor, ...((statuses.get(key)?.agents as FleetAgent[] | undefined) ?? []).filter(agent => agent.name === session.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name))),  supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), standby: session.standby === true, connection: machineOutage ? "Last known" : pendingSessionLabel(session, machineState?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
+    return { key, reloadReceipt: (supervisorCommands.get(key)?.visibleReceipts ?? []).filter(receipt => receipt.command === "mcp").at(-1), reloadPending: pendingReload?.machineId === machine.id && pendingReload.session === session.name, reloadUnavailable: !machine.scopes.includes("pane-input") ? "This browser was paired without command control. Pair again with pane:input." : undefined, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, mcp_loaded_at: !session.dormant && session.liveness === "live" ? session.mcp_loaded_at : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: waiting > 0 ? "Waiting for your answer" : undefined, operatorQuestion: waiting > 0 ? waitingQuestion(history) : undefined, statusLine: projectStatusLine(statuses.get(key), [session.supervisor, ...((statuses.get(key)?.agents as FleetAgent[] | undefined) ?? []).filter(agent => agent.name === session.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name))),  supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), standby: session.standby === true, connection: machineOutage ? "Last known" : pendingSessionLabel(session, machineState?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -5264,7 +5320,7 @@ function syncProgressSheetWhere(): void {
   let line = document.querySelector<HTMLElement>(".conversation-context .context-sheet-where");
   const where = progressSheetOpen() ? conversationWhere() : "";
   if (!where || !heading) { line?.remove(); return; }
-  if (!line) { line = document.createElement("p"); line.className = "context-sheet-where"; line.id = "context-sheet-where"; heading.after(line); }
+  if (!line) { line = document.createElement("p"); line.className = "context-sheet-where"; line.id = "context-sheet-where"; line.dataset.testid = "context-sheet-where"; heading.after(line); }
   if (line.textContent !== where) line.textContent = where;
 }
 /** The sheet control that last held focus, so a redraw that moves it hands focus back (cas-a5c6). */
@@ -5478,6 +5534,7 @@ function fleetAnnouncer(): HTMLElement {
     region.id = "fleet-ops-announcer";
     region.className = "sr-only";
     region.setAttribute("role", "status");
+    region.setAttribute("aria-label", "Fleet results");
     document.body.append(region);
   }
   return region;
@@ -5880,6 +5937,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   const chip = (value: unknown): HTMLSpanElement => {
     const span = document.createElement("span");
     span.className = `status-chip status-chip--${statusClass(value)}`;
+    span.dataset.testid = "status-chip";
     span.textContent = statusLabel(value);
     return span;
   };
@@ -5910,7 +5968,7 @@ function renderStatus(status?: Record<string, unknown>): void {
       const identity = offer ?? [...fleetOps.pending.values()].at(-1) ?? [...fleetOps.notes.values()].at(-1);
       revealPhoneNotice = Boolean(identity && identity !== revealedPhoneNotice);
       revealedPhoneNotice = identity;
-      undo.id = "fleet-phone-undo"; document.body.append(undo); placeFleetUndo();
+      undo.id = "fleet-phone-undo"; undo.dataset.testid = "fleet-phone-undo"; document.body.append(undo); placeFleetUndo();
     } else {
       revealedPhoneNotice = undefined;
       if (undo) container.append(undo);
@@ -5919,7 +5977,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   }
   if (workers.length > 0) container.append(sectionLabel("Workers", workers.length));
   for (const worker of workers) {
-    const row = document.createElement("article"); row.className = "status-row status-agent";
+    const row = document.createElement("article"); row.className = "status-row status-agent"; row.dataset.testid = "status-agent";
     const line = document.createElement("div"); line.className = "status-line";
     const metadata = worker.agent as (FleetAgent & { liveness?: string; latest_activity?: { created_at_rfc3339?: string } }) | undefined;
     const avatar = document.createElement("template");
@@ -5951,7 +6009,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     if (!group.tasks.length) continue;
     container.append(sectionLabel(group.label === "In progress" ? "Tasks in progress" : group.label, group.tasks.length));
     for (const task of group.tasks) {
-      const row = document.createElement("article"); row.className = "status-row status-task";
+      const row = document.createElement("article"); row.className = "status-row status-task"; row.dataset.testid = "status-task";
       const line = document.createElement("div"); line.className = "status-line";
       const taskChip = chip(task.delivery_state === "merged" ? "Merged, closing" : task.status);
       if (statusLabel(task.status) === "In progress" && task.delivery_state !== "merged") taskChip.textContent = "Task in progress";

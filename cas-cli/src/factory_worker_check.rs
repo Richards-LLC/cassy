@@ -723,7 +723,73 @@ fn lock_file(path: &Path) -> Result<File> {
 }
 
 fn waiting_for_admission(reason: &str) -> String {
-    format!("Waiting for build admission: {reason}.\nCapacity wait: keep the task in_progress and retain its lease. Do not set blocked or page the supervisor for a routine capacity retry.\nRetry the same capped Cargo command after 120 seconds; priority queues stay quiet, while disk waits share a supervisor notice after 20 minutes that updates only when waiting workers or reclaimable bytes change. Report an actual need for assistance immediately.")
+    format!("Waiting for build admission: {reason}.\nCapacity wait: keep the task in_progress and retain its lease. Do not set blocked, page the supervisor or arm retry reminders for capacity: a backgrounded run queues for a builder slot, starts when one frees and wakes you once with its result. Priority queues stay quiet, while disk waits share a supervisor notice after 20 minutes that updates only when waiting workers or reclaimable bytes change. Report an actual need for assistance immediately.")
+}
+
+/// A typed capacity refusal: retryable without rerunning anything before it.
+#[derive(Debug)]
+struct AdmissionWait(String);
+impl std::fmt::Display for AdmissionWait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for AdmissionWait {}
+
+#[cfg(not(test))]
+const ADMISSION_POLL: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(test)]
+const ADMISSION_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+thread_local! {
+    /// cas-fa0f: the detached run this thread produces; it owes its worker one
+    /// completion wake, so it queues for admission instead of exiting.
+    static QUEUED_RUN: std::cell::RefCell<Option<(PathBuf, String)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Queue this thread's admissions for `run` while the guard lives.
+pub(crate) struct QueuedRun(());
+impl QueuedRun {
+    pub(crate) fn enter(root: &Path, run: &str) -> Self {
+        QUEUED_RUN.with(|queued| *queued.borrow_mut() = Some((root.to_path_buf(), run.to_string())));
+        Self(())
+    }
+}
+impl Drop for QueuedRun {
+    fn drop(&mut self) {
+        QUEUED_RUN.with(|queued| *queued.borrow_mut() = None);
+    }
+}
+
+/// Retry `attempt` while it refuses for capacity and a queued run's worker is
+/// still there to receive its completion. Each refusal refreshes the durable
+/// capacity wait, which keeps the run's priority position and escalation.
+/// A foreground refusal names `command`, the backgrounded form that queues.
+fn admit<T>(command: &str, mut attempt: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut queued_since = None;
+    loop {
+        match attempt() {
+            Err(error) if error.downcast_ref::<AdmissionWait>().is_some()
+                && QUEUED_RUN.with(|queued| queued.borrow().as_ref()
+                    .is_some_and(|(root, run)| crate::factory_worker_runs::owner_current(root, run))) =>
+            {
+                if queued_since.is_none() {
+                    queued_since = Some(std::time::Instant::now());
+                    println!("worker-check: queued for build admission; this run starts when capacity frees and wakes its worker once.\n{error}");
+                }
+                std::thread::sleep(ADMISSION_POLL);
+            }
+            Err(error) if queued_since.is_none() && error.downcast_ref::<AdmissionWait>().is_some() => {
+                return Err(AdmissionWait(format!("{error}\nQueue it instead: {command}")).into());
+            }
+            result => {
+                if let Some(since) = queued_since && result.is_ok() {
+                    println!("worker-check: admitted after {}s in the build queue", since.elapsed().as_secs());
+                }
+                return result;
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -735,20 +801,33 @@ impl std::fmt::Display for CapacityRefusal {
 }
 impl std::error::Error for CapacityRefusal {}
 
-fn recorded_refusal(root: &Path, repo: &Path, cause: &str, kind: crate::factory_capacity_wait::CapacityKind) -> anyhow::Error {
-    match crate::factory_capacity_wait::record_refusal_with_kind(root, repo, cause, kind, chrono::Utc::now()) {
-        Ok(Some(wait)) => {
-            let mut message = waiting_for_admission(&wait.cause);
-            message.push_str(&format!("\nCapacity wait recorded for {}; next retry: {}.", wait.task_id, wait.next_retry.to_rfc3339()));
-            anyhow::anyhow!(message)
-        }
-        Ok(None) => anyhow::anyhow!(waiting_for_admission(cause)),
-        Err(error) => {
-            let mut message = waiting_for_admission(cause);
-            message.push_str(&format!("\nCapacity wait could not be recorded: {error}. Report storage/ownership assistance if needed."));
-            anyhow::anyhow!(message)
-        }
+/// The exact backgrounded form of this capped command, which the worker
+/// guard routes to a detached, queued run.
+fn queue_command(cas_root: &Path, args: &[String]) -> String {
+    let quote = |arg: &String| if !arg.is_empty() && arg.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_@.+/=:,-".contains(&byte)) {
+        arg.clone()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\"'\"'"))
+    };
+    let words = args.iter().map(quote).collect::<Vec<_>>().join(" ");
+    if javascript::allowed_args(args) {
+        // Only Cargo shapes are rewritten by the guard; name the detached runner.
+        format!("cas factory worker-check --cas-root {} --detach -- {words} > target/worker-tests.log 2>&1",
+            quote(&cas_root.display().to_string()))
+    } else if args.first().is_some_and(|arg| arg == "nextest") {
+        format!("cargo {words} > target/worker-tests.log 2>&1 &")
+    } else {
+        format!("cargo check {words} > target/worker-check.log 2>&1 &")
     }
+}
+
+fn recorded_refusal(root: &Path, repo: &Path, cause: &str, kind: crate::factory_capacity_wait::CapacityKind) -> anyhow::Error {
+    let message = match crate::factory_capacity_wait::record_refusal_with_kind(root, repo, cause, kind, chrono::Utc::now()) {
+        Ok(Some(wait)) => format!("{}\nCapacity wait recorded for {}.", waiting_for_admission(&wait.cause), wait.task_id),
+        Ok(None) => waiting_for_admission(cause),
+        Err(error) => format!("{}\nCapacity wait could not be recorded: {error}. Report storage/ownership assistance if needed.", waiting_for_admission(cause)),
+    };
+    AdmissionWait(message).into()
 }
 
 #[derive(Debug)]
@@ -1128,8 +1207,13 @@ pub(crate) struct PassingTests<'a> {
     head: &'a str,
     target: Option<&'a str>,
     synced: &'a [cas_types::PortableTestReceipt],
-    records: std::sync::OnceLock<Vec<(String, Option<String>, TestReceipt)>>,
+    records: std::sync::OnceLock<(Vec<(String, Option<String>, TestReceipt)>, Vec<Voided>)>,
 }
+
+/// An earlier receipt the carry refused at this head: its tested head, the
+/// receipt, and the changed proof inputs that voided it (`None` when the
+/// range to the head is unreadable, e.g. not an ancestor).
+type Voided = (String, TestReceipt, Option<Vec<String>>);
 
 impl<'a> PassingTests<'a> {
     pub(crate) fn new(cas_root: &'a Path, repo: &'a Path, head: &'a str) -> Self {
@@ -1180,8 +1264,17 @@ impl<'a> PassingTests<'a> {
     }
 
     fn records(&self) -> &[(String, Option<String>, TestReceipt)] {
+        &self.classified().0
+    }
+
+    /// Earlier receipts this head could not carry, with the reason (GH #2288).
+    fn voided(&self) -> &[Voided] {
+        &self.classified().1
+    }
+
+    fn classified(&self) -> &(Vec<(String, Option<String>, TestReceipt)>, Vec<Voided>) {
         self.records.get_or_init(|| {
-            let mut records = passing_test_records(self.cas_root, self.repo, self.head, self.target);
+            let (mut records, voided) = passing_test_records(self.cas_root, self.repo, self.head, self.target);
             for synced in self.synced {
                 let Ok(stability) = synced.stability.clone().map(serde_json::from_value::<stability::Proof>).transpose() else { continue };
                 let Ok(widened) = synced.widened.clone().map(serde_json::from_value::<widened::Proof>).transpose() else { continue };
@@ -1219,7 +1312,7 @@ impl<'a> PassingTests<'a> {
                     }));
                 }
             }
-            records
+            (records, voided)
         })
     }
 
@@ -1291,33 +1384,38 @@ pub(crate) fn passing_test_packages_against(
 /// documentation-only delivery commit while keeping proof tied to its tested
 /// tree. Builtin Markdown and reference history use CI's contract/doc-hygiene
 /// proof instead of invalidating Rust receipts. With a target, commits already
-/// on it are not part of the range.
+/// on it are not part of the range. Also returns the ancestor receipts it
+/// refused and why.
 fn passing_test_records(
     cas_root: &Path,
     repo: &Path,
     head: &str,
     target: Option<&str>,
-) -> Vec<(String, Option<String>, TestReceipt)> {
+) -> (Vec<(String, Option<String>, TestReceipt)>, Vec<Voided>) {
     let Ok(repo) = repo.canonicalize() else {
-        return Vec::new();
+        return Default::default();
     };
-    let path = receipt_path(cas_root, &repo, head);
-    let Some(directory) = path.parent() else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return Vec::new();
-    };
-    let mut entries = entries.flatten().collect::<Vec<_>>();
-    entries.sort_by_key(std::fs::DirEntry::file_name);
+    let mut entries = Vec::new();
+    for checkout in std::iter::once(repo.clone()).chain(sibling_worktrees(&repo)) {
+        let Some(Ok(found)) = receipt_path(cas_root, &checkout, head).parent().map(std::fs::read_dir) else {
+            continue;
+        };
+        let mut found = found.flatten().collect::<Vec<_>>();
+        found.sort_by_key(std::fs::DirEntry::file_name);
+        entries.extend(found.into_iter().map(|entry| (checkout.clone(), entry)));
+    }
     let mut exact = BTreeMap::new();
     let mut ancestors = Vec::new();
-    for entry in entries {
+    for (checkout, entry) in entries {
         let Some((receipt_head, package, test)) =
-            read_passing_test_record(cas_root, &repo, &entry)
+            read_passing_test_record(cas_root, &checkout, &entry)
         else {
             continue;
         };
+        // GH #2378: another checkout's pass counts only at this exact head.
+        if checkout != repo && receipt_head != head {
+            continue;
+        }
         if receipt_head == head {
             exact.insert(
                 (package, test.harness.clone(), test.filter.clone()),
@@ -1348,18 +1446,25 @@ fn passing_test_records(
     let proof_inputs = delivered_tree_proof_inputs(&repo, head, &changed_paths)
         .unwrap_or_else(|| changed_paths.clone());
 
+    let mut voided = Vec::new();
     for (receipt_head, package, test) in ancestors {
         let key = (package.clone(), test.harness.clone(), test.filter.clone());
+        if exact.contains_key(&key) {
+            continue;
+        }
         let Some(changes) = ranges.get(&receipt_head).and_then(Option::as_ref) else {
+            voided.push((receipt_head, test, None));
             continue;
         };
-        if exact.contains_key(&key) || changes.iter().any(|path| {
+        let inputs = changes.iter().filter(|path| {
             // cas-23b1: embedded builtin docs have their own contract checks;
             // every other proof input still invalidates the Rust receipt.
             let builtin_doc = path.starts_with("cas-cli/src/builtins/")
-                && (path.ends_with(".md") || path == "cas-cli/src/builtins/reference-history.json");
-            !builtin_doc && proof_inputs.contains(path)
-        }) {
+                && (path.ends_with(".md") || *path == "cas-cli/src/builtins/reference-history.json");
+            !builtin_doc && proof_inputs.contains(*path)
+        }).cloned().collect::<BTreeSet<_>>();
+        if !inputs.is_empty() {
+            voided.push((receipt_head, test, Some(inputs.into_iter().collect())));
             continue;
         }
         match exact.entry(key) {
@@ -1375,9 +1480,34 @@ fn passing_test_records(
         }
     }
 
-    exact
+    let records = exact
         .into_iter()
         .map(|((package, _, _), (receipt_head, test))| (receipt_head, package, test))
+        .collect();
+    (records, voided)
+}
+
+/// GH #2378: the other checkouts of this repository. A receipt binds a clean
+/// commit, so a pass in any of them proves the same tree at that head; a
+/// supervisor closing for a stopped worker runs in that worker's worktree.
+/// Read from Git's administrative files, so a close spawns no extra process.
+fn sibling_worktrees(repo: &Path) -> Vec<PathBuf> {
+    let dot_git = repo.join(".git");
+    let common = if dot_git.is_dir() { dot_git } else {
+        let Some(admin) = std::fs::read_to_string(&dot_git).ok()
+            .and_then(|link| link.trim().strip_prefix("gitdir:").map(|path| repo.join(path.trim())))
+        else { return Vec::new() };
+        match std::fs::read_to_string(admin.join("commondir")) {
+            Ok(common) => admin.join(common.trim()),
+            Err(_) => return Vec::new(),
+        }
+    };
+    let linked = std::fs::read_dir(common.join("worktrees")).into_iter().flatten().flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path().join("gitdir")).ok())
+        .filter_map(|gitdir| Path::new(gitdir.trim()).parent().map(Path::to_path_buf));
+    common.parent().map(Path::to_path_buf).into_iter().chain(linked)
+        .filter_map(|path| path.canonicalize().ok())
+        .filter(|path| path != repo && path.join(".git").exists())
         .collect()
 }
 
@@ -1648,13 +1778,29 @@ fn is_test_or_build_input_path(path: &str) -> bool {
     )
 }
 
+/// GH #2288: the per-task changelog, product-overview and bug-family fragments
+/// the close gate asks for. Release tooling owns their checks, so one counts
+/// as a Rust proof input only when a Rust source names it, never by extension.
+fn close_doc_fragment(path: &str) -> bool {
+    ["changelog.d/", "docs/product-overview.d/", "docs/qa/bug-families/"].iter()
+        .any(|dir| path.strip_prefix(dir).is_some_and(|name| !name.contains('/')))
+        && [".md", ".yaml", ".yml"].iter().any(|extension| path.ends_with(extension))
+}
+
 /// Read the delivered tree once per close and batch its Rust sources once.
 fn delivered_tree_proof_inputs(repo: &Path, head: &str, changed: &BTreeSet<String>) -> Option<BTreeSet<String>> {
     if changed.is_empty() { return Some(BTreeSet::new()); }
     let tree = delivered_tree(repo, head)?;
     let mut inputs = BTreeSet::new();
+    // cas-3080/cas-d9c72: the bug-family fragment a close asks for is QA
+    // registry data, not a runner input. Its `.yaml` extension alone must not
+    // void tested-input proof; a Rust source naming it still does.
+    let registry = crate::qa_registry::DEFAULT_PATH;
+    let bug_family = |path: &str| path != registry && crate::qa_registry::is_registry_input(registry, path);
     let external = changed.iter().filter(|path| {
-        if is_test_or_build_input_path(path) || tree.is_workspace_crate_path(path) {
+        if !close_doc_fragment(path)
+            && ((!bug_family(path) && is_test_or_build_input_path(path)) || tree.is_workspace_crate_path(path))
+        {
             inputs.insert((*path).clone()); false
         } else { true }
     }).cloned().collect::<Vec<_>>();
@@ -2155,7 +2301,9 @@ pub(crate) fn test_environment_spec(spec: &str) -> Option<(&str, Option<&str>)> 
     };
     matches!(key, "HOME" | "CARGO_HOME" | "RUSTUP_HOME" | "CI"
         | "GIT_CONFIG_GLOBAL" | "GIT_CONFIG_SYSTEM" | "GIT_CONFIG_NOSYSTEM"
-        | "GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL" | "GIT_COMMITTER_NAME" | "GIT_COMMITTER_EMAIL")
+        | "GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL" | "GIT_COMMITTER_NAME" | "GIT_COMMITTER_EMAIL"
+        // cas-3751a: the sandbox-runtime binary the worker sandbox corpus test runs through.
+        | "CAS_SRT_BIN")
         .then_some((key, value))
 }
 
@@ -2298,6 +2446,11 @@ exit "$code"
     if let Some(id) = run { command.arg("--completion-id").arg(id); }
     command.arg("--").args(args);
     command
+}
+
+/// This process's stdout when it is a regular file (a foreground check's log).
+pub(crate) fn stdout_log_path() -> Option<PathBuf> {
+    detached_log_path().filter(|path| path.is_file())
 }
 
 /// Resolve the actual redirected file, rather than interpreting shell text.
@@ -2451,7 +2604,30 @@ fn with_classification_progress<T>(interval: std::time::Duration, package: &str,
     })
 }
 
+/// A named Rust selection that ran zero tests (verified-test guard status 4).
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct ZeroSelection(String);
+
+/// The verified-test guard's exit status for a selection that ran no test.
+const ZERO_SELECTION_STATUS: i32 = 4;
+
+/// cas-fcb1: a named selection that runs zero tests is no failure; the capped
+/// runner runs the owning crate once instead, and park accepts that crate
+/// receipt for the selection's changed tests. A failing run still fails.
 fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
+    match execute_selection_at(cas_root, args, cwd, cargo, scope_runner, isolated_test_env, test_env, false) {
+        Err(error) if error.downcast_ref::<ZeroSelection>().is_some() => {
+            eprintln!("{error:#}; running the owning crate once instead");
+            execute_selection_at(cas_root, args, cwd, cargo, scope_runner, isolated_test_env, test_env, true)
+        }
+        result => result,
+    }
+}
+
+// gate-audit[crate_run]: selector Runs the owning crate once after a named selection ran zero tests; admission, the zero-test guard and every refusal still apply, and a failing crate run still fails.
+#[allow(clippy::too_many_arguments)]
+fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, test_env: &[String], crate_run: bool) -> Result<()> {
     if javascript::allowed_args(args) {
         validate_test_environment(args, test_env)?;
         if isolated_test_env.is_some() {
@@ -2486,8 +2662,8 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     }
     let config = crate::config::Config::load(&cas_root)?.factory();
     let mut widened_proof = None;
-    let owned_tests = if let Some(test) = &test {
-        capacity_preflight(&cas_root, &repo, &config, &cas_root.join("worker-check-slots"))?;
+    let mut owned_tests = if let Some(test) = &test {
+        admit(&queue_command(&cas_root, args), || capacity_preflight(&cas_root, &repo, &config, &cas_root.join("worker-check-slots")))?;
         let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
         let classified = with_classification_progress(
             std::time::Duration::from_secs(30),
@@ -2499,7 +2675,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 if uncertain {
                     let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
                     widened::invalidate(&cas_root, &repo, &head, &scope)?;
-                    widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: "widened:unclassified-rust-input".into() });
+                    widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: "widened:unclassified-rust-input".into(), configs: Default::default() });
                 }
                 tests
             },
@@ -2510,11 +2686,17 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 eprintln!("Changed-test classification uncertain ({error:#}); widening to crate {} for one capped pass", test.package);
                 let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
                 widened::invalidate(&cas_root, &repo, &head, &scope)?;
-                widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: format!("widened:{error:#}") });
+                widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: format!("widened:{error:#}"), configs: Default::default() });
                 Vec::new()
             }
         }
     } else { Vec::new() };
+    if crate_run && let Some(test) = &test {
+        let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
+        widened::invalidate(&cas_root, &repo, &head, &scope)?;
+        widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: widened::ZERO_SELECTION_REASON.into(), configs: Default::default() });
+        owned_tests.clear();
+    }
     let slots = cas_root.join("worker-check-slots");
     std::fs::create_dir_all(&slots)?;
     // One check per lane also prevents concurrent PASS/FAIL receipts at the
@@ -2549,50 +2731,43 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         && test.filter.contains("factory_tui_headful")) {
         println!("Live headful: NOT EXERCISED (CAS_HEADFUL_E2E=1 not set)");
     }
-    let admission = lock_file(&slots.join("admission.lock"))?;
-    admission.lock_exclusive()?;
-    let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
-    let violations = snapshot.violations();
-    if !violations.is_empty() {
-        let refusal = violation_refusal(&cas_root, &repo, &snapshot, &violations);
-        drop(admission);
-        return Err(refusal);
-    }
-    // OS locks close the snapshot-to-spawn race, even when the soft guard's
-    // environment override is set. No force/disable option bypasses the cap.
-    let available_slots = available_slot_count(&slots, config.max_concurrent_builders)?;
-    match crate::factory_capacity_wait::priority_refusal(
-        &cas_root,
-        &repo,
-        chrono::Utc::now(),
-        available_slots,
-    ) {
-        Ok(Some(cause)) => {
-            let refusal = recorded_refusal(&cas_root, &repo, &cause, crate::factory_capacity_wait::CapacityKind::PriorityQueue);
-            drop(admission);
-            return Err(refusal);
+    let (admission, slot, snapshot) = admit(&queue_command(&cas_root, args), || {
+        let admission = lock_file(&slots.join("admission.lock"))?;
+        admission.lock_exclusive()?;
+        let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
+        let violations = snapshot.violations();
+        if !violations.is_empty() {
+            return Err(violation_refusal(&cas_root, &repo, &snapshot, &violations));
         }
-        Ok(None) => {}
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                checkout = %repo.display(),
-                "capacity priority lookup failed; continuing build admission"
-            );
-        }
-    }
-    let slot = match acquire_slot(&slots, config.max_concurrent_builders) {
-        Ok(slot) => slot,
-        Err(error) => {
-            if let Some(refusal) = error.downcast_ref::<CapacityRefusal>() {
-                let refusal = recorded_refusal(&cas_root, &repo, &refusal.0, crate::factory_capacity_wait::CapacityKind::Other);
-                drop(admission);
-                return Err(refusal);
+        // OS locks close the snapshot-to-spawn race, even when the soft guard's
+        // environment override is set. No force/disable option bypasses the cap.
+        let available_slots = available_slot_count(&slots, config.max_concurrent_builders)?;
+        match crate::factory_capacity_wait::priority_refusal(
+            &cas_root,
+            &repo,
+            chrono::Utc::now(),
+            available_slots,
+        ) {
+            Ok(Some(cause)) => {
+                return Err(recorded_refusal(&cas_root, &repo, &cause, crate::factory_capacity_wait::CapacityKind::PriorityQueue));
             }
-            drop(admission);
-            return Err(error);
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    checkout = %repo.display(),
+                    "capacity priority lookup failed; continuing build admission"
+                );
+            }
         }
-    };
+        match acquire_slot(&slots, config.max_concurrent_builders) {
+            Ok(slot) => Ok((admission, slot, snapshot)),
+            Err(error) => match error.downcast_ref::<CapacityRefusal>() {
+                Some(refusal) => Err(recorded_refusal(&cas_root, &repo, &refusal.0, crate::factory_capacity_wait::CapacityKind::Other)),
+                None => Err(error),
+            },
+        }
+    })?;
     report_disabled_admission(&cas_root, &snapshot);
     if let Err(error) = crate::factory_capacity_wait::admitted(&cas_root, &repo) {
         tracing::warn!(%error, "capacity wait clear failed; continuing admitted build");
@@ -2780,6 +2955,9 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         if let Some(log) = &selected_log {
             stability::rust::restore_passing(&cas_root, &repo, &head, &owned_tests, prior_stability, log)?;
         }
+        if test.is_some() && !crate_run && status.code() == Some(ZERO_SELECTION_STATUS) {
+            bail!(ZeroSelection(crate::gates::tag("G-61", format!("test: ZERO {head}: the selection ran no test"))));
+        }
         bail!(crate::gates::tag("G-61", format!(
             "{}: FAIL {head} ({status})",
             if test.is_some() { "test" } else { "check" }
@@ -2795,6 +2973,9 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 .trim()
                 .parse()?;
             std::fs::remove_file(&count_file)?;
+            if count == 0 && !crate_run {
+                bail!(ZeroSelection("Worker test executed zero tests; no PASS receipt recorded".into()));
+            }
             if count == 0 {
                 bail!("Worker test executed zero tests; no PASS receipt recorded");
             }
@@ -3493,6 +3674,7 @@ else:
         fake_cargo(&fake, r#"if [ -d /proc/self/fd ]; then
     [ -e "/proc/self/fd/$CAS_TARGET_LEASE_FD" ] || exit 11
 fi
+[ -z "${CAS_GATE_AUDIT_SELECT_OUT:-}" ] || printf 0 > "$CAS_GATE_AUDIT_SELECT_OUT"
 printf '%s\n' "$*" >> target/invocations
 printf '\033[32m     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\033[0m\n'"#);
         let scope = dir.path().join("scope");
@@ -3506,6 +3688,8 @@ exec "$@" > target/raw.log 2>&1"#);
         assert!(invocations.contains("serialized_factory_fields_have_registry_entries_cas_f7b9"), "{invocations}");
         assert!(invocations.lines().last().unwrap().ends_with("test(unrelated)"), "{invocations}");
         assert_eq!(invocations.lines().count(), 2);
+        assert!(invocations.lines().next().unwrap().contains("delivery_touches_audited_site"), "{invocations}");
+        assert!(!invocations.contains("test(gates::registry_tests)"), "probe answered 0: {invocations}");
         // cas-70b8: consume the ordinary runner's capture, without extracting
         // or rewriting its bytes, through the supervisor receipt handler.
         let head = fixture_head(&repo);
@@ -3567,7 +3751,8 @@ exec "$@" > target/raw.log 2>&1"#);
         }
         std::fs::remove_file(repo.join("cas-cli/tests/receipt.rs")).unwrap();
         fixture_commit_as(&repo, "remove admission probe");
-        fake_cargo(&fake, r#"case "$*" in
+        fake_cargo(&fake, r#"[ -z "${CAS_GATE_AUDIT_SELECT_OUT:-}" ] || printf 0 > "$CAS_GATE_AUDIT_SELECT_OUT"
+case "$*" in
     *test_support::*) printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n' ;;
     *) printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n' ;;
 esac"#);
@@ -3586,6 +3771,28 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         assert_eq!(std::fs::read(&selected).unwrap(), b"\x1b[32m     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\x1b[0m\n", "failed retries must preserve earlier capture bytes");
         // pin: the failing external invocation must be the fixed guard selection.
         assert!(std::fs::read_to_string(repo.join("target/failed-guard")).unwrap().contains("test_support::"));
+        // cas-19792: cas-978ed's unclassified bool parameter went red only in
+        // lane CI. The guard's run of the real selection probe
+        // (gates::registry_tests) reads the committed fixture diff; an audited
+        // change adds the registry scan to the ordinary guarded run.
+        env.set("CAS_TEST_SELECTION_PROBE", std::env::current_exe().unwrap());
+        fake_cargo(&fake, r#"if [ -n "${CAS_GATE_AUDIT_SELECT_OUT:-}" ]; then
+    "$CAS_TEST_SELECTION_PROBE" --exact gates::registry_tests::delivery_touches_audited_site >/dev/null 2>&1 || exit 12
+fi
+printf '%s\n' "$*" >> target/invocations
+printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
+        for (path, source, registry) in [
+            ("cas-cli/src/notes.rs", "pub fn notes() -> usize { 1 }\n", false),
+            ("cas-cli/src/merge.rs",
+             "pub fn merge(pushed_proof: bool) -> Result<(), String> { if pushed_proof { return Err(\"x\".into()); } Ok(()) }\n", true),
+        ] {
+            std::fs::write(repo.join(path), source).unwrap();
+            fixture_commit_as(&repo, path);
+            std::fs::remove_file(repo.join("target/invocations")).ok();
+            execute_at(&root, &args, &repo, &fake).unwrap();
+            let invocations = std::fs::read_to_string(repo.join("target/invocations")).unwrap();
+            assert_eq!(invocations.lines().nth(1).unwrap().ends_with("test(gates::registry_tests)"), registry, "{path}: {invocations}");
+        }
     }
 
     /// cas-2bdf: merging the moved target into a parked delivery voided its
@@ -3773,6 +3980,56 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
             )],
             "the delivered source refers to a different repo-relative path with the same basename"
         );
+    }
+
+    /// GH #2288: cas-e705's five-pass proof was refused at a descendant that
+    /// added only the documentation fragments the close gate itself asks for.
+    /// A fragment a Rust source names is still an input, and the refusal
+    /// names the receipt and the path that voided it.
+    #[test]
+    fn stability_proof_carries_across_close_doc_fragments_gh_2288() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        let write = |path: &str, body: &str| {
+            std::fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+            std::fs::write(repo.join(path), body).unwrap();
+        };
+        let embedded = "docs/qa/bug-families/embedded.yaml";
+        write("cas-cli/Cargo.toml", "[package]\nname = \"cas\"\nversion = \"0.1.0\"\n");
+        write("cas-cli/src/lib.rs", &format!("const FAMILY: &str = include_str!(\"../../{embedded}\");\n#[test] fn keeper() {{}}\n"));
+        write(embedded, "tasks: [cas-old]\n");
+        fixture_commit_as(&repo, "keeper");
+        let tested = fixture_head(&repo);
+        let keeper = stability::Identity::exact("cas-cli/src/lib.rs", "keeper");
+        stability::record(&root, &repo, &tested, stability::Proof {
+            runner: "nextest".into(), tests: vec![keeper.clone()], consecutive_passes: 5, elapsed_ms: 0,
+        }).unwrap();
+
+        write("changelog.d/cas-e705.md", "### Fixed\n\n- Recovery.\n");
+        write("docs/product-overview.d/cas-e705.md", "Recovery.\n");
+        write("docs/qa/bug-families/historical-g70-error-recovery.yaml", "tasks: [cas-e705]\n");
+        fixture_commit_as(&repo, "docs(cas-e705): fragments");
+        let documented = fixture_head(&repo);
+        assert!(stability::missing(&PassingTests::new(&root, &repo, &documented), &[keeper.clone()]).is_empty());
+
+        write(embedded, "tasks: [cas-new]\n");
+        fixture_commit_as(&repo, "docs: embedded family");
+        let voided = fixture_head(&repo);
+        // A proof at a commit the tip does not descend from never carries.
+        git(&repo, &["checkout", "--detach", &tested]).unwrap();
+        write("notes.txt", "sibling\n");
+        fixture_commit_as(&repo, "sibling");
+        let sibling = fixture_head(&repo);
+        stability::record(&root, &repo, &sibling, stability::Proof {
+            runner: "nextest".into(), tests: vec![keeper.clone()], consecutive_passes: 5, elapsed_ms: 0,
+        }).unwrap();
+        let passing = PassingTests::new(&root, &repo, &voided);
+        assert_eq!(stability::missing(&passing, &[keeper.clone()]), [keeper.clone()]);
+        let mut refused = vec![(tested, Some(vec![embedded.to_owned()])), (sibling, None)];
+        refused.sort();
+        assert_eq!(stability::invalidated(&passing, &[keeper]), refused);
     }
 
     #[test]
@@ -5075,7 +5332,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
             runner:"nextest".into(), tests:vec![identity.clone()], consecutive_passes:5, elapsed_ms:42,
         }).unwrap();
         widened::record(&producer_root, &producer, &head, widened::Proof {
-            runner:"nextest".into(), scope:scope.clone(), reason:"unclassified input".into(),
+            runner:"nextest".into(), scope:scope.clone(), reason:"unclassified input".into(), configs: Default::default(),
         }, 1).unwrap();
         record_passing_test_with_log_for_tests(&producer_root, &producer, &head, "fixture", "test(owned)");
         let mut task = cas_types::Task::new("cas-portable".into(), "Portable proof".into());
@@ -5089,7 +5346,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         let owner_root = dir.path().join("owner-store");
         let passing = PassingTests::new(&owner_root, &owner, &head).with_synced(&task.deliverables.test_receipts);
         assert!(stability::missing(&passing, &[identity.clone()]).is_empty());
-        assert!(widened::missing(&passing, &[scope.clone()]).is_empty());
+        assert!(widened::missing(&passing, &[scope.clone()], &Default::default()).is_empty());
         assert_eq!(passing.packages(), ["fixture"]);
         // Worker-authored proof is scoped to the immutable Git inputs, and
         // neither relative traversal nor fewer than five passes grants credit.
@@ -5111,7 +5368,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         let refused = PassingTests::new(&owner_root, &owner, &new_head).with_synced(&rebound);
         assert!(refused.packages().is_empty());
         assert_eq!(stability::missing(&refused, &[identity.clone()]), [identity]);
-        assert_eq!(widened::missing(&refused, &[scope.clone()]), [scope]);
+        assert_eq!(widened::missing(&refused, &[scope.clone()], &Default::default()), [scope]);
     }
 
     fn passing_test_identities(
@@ -5120,7 +5377,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         head: &str,
     ) -> Vec<(String, String, String, u64)> {
         // cas-7b2d: inspect receipt data independently of display provenance.
-        passing_test_records(root, repo, head, None)
+        passing_test_records(root, repo, head, None).0
             .into_iter()
             .map(|(head, package, test)| (head, package.expect("fixture records a Rust package"), test.filter, test.count))
             .collect()
@@ -5349,6 +5606,138 @@ PY"#);
             std::fs::metadata(&source).unwrap().ino()
         );
         assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
+    }
+
+    /// cas-fa0f (cas-de02 rollout 01a2001e:361-365): a refused detached run
+    /// exited and woke its worker, which re-armed a retry, each wake re-sending
+    /// its whole context. At a one-slot cap, real `--detach` launches now queue:
+    /// the second starts only after the first frees the slot, a producer killed
+    /// while queued is reported once, and each run wakes its worker once.
+    #[cfg(unix)]
+    #[test]
+    fn detached_runs_queue_for_one_slot_and_wake_once_cas_fa0f() {
+        const NAME: &str = "factory_worker_check::tests::detached_runs_queue_for_one_slot_and_wake_once_cas_fa0f";
+        let args = ["-p", "cas", "--lib"].map(str::to_owned);
+        match std::env::var("CAS_FA0F_CHILD").as_deref() {
+            // `cargo check ... > log 2>&1 &`, which the worker guard routes here.
+            Ok("launch") => {
+                let root = PathBuf::from(std::env::var("CAS_FA0F_ROOT").unwrap());
+                let shim = PathBuf::from(std::env::var("CAS_FA0F_SHIM").unwrap());
+                execute_detached_with(&shim, &root, &args, None, &[]).unwrap();
+                return;
+            }
+            // The detached session's `cas factory worker-check --completion-id <id> -- <args>`.
+            Ok("produce") => {
+                let argv: Vec<String> = std::env::var("CAS_FA0F_ARGV").unwrap().lines().map(str::to_owned).collect();
+                let after = |flag: &str| argv[argv.iter().position(|arg| arg == flag).unwrap() + 1].clone();
+                let root = PathBuf::from(after("--cas-root"));
+                let cwd = std::env::current_dir().unwrap();
+                let cargo = root.join(format!("cargo-{}", cwd.file_name().unwrap().to_string_lossy()));
+                let result = crate::factory_worker_runs::monitor(&root, &after("--completion-id"),
+                    || execute_at(&root, &args, &cwd, &cargo));
+                std::process::exit(i32::from(result.is_err()));
+            }
+            _ => {}
+        }
+        use crate::store::{open_agent_store, open_prompt_queue_store, open_task_store};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders=1\n").unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        let tasks = open_task_store(&root).unwrap();
+        tasks.init().unwrap();
+        let release = root.join("release");
+        let workers = ["first", "second", "killed"];
+        for name in workers {
+            let repo = root.join("worktrees").join(name);
+            fixture_commit(&repo);
+            let mut worker = cas_types::Agent::new_with_role(format!("{name}-id"), name.into(), cas_types::AgentRole::Worker);
+            worker.factory_session = Some("fa0f-session".into());
+            worker.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+            worker.metadata.insert("clone_path".into(), repo.display().to_string());
+            agents.register(&worker).unwrap();
+            let mut task = cas_types::Task::new(format!("cas-{name}"), "queued capped run".into());
+            task.status = cas_types::TaskStatus::InProgress;
+            task.assignee = Some(name.into());
+            tasks.add(&task).unwrap();
+            agents.try_claim(&task.id, &worker.id, 3600, Some("working")).unwrap();
+        }
+        let started = root.join("first-started");
+        fake_cargo(&root.join("cargo-first"), &format!(
+            "touch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.05; done", started.display(), release.display()));
+        // Building before the first run frees its slot is the failure.
+        fake_cargo(&root.join("cargo-second"), &format!("[ -f '{}' ] || exit 9", release.display()));
+        fake_cargo(&root.join("cargo-killed"), "exit 0");
+        let exe = std::env::current_exe().unwrap();
+        let shim = root.join("cas-stand-in");
+        fake_cargo(&shim, &format!(
+            "CAS_FA0F_ARGV=$(printf '%s\\n' \"$@\") CAS_FA0F_CHILD=produce exec '{}' --exact {NAME} --nocapture --test-threads=1",
+            exe.display()));
+        let launch = |name: &str| {
+            let log = root.join(format!("{name}.log"));
+            let output = std::fs::File::create(&log).unwrap();
+            let status = std::process::Command::new(&exe)
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+                .current_dir(root.join("worktrees").join(name))
+                .env("CAS_FA0F_CHILD", "launch").env("CAS_FA0F_ROOT", &root).env("CAS_FA0F_SHIM", &shim)
+                .stdout(output.try_clone().unwrap()).stderr(output)
+                .status().unwrap();
+            assert!(status.success(), "{}", std::fs::read_to_string(&log).unwrap_or_default());
+        };
+        let wait_for = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !done() {
+                let logs = workers.map(|name| std::fs::read_to_string(root.join(format!("{name}.log"))).unwrap_or_default());
+                assert!(std::time::Instant::now() < deadline, "{what}: {logs:#?}");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        let queued = |name: &str| crate::factory_capacity_wait::view(&root, &format!("{name}-id"), chrono::Utc::now()).unwrap().is_some();
+        let run = |name: &str| crate::factory_worker_runs::snapshot(&root, name, None, chrono::Utc::now()).unwrap();
+        let wakes = |name: &str| open_prompt_queue_store(&root).unwrap()
+            .peek_for_targets(&[name], Some("fa0f-session"), 10).unwrap().len();
+
+        launch("first");
+        wait_for("first run holds the only slot", &|| started.exists());
+        // Queue in a known order: an earlier equal-priority waiter goes first.
+        launch("second");
+        wait_for("second run queues", &|| queued("second"));
+        launch("killed");
+        wait_for("third run queues", &|| queued("killed"));
+        for name in ["second", "killed"] {
+            assert!(run(name).running && run(name).completion.is_none(), "{name} waits instead of exiting");
+            assert_eq!(wakes(name), 0, "{name}: waiting sends no wake");
+        }
+
+        // SIGKILL the queued producer this test launched; the daemon's
+        // detached-run scan reports it exactly once.
+        let producer = std::fs::read_dir(root.join("worker-runs")).unwrap()
+            .map(|entry| serde_json::from_slice::<serde_json::Value>(&std::fs::read(entry.unwrap().path()).unwrap_or_default()))
+            .filter_map(Result::ok)
+            .find(|run| run["worker"] == "killed").unwrap()["pid"].as_u64().unwrap() as i32;
+        assert_eq!(unsafe { libc::kill(producer, libc::SIGKILL) }, 0);
+        wait_for("killed producer exits", &|| !run("killed").running);
+        for _ in 0..2 {
+            crate::factory_worker_runs::reconcile(&root, Some("fa0f-session"), chrono::Utc::now()).unwrap();
+        }
+        assert_eq!(wakes("killed"), 1, "a run lost while queued is reported once");
+
+        std::fs::write(&release, "").unwrap();
+        wait_for("both runs finish", &|| ["first", "second"].iter().all(|name| run(name).completion.is_some()));
+        crate::factory_worker_runs::reconcile(&root, Some("fa0f-session"), chrono::Utc::now()).unwrap();
+        for name in ["first", "second"] {
+            assert_eq!(run(name).completion.unwrap().exit_code, Some(0), "{name} ran after admission");
+            let rows = open_prompt_queue_store(&root).unwrap()
+                .peek_for_targets(&[name], Some("fa0f-session"), 10).unwrap();
+            assert_eq!(rows.len(), 1, "{name}: exactly one completion wake");
+            assert!(rows[0].prompt.contains("check: PASS "), "{name}: the wake carries the receipt");
+        }
+        assert!(!queued("second"), "admission ends the wait");
     }
 
     /// Capacity is waiting for local resources, not a yielded task.

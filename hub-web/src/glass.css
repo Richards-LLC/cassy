@@ -477,7 +477,7 @@ html[data-scheme="dark"] {
      fields remain beneath it; at the end, or with nothing to scroll (no active
      timeline), the bar is the sheet with its hairline. */
   @supports (animation-timeline: scroll()) {
-    :root :is(.launch-sheet, #operator-inbox-dialog) .dialog-actions { background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; animation: dialog-bar-frost linear; animation-timeline: scroll(nearest block); animation-range: 0 calc(100% - 2px); }
+    :root #operator-inbox-dialog .dialog-actions { background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; animation: dialog-bar-frost linear; animation-timeline: scroll(nearest block); animation-range: 0 calc(100% - 2px); }
   }
   @keyframes dialog-bar-frost { from, to { background: var(--look-glass-bar); -webkit-backdrop-filter: var(--look-blur); backdrop-filter: var(--look-blur); } }
   /* cas-a56c: a status line straight above the bar already draws the rule; a

@@ -111,6 +111,43 @@ pub(crate) fn replace_raw_artifact_note(notes: &str, receipt: &str) -> Option<St
     Some(next)
 }
 
+/// A park's evidence-sync summary: its timestamped header, then the manifest.
+pub fn is_evidence_sync_block(block: &str) -> bool {
+    let mut lines = block.lines();
+    is_timestamped_note(block)
+        && lines.next().and_then(|line| line.get(18..))
+            .is_some_and(|rest| rest.trim_start().starts_with("Evidence synced for review on "))
+        && lines.next().is_some_and(|line| line.starts_with("EVIDENCE_SYNC: "))
+}
+
+/// GH #2322: a park's evidence-sync note supersedes every earlier one (readers
+/// take only the newest manifest), so a retried park replaces it.
+pub(crate) fn replace_evidence_sync(notes: &str, note: &str) -> Option<String> {
+    let is_sync = is_evidence_sync_block;
+    if !is_sync(note) {
+        return None;
+    }
+    let mut next = notes.to_string();
+    for block in note_blocks(notes).into_iter().rev().filter(|block| is_sync(block)) {
+        let start = block.as_ptr() as usize - notes.as_ptr() as usize;
+        let mut range = start..start + block.len();
+        if next[range.end..].starts_with("\n\n") {
+            range.end += 2;
+        } else if range.start >= 2 {
+            range.start -= 2;
+        }
+        next.replace_range(range, "");
+    }
+    if next.len() == notes.len() {
+        return None;
+    }
+    if !next.is_empty() {
+        next.push_str("\n\n");
+    }
+    next.push_str(note);
+    Some(next)
+}
+
 fn provenance_blocks(notes: &str) -> Vec<Range<usize>> {
     let mut blocks = Vec::new();
     let mut open = None;

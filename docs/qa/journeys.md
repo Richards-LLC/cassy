@@ -141,16 +141,17 @@ Stopped-session draft regression (cas-45b8): type in two conversations, leave on
 - **Goal:** I can read what was said before, back to the start
 - **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/markdown-renderer.ts`, `hub-web/src/time.ts`, `hub-web/src/attachment-sheet.ts`, `hub-web/src/artifact-open.ts`
 - **Suite:** `hub-web/e2e/journeys/read-history.journey.ts`
-- **Gaps:** history pages come from the double; real rows are covered by `hub-web/scripts/conversation-history-qa.mjs`; opening a report the supervisor sent was deleted as a release-path flake (cas-0997) and awaits a non-flaky rewrite (cas-9fcc)
+- **Gaps:** history pages come from the double; real rows are covered by `hub-web/scripts/conversation-history-qa.mjs`
 
 #### Steps
 
 1. Open the conversation and see the recent turns — the latest exchange is on screen at once
 2. Load earlier turns — "Load earlier" fetches the previous page
 3. Reach the start of the conversation — "No earlier history" appears, with day separators
-4. The machine reconnects as the reader tabs back to Load earlier — a separate part on a multiplex machine: the reader has loaded one earlier page and moved on to the composer; the machine drops and comes back, and the reader tabs back to "Load earlier" the moment the header reads Live; focus stays on the button through the shell rebuild, and Enter loads the start of the conversation, landing on "No earlier history" (cas-d362)
-5. The reader tabs to Load earlier as the machine comes back, and sees it — four separate parts on a multiplex machine with a tall history, at desktop 1280 and phone 390, with the reader resting in the composer (the thread follows its tail) or outside the thread (the thread stays on their earlier page): the focused "Load earlier" stays inside the thread through the reconnect, never pinned or put back above it, and Enter still loads the start of the conversation (cas-c2cb)
-6. See a page the supervisor sent, inline — at desktop 1280 and phone 390, an HTML attachment shows its page beneath the file card in a frame with every sandbox permission withheld, on the machine's own origin through a short-lived ticket; its diagram, images and video load; a hostile page runs no script, leaves Commander's storage untouched, can't move the top window, open a window, submit a form or reach another host, and another site can't frame it; in dark mode the frame follows the theme and a page that supports dark renders dark (cas-2326); the card opens the same page in its own tab, still sandboxed, never the raw stored file (cas-3aff)
+4. Open a report the supervisor sent — opening the file shows the hosted copy in a new tab through a short-lived signed link from the machine; every failure is said on the file card itself, never in a toast far from it, and leaves no tab open; a file that was never uploaded to Cloud says so, and opening it again opens no tab at all; Cloud failing ("wait a minute, then open it again") says what to do; a connected machine that sends nothing says it is connected but didn't send the file, never that it is off; when the connection then drops, that card says it in the banner's words ("Lost connection to <machine>. Reconnecting… Open the file again when it's back") without another click and without a second announcement, never "is connected" beside Reconnecting
+5. The machine reconnects as the reader tabs back to Load earlier — a separate part on a multiplex machine: the reader has loaded one earlier page and moved on to the composer; the machine drops and comes back, and the reader tabs back to "Load earlier" the moment the header reads Live; focus stays on the button through the shell rebuild, and Enter loads the start of the conversation, landing on "No earlier history" (cas-d362)
+6. The reader tabs to Load earlier as the machine comes back, and sees it — four separate parts on a multiplex machine with a tall history, at desktop 1280 and phone 390, with the reader resting in the composer (the thread follows its tail) or outside the thread (the thread stays on their earlier page): the focused "Load earlier" stays inside the thread through the reconnect, never pinned or put back above it, and Enter still loads the start of the conversation (cas-c2cb)
+7. See a page the supervisor sent, inline — at desktop 1280 and phone 390, an HTML attachment shows its page beneath the file card in a frame with every sandbox permission withheld, on the machine's own origin through a short-lived ticket; its diagram, images and video load; a hostile page runs no script, leaves Commander's storage untouched, can't move the top window, open a window, submit a form or reach another host, and another site can't frame it; in dark mode the frame follows the theme and a page that supports dark renders dark (cas-2326); the card opens the same page in its own tab, still sandboxed, never the raw stored file (cas-3aff)
 
 #### Expected experience
 
@@ -335,11 +336,19 @@ Stopped-session draft regression (cas-45b8): type in two conversations, leave on
 - **Goal:** I reply to a supervisor from my phone and get back to the list
 - **Touches:** `hub-web/src/viewport.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/composer-markup.ts`
 - **Suite:** `hub-web/e2e/journeys/phone.journey.ts`, `hub-web/e2e/journeys/conversation-layout.journey.ts`
-- **Gaps:** a real on-screen keyboard resize is not emulated; the list-to-reply-and-back walk was deleted as a release-path flake (cas-0997) and awaits a non-flaky rewrite (cas-9fcc)
+- **Gaps:** a real on-screen keyboard resize is not emulated
 
 #### Steps
 
-1. Turn the phone sideways with the notch at one edge — at 844×390 with 44 px side insets, no conversation row, Write to a supervisor, footer control, thread chip, Waiting-on-you strip, composer field or Send, or Raw output title and Close sits under either notch band (cas-5072; separate parts at 844×390, where Raw output is a bottom sheet, and 932×430, where it is a side drawer with no empty left gutter, in dark)
+1. Open the list on a phone — full-width list, no sideways scrolling, and the search offers no keyboard shortcut
+2. Tap a conversation — the thread replaces the list, with a back control
+3. Reply with the phone keyboard — send, then see the answer
+4. Go back to the list — the row shows the latest turn
+5. Scroll back through a long thread — "Jump to latest" takes its own row above the composer, never over a turn, and one tap returns to the newest turn
+6. Jump from the palette with the keyboard's Enter — opened with a tap, the palette's filter takes the phone keyboard; Enter opens the match with the keyboard gone, not in the reply box
+7. See the switched-off machine named plainly — the footer counts it with a warning dot, and Paired machines says "Can't reach · retrying", shows times on the thread's 12-hour clock and "Version unknown until it connects"
+8. Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected" toast sits below the thread header, never over the back link, project and host, and on the list below the brand row. After its 3.2-second lifetime, the status region is empty so the expired notice is no longer read.
+9. Turn the phone sideways with the notch at one edge — at 844×390 with 44 px side insets, no conversation row, Write to a supervisor, footer control, thread chip, Waiting-on-you strip, composer field or Send, or Raw output title and Close sits under either notch band (cas-5072; separate parts at 844×390, where Raw output is a bottom sheet, and 932×430, where it is a side drawer with no empty left gutter, in dark)
 
 #### Expected experience
 
@@ -809,18 +818,13 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 - **Touches:** `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/connection.ts`, `hub-web/src/main.ts`, `hub-web/src/styles.css`
 - **Suite:** `hub-web/e2e/journeys/whole-picture.journey.ts`
 - **Gaps:** the work-event stream is a protocol double; the daemon's transcript indexing, redaction, change probe and the hub's follower-only relay are proven by the Rust tests (`work_events::tests`, `hub::tests`)
+- **Not exercised:** the Show work steps (off by default, turn it on, open a tool call's detail, live new work, the setting surviving a reload, typed work scope) have no journey case: both show-work cases were release-path flakes (cas-94a8, cas-929df); race-free rewrite pending. `work-picture.test.ts` still covers the typed work renderer.
 
 #### Steps
 
-1. Show work is off and the thread is replies only — the switch reads off, no work row shows and no work page is read
-2. Turn Show work on — the work between the two replies is one collapsed block in order, its task chip showing and its rows not; a worker's own tool call stays in its timeline
-3. Open the work and one tool call's detail — by keyboard, focus stays on each control, the detail loads on demand and markup in it reads as text
-4. New work arrives live without redrawing the thread — the daemon's change notice brings the new row and the earlier reply keeps its node
-5. Show work stays as set on this device — a reload keeps it on, and turning it off returns the thread to replies only
-6. Open a worker's timeline from Tasks & progress — a right drawer on desktop, a bottom sheet on a phone, with the worker's state, task and its own newest rows first
-7. The timeline follows the worker live — the daemon's change notice brings the worker's new row to the top
-8. Close the timeline back to its worker row — Escape closes it and focus returns to the row's Timeline control
-9. Read typed work scope — reads, searches, commands and edits expose explicit v2 scope and retain their exact raw record; failed exit codes are named, unknown exec wrappers stay readable, routine turn notices collapse together, and an open row retains focus and expansion through a same-ID metadata update
+1. Open a worker's timeline from Tasks & progress — a right drawer on desktop, a bottom sheet on a phone, with the worker's state, task and its own newest rows first
+2. The timeline follows the worker live — the daemon's change notice brings the worker's new row to the top
+3. Close the timeline back to its worker row — Escape closes it and focus returns to the row's Timeline control
 
 #### Expected experience
 

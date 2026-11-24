@@ -133,10 +133,14 @@ fn notice(root: &Path, request: &Retry, detail: &str, red: bool) -> Result<()> {
     } else {
         format!("merge-ci-retry:{}:{}", request.task, request.sha)
     };
-    let worker = request
-        .branch
-        .strip_prefix("factory/")
-        .unwrap_or(&request.branch);
+    // cas-dc08: name the branch's registered owner; the raw branch remainder
+    // (`<worker>-<task>`) is not a worker.
+    let registered = crate::factory_isolation::registered_factory_names(root);
+    let worker = match crate::factory_isolation::branch_ownership("", Some(&request.branch), &registered) {
+        crate::factory_isolation::BranchOwnership::Sibling { owner } => owner,
+        _ => "unregistered".to_string(),
+    };
+    let worker = worker.as_str();
     let body = crate::prompt_revalidation::attach_blocker_envelope(
         &format!(
             "Automatic merge stopped for {} at {}: {detail}. No automatic override was granted.",

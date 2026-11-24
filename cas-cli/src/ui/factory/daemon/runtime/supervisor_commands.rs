@@ -1092,7 +1092,7 @@ mod tests {
                     assert!(std::fs::read(root.path().join("input")).unwrap().is_empty(), "a Codex reload types nothing");
                     match receipt.phase {
                         Phase::Submitted => assert!(daemon.supervisor_commands.restart.is_some(), "{}", receipt.detail),
-                        Phase::Refused => assert!(receipt.detail.starts_with("Supervisor restart refused"), "{}", receipt.detail),
+                        Phase::Refused => assert!(daemon.supervisor_commands.restart.is_none() && !daemon.app.mux.supervisor().unwrap().has_exited(), "a refused restart keeps the pane: {}", receipt.detail),
                         phase => panic!("unexpected Codex reload phase {phase:?}: {}", receipt.detail),
                     }
                 }

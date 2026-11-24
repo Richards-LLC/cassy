@@ -198,6 +198,10 @@ impl TestReceipt {
         if let Some(proof) = &self.stability {
             note.push_str(&format!(" [stability: {} consecutive passes; changed_tests={}; runner={}; elapsed_ms={}]",
                 proof.consecutive_passes, proof.tests.len(), proof.runner, proof.elapsed_ms));
+            if !proof.inactive.is_empty() {
+                note.push_str(&format!(" [environment-gated changed tests inactive, not run: {}]",
+                    proof.inactive.iter().map(|test| format!("{} :: {}", test.path, test.name)).collect::<Vec<_>>().join("; ")));
+            }
         }
         if let Some(proof) = &self.widened {
             note.push_str(&format!(" [widened: {:?}; runner={}; passes=1]", proof.scope, proof.runner));
@@ -627,6 +631,7 @@ pub(crate) fn record_supervisor_test(
             tests: owned.into_iter().map(|test| test.identity).collect(),
             consecutive_passes: stability::REQUIRED_PASSES,
             elapsed_ms: 0,
+            inactive: Vec::new(),
         })
     };
     // A receipt is not transferable across ownership or source mutations
@@ -2987,6 +2992,7 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
                     runner: "nextest".into(), tests: owned_identities,
                     consecutive_passes: stability::REQUIRED_PASSES,
                     elapsed_ms: started.elapsed().as_millis(),
+                    inactive: Vec::new(),
                 }),
                 widened: widened_proof,
                 selected_log,
@@ -3828,6 +3834,7 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
         let mut receipt: CheckReceipt = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         receipt.test.as_mut().unwrap().stability = Some(stability::Proof {
             runner: "nextest".into(), tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0,
+            inactive: Vec::new(),
         });
         std::fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
 
@@ -5330,6 +5337,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         let scope = widened::Scope::Crate("fixture".into());
         stability::record(&producer_root, &producer, &head, stability::Proof {
             runner:"nextest".into(), tests:vec![identity.clone()], consecutive_passes:5, elapsed_ms:42,
+            inactive: Vec::new(),
         }).unwrap();
         widened::record(&producer_root, &producer, &head, widened::Proof {
             runner:"nextest".into(), scope:scope.clone(), reason:"unclassified input".into(), configs: Default::default(),

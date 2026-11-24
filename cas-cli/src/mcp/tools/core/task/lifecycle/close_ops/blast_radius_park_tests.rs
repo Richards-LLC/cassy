@@ -333,7 +333,7 @@ async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
     stability::record(&f.cas_dir(), &f.worker_path, &head, stability::Proof {
         runner: "nextest".into(),
         tests: vec![stability::Identity::exact("crates/widget/src/gear_tests.rs", "gear::tests::turns")],
-        consecutive_passes: stability::REQUIRED_PASSES, elapsed_ms: 0,
+        consecutive_passes: stability::REQUIRED_PASSES, elapsed_ms: 0, inactive: Vec::new(),
     }).unwrap();
     let parked = call(&f.worker, serde_json::json!({
         "action": "close", "id": ID, "reason": "parent tests cover delivery",

@@ -723,7 +723,73 @@ fn lock_file(path: &Path) -> Result<File> {
 }
 
 fn waiting_for_admission(reason: &str) -> String {
-    format!("Waiting for build admission: {reason}.\nCapacity wait: keep the task in_progress and retain its lease. Do not set blocked or page the supervisor for a routine capacity retry.\nRetry the same capped Cargo command after 120 seconds; priority queues stay quiet, while disk waits share a supervisor notice after 20 minutes that updates only when waiting workers or reclaimable bytes change. Report an actual need for assistance immediately.")
+    format!("Waiting for build admission: {reason}.\nCapacity wait: keep the task in_progress and retain its lease. Do not set blocked, page the supervisor or arm retry reminders for capacity: a backgrounded run queues for a builder slot, starts when one frees and wakes you once with its result. Priority queues stay quiet, while disk waits share a supervisor notice after 20 minutes that updates only when waiting workers or reclaimable bytes change. Report an actual need for assistance immediately.")
+}
+
+/// A typed capacity refusal: retryable without rerunning anything before it.
+#[derive(Debug)]
+struct AdmissionWait(String);
+impl std::fmt::Display for AdmissionWait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for AdmissionWait {}
+
+#[cfg(not(test))]
+const ADMISSION_POLL: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(test)]
+const ADMISSION_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+thread_local! {
+    /// cas-fa0f: the detached run this thread produces; it owes its worker one
+    /// completion wake, so it queues for admission instead of exiting.
+    static QUEUED_RUN: std::cell::RefCell<Option<(PathBuf, String)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Queue this thread's admissions for `run` while the guard lives.
+pub(crate) struct QueuedRun(());
+impl QueuedRun {
+    pub(crate) fn enter(root: &Path, run: &str) -> Self {
+        QUEUED_RUN.with(|queued| *queued.borrow_mut() = Some((root.to_path_buf(), run.to_string())));
+        Self(())
+    }
+}
+impl Drop for QueuedRun {
+    fn drop(&mut self) {
+        QUEUED_RUN.with(|queued| *queued.borrow_mut() = None);
+    }
+}
+
+/// Retry `attempt` while it refuses for capacity and a queued run's worker is
+/// still there to receive its completion. Each refusal refreshes the durable
+/// capacity wait, which keeps the run's priority position and escalation.
+/// A foreground refusal names `command`, the backgrounded form that queues.
+fn admit<T>(command: &str, mut attempt: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut queued_since = None;
+    loop {
+        match attempt() {
+            Err(error) if error.downcast_ref::<AdmissionWait>().is_some()
+                && QUEUED_RUN.with(|queued| queued.borrow().as_ref()
+                    .is_some_and(|(root, run)| crate::factory_worker_runs::owner_current(root, run))) =>
+            {
+                if queued_since.is_none() {
+                    queued_since = Some(std::time::Instant::now());
+                    println!("worker-check: queued for build admission; this run starts when capacity frees and wakes its worker once.\n{error}");
+                }
+                std::thread::sleep(ADMISSION_POLL);
+            }
+            Err(error) if queued_since.is_none() && error.downcast_ref::<AdmissionWait>().is_some() => {
+                return Err(AdmissionWait(format!("{error}\nQueue it instead: {command}")).into());
+            }
+            result => {
+                if let Some(since) = queued_since && result.is_ok() {
+                    println!("worker-check: admitted after {}s in the build queue", since.elapsed().as_secs());
+                }
+                return result;
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -735,20 +801,33 @@ impl std::fmt::Display for CapacityRefusal {
 }
 impl std::error::Error for CapacityRefusal {}
 
-fn recorded_refusal(root: &Path, repo: &Path, cause: &str, kind: crate::factory_capacity_wait::CapacityKind) -> anyhow::Error {
-    match crate::factory_capacity_wait::record_refusal_with_kind(root, repo, cause, kind, chrono::Utc::now()) {
-        Ok(Some(wait)) => {
-            let mut message = waiting_for_admission(&wait.cause);
-            message.push_str(&format!("\nCapacity wait recorded for {}; next retry: {}.", wait.task_id, wait.next_retry.to_rfc3339()));
-            anyhow::anyhow!(message)
-        }
-        Ok(None) => anyhow::anyhow!(waiting_for_admission(cause)),
-        Err(error) => {
-            let mut message = waiting_for_admission(cause);
-            message.push_str(&format!("\nCapacity wait could not be recorded: {error}. Report storage/ownership assistance if needed."));
-            anyhow::anyhow!(message)
-        }
+/// The exact backgrounded form of this capped command, which the worker
+/// guard routes to a detached, queued run.
+fn queue_command(cas_root: &Path, args: &[String]) -> String {
+    let quote = |arg: &String| if !arg.is_empty() && arg.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_@.+/=:,-".contains(&byte)) {
+        arg.clone()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\"'\"'"))
+    };
+    let words = args.iter().map(quote).collect::<Vec<_>>().join(" ");
+    if javascript::allowed_args(args) {
+        // Only Cargo shapes are rewritten by the guard; name the detached runner.
+        format!("cas factory worker-check --cas-root {} --detach -- {words} > target/worker-tests.log 2>&1",
+            quote(&cas_root.display().to_string()))
+    } else if args.first().is_some_and(|arg| arg == "nextest") {
+        format!("cargo {words} > target/worker-tests.log 2>&1 &")
+    } else {
+        format!("cargo check {words} > target/worker-check.log 2>&1 &")
     }
+}
+
+fn recorded_refusal(root: &Path, repo: &Path, cause: &str, kind: crate::factory_capacity_wait::CapacityKind) -> anyhow::Error {
+    let message = match crate::factory_capacity_wait::record_refusal_with_kind(root, repo, cause, kind, chrono::Utc::now()) {
+        Ok(Some(wait)) => format!("{}\nCapacity wait recorded for {}.", waiting_for_admission(&wait.cause), wait.task_id),
+        Ok(None) => waiting_for_admission(cause),
+        Err(error) => format!("{}\nCapacity wait could not be recorded: {error}. Report storage/ownership assistance if needed.", waiting_for_admission(cause)),
+    };
+    AdmissionWait(message).into()
 }
 
 #[derive(Debug)]
@@ -2584,7 +2663,7 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
     let config = crate::config::Config::load(&cas_root)?.factory();
     let mut widened_proof = None;
     let mut owned_tests = if let Some(test) = &test {
-        capacity_preflight(&cas_root, &repo, &config, &cas_root.join("worker-check-slots"))?;
+        admit(&queue_command(&cas_root, args), || capacity_preflight(&cas_root, &repo, &config, &cas_root.join("worker-check-slots")))?;
         let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
         let classified = with_classification_progress(
             std::time::Duration::from_secs(30),
@@ -2652,50 +2731,43 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
         && test.filter.contains("factory_tui_headful")) {
         println!("Live headful: NOT EXERCISED (CAS_HEADFUL_E2E=1 not set)");
     }
-    let admission = lock_file(&slots.join("admission.lock"))?;
-    admission.lock_exclusive()?;
-    let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
-    let violations = snapshot.violations();
-    if !violations.is_empty() {
-        let refusal = violation_refusal(&cas_root, &repo, &snapshot, &violations);
-        drop(admission);
-        return Err(refusal);
-    }
-    // OS locks close the snapshot-to-spawn race, even when the soft guard's
-    // environment override is set. No force/disable option bypasses the cap.
-    let available_slots = available_slot_count(&slots, config.max_concurrent_builders)?;
-    match crate::factory_capacity_wait::priority_refusal(
-        &cas_root,
-        &repo,
-        chrono::Utc::now(),
-        available_slots,
-    ) {
-        Ok(Some(cause)) => {
-            let refusal = recorded_refusal(&cas_root, &repo, &cause, crate::factory_capacity_wait::CapacityKind::PriorityQueue);
-            drop(admission);
-            return Err(refusal);
+    let (admission, slot, snapshot) = admit(&queue_command(&cas_root, args), || {
+        let admission = lock_file(&slots.join("admission.lock"))?;
+        admission.lock_exclusive()?;
+        let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
+        let violations = snapshot.violations();
+        if !violations.is_empty() {
+            return Err(violation_refusal(&cas_root, &repo, &snapshot, &violations));
         }
-        Ok(None) => {}
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                checkout = %repo.display(),
-                "capacity priority lookup failed; continuing build admission"
-            );
-        }
-    }
-    let slot = match acquire_slot(&slots, config.max_concurrent_builders) {
-        Ok(slot) => slot,
-        Err(error) => {
-            if let Some(refusal) = error.downcast_ref::<CapacityRefusal>() {
-                let refusal = recorded_refusal(&cas_root, &repo, &refusal.0, crate::factory_capacity_wait::CapacityKind::Other);
-                drop(admission);
-                return Err(refusal);
+        // OS locks close the snapshot-to-spawn race, even when the soft guard's
+        // environment override is set. No force/disable option bypasses the cap.
+        let available_slots = available_slot_count(&slots, config.max_concurrent_builders)?;
+        match crate::factory_capacity_wait::priority_refusal(
+            &cas_root,
+            &repo,
+            chrono::Utc::now(),
+            available_slots,
+        ) {
+            Ok(Some(cause)) => {
+                return Err(recorded_refusal(&cas_root, &repo, &cause, crate::factory_capacity_wait::CapacityKind::PriorityQueue));
             }
-            drop(admission);
-            return Err(error);
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    checkout = %repo.display(),
+                    "capacity priority lookup failed; continuing build admission"
+                );
+            }
         }
-    };
+        match acquire_slot(&slots, config.max_concurrent_builders) {
+            Ok(slot) => Ok((admission, slot, snapshot)),
+            Err(error) => match error.downcast_ref::<CapacityRefusal>() {
+                Some(refusal) => Err(recorded_refusal(&cas_root, &repo, &refusal.0, crate::factory_capacity_wait::CapacityKind::Other)),
+                None => Err(error),
+            },
+        }
+    })?;
     report_disabled_admission(&cas_root, &snapshot);
     if let Err(error) = crate::factory_capacity_wait::admitted(&cas_root, &repo) {
         tracing::warn!(%error, "capacity wait clear failed; continuing admitted build");
@@ -5534,6 +5606,138 @@ PY"#);
             std::fs::metadata(&source).unwrap().ino()
         );
         assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
+    }
+
+    /// cas-fa0f (cas-de02 rollout 01a2001e:361-365): a refused detached run
+    /// exited and woke its worker, which re-armed a retry, each wake re-sending
+    /// its whole context. At a one-slot cap, real `--detach` launches now queue:
+    /// the second starts only after the first frees the slot, a producer killed
+    /// while queued is reported once, and each run wakes its worker once.
+    #[cfg(unix)]
+    #[test]
+    fn detached_runs_queue_for_one_slot_and_wake_once_cas_fa0f() {
+        const NAME: &str = "factory_worker_check::tests::detached_runs_queue_for_one_slot_and_wake_once_cas_fa0f";
+        let args = ["-p", "cas", "--lib"].map(str::to_owned);
+        match std::env::var("CAS_FA0F_CHILD").as_deref() {
+            // `cargo check ... > log 2>&1 &`, which the worker guard routes here.
+            Ok("launch") => {
+                let root = PathBuf::from(std::env::var("CAS_FA0F_ROOT").unwrap());
+                let shim = PathBuf::from(std::env::var("CAS_FA0F_SHIM").unwrap());
+                execute_detached_with(&shim, &root, &args, None, &[]).unwrap();
+                return;
+            }
+            // The detached session's `cas factory worker-check --completion-id <id> -- <args>`.
+            Ok("produce") => {
+                let argv: Vec<String> = std::env::var("CAS_FA0F_ARGV").unwrap().lines().map(str::to_owned).collect();
+                let after = |flag: &str| argv[argv.iter().position(|arg| arg == flag).unwrap() + 1].clone();
+                let root = PathBuf::from(after("--cas-root"));
+                let cwd = std::env::current_dir().unwrap();
+                let cargo = root.join(format!("cargo-{}", cwd.file_name().unwrap().to_string_lossy()));
+                let result = crate::factory_worker_runs::monitor(&root, &after("--completion-id"),
+                    || execute_at(&root, &args, &cwd, &cargo));
+                std::process::exit(i32::from(result.is_err()));
+            }
+            _ => {}
+        }
+        use crate::store::{open_agent_store, open_prompt_queue_store, open_task_store};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders=1\n").unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        let tasks = open_task_store(&root).unwrap();
+        tasks.init().unwrap();
+        let release = root.join("release");
+        let workers = ["first", "second", "killed"];
+        for name in workers {
+            let repo = root.join("worktrees").join(name);
+            fixture_commit(&repo);
+            let mut worker = cas_types::Agent::new_with_role(format!("{name}-id"), name.into(), cas_types::AgentRole::Worker);
+            worker.factory_session = Some("fa0f-session".into());
+            worker.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+            worker.metadata.insert("clone_path".into(), repo.display().to_string());
+            agents.register(&worker).unwrap();
+            let mut task = cas_types::Task::new(format!("cas-{name}"), "queued capped run".into());
+            task.status = cas_types::TaskStatus::InProgress;
+            task.assignee = Some(name.into());
+            tasks.add(&task).unwrap();
+            agents.try_claim(&task.id, &worker.id, 3600, Some("working")).unwrap();
+        }
+        let started = root.join("first-started");
+        fake_cargo(&root.join("cargo-first"), &format!(
+            "touch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.05; done", started.display(), release.display()));
+        // Building before the first run frees its slot is the failure.
+        fake_cargo(&root.join("cargo-second"), &format!("[ -f '{}' ] || exit 9", release.display()));
+        fake_cargo(&root.join("cargo-killed"), "exit 0");
+        let exe = std::env::current_exe().unwrap();
+        let shim = root.join("cas-stand-in");
+        fake_cargo(&shim, &format!(
+            "CAS_FA0F_ARGV=$(printf '%s\\n' \"$@\") CAS_FA0F_CHILD=produce exec '{}' --exact {NAME} --nocapture --test-threads=1",
+            exe.display()));
+        let launch = |name: &str| {
+            let log = root.join(format!("{name}.log"));
+            let output = std::fs::File::create(&log).unwrap();
+            let status = std::process::Command::new(&exe)
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+                .current_dir(root.join("worktrees").join(name))
+                .env("CAS_FA0F_CHILD", "launch").env("CAS_FA0F_ROOT", &root).env("CAS_FA0F_SHIM", &shim)
+                .stdout(output.try_clone().unwrap()).stderr(output)
+                .status().unwrap();
+            assert!(status.success(), "{}", std::fs::read_to_string(&log).unwrap_or_default());
+        };
+        let wait_for = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !done() {
+                let logs = workers.map(|name| std::fs::read_to_string(root.join(format!("{name}.log"))).unwrap_or_default());
+                assert!(std::time::Instant::now() < deadline, "{what}: {logs:#?}");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        let queued = |name: &str| crate::factory_capacity_wait::view(&root, &format!("{name}-id"), chrono::Utc::now()).unwrap().is_some();
+        let run = |name: &str| crate::factory_worker_runs::snapshot(&root, name, None, chrono::Utc::now()).unwrap();
+        let wakes = |name: &str| open_prompt_queue_store(&root).unwrap()
+            .peek_for_targets(&[name], Some("fa0f-session"), 10).unwrap().len();
+
+        launch("first");
+        wait_for("first run holds the only slot", &|| started.exists());
+        // Queue in a known order: an earlier equal-priority waiter goes first.
+        launch("second");
+        wait_for("second run queues", &|| queued("second"));
+        launch("killed");
+        wait_for("third run queues", &|| queued("killed"));
+        for name in ["second", "killed"] {
+            assert!(run(name).running && run(name).completion.is_none(), "{name} waits instead of exiting");
+            assert_eq!(wakes(name), 0, "{name}: waiting sends no wake");
+        }
+
+        // SIGKILL the queued producer this test launched; the daemon's
+        // detached-run scan reports it exactly once.
+        let producer = std::fs::read_dir(root.join("worker-runs")).unwrap()
+            .map(|entry| serde_json::from_slice::<serde_json::Value>(&std::fs::read(entry.unwrap().path()).unwrap_or_default()))
+            .filter_map(Result::ok)
+            .find(|run| run["worker"] == "killed").unwrap()["pid"].as_u64().unwrap() as i32;
+        assert_eq!(unsafe { libc::kill(producer, libc::SIGKILL) }, 0);
+        wait_for("killed producer exits", &|| !run("killed").running);
+        for _ in 0..2 {
+            crate::factory_worker_runs::reconcile(&root, Some("fa0f-session"), chrono::Utc::now()).unwrap();
+        }
+        assert_eq!(wakes("killed"), 1, "a run lost while queued is reported once");
+
+        std::fs::write(&release, "").unwrap();
+        wait_for("both runs finish", &|| ["first", "second"].iter().all(|name| run(name).completion.is_some()));
+        crate::factory_worker_runs::reconcile(&root, Some("fa0f-session"), chrono::Utc::now()).unwrap();
+        for name in ["first", "second"] {
+            assert_eq!(run(name).completion.unwrap().exit_code, Some(0), "{name} ran after admission");
+            let rows = open_prompt_queue_store(&root).unwrap()
+                .peek_for_targets(&[name], Some("fa0f-session"), 10).unwrap();
+            assert_eq!(rows.len(), 1, "{name}: exactly one completion wake");
+            assert!(rows[0].prompt.contains("check: PASS "), "{name}: the wake carries the receipt");
+        }
+        assert!(!queued("second"), "admission ends the wait");
     }
 
     /// Capacity is waiting for local resources, not a yielded task.

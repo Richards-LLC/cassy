@@ -8254,6 +8254,13 @@ async fn resolved_task_proof_freezes_scope_until_supervisor_starts_a_fresh_cycle
         }))))
         .await
         .expect("fresh scope may be updated");
+    // GH #2401: park reads the worker's AC checklist before verification.
+    let artifacts = cas::config::resolved_factory_artifacts_root(
+        cas::config::Config::load(&cas_root).unwrap().factory().artifacts_root.as_deref(),
+    );
+    let [checklist, _] = cas::config::factory_task_artifact_dirs(&cas_root, &artifacts, &fresh.id);
+    std::fs::create_dir_all(&checklist).unwrap();
+    std::fs::write(checklist.join("AC-CHECKLIST.md"), "| AC1 | MET | cas-cli/src/lib.rs:1 | fixture receipt |\n").unwrap();
 
     let close = {
         let mut role = VarGuard::set(&mut env, "CAS_AGENT_ROLE", "worker");

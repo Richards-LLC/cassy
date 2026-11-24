@@ -1977,6 +1977,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     if let Some(lane) = args.lane.as_deref() {
         let (recipe, warnings) = crate::factory_auth_health::resolve_lane_account_models(
             lane, &mut resolved_worker_specs, &preflight.capability_snapshot,
+            cas_mux::gateway::codex_hub_models(&preflight.cas_root).as_deref(),
         ).map_err(anyhow::Error::msg)?;
         lane_route_notice = Some(format!("lane={lane} resolved recipe={recipe}{}",
             warnings.into_iter().map(|warning| format!("; Warning: {warning}")).collect::<String>()));

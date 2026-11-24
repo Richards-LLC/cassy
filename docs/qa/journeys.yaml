@@ -2524,6 +2524,17 @@ bug_families:
     tasks: [cas-02a5]
     journeys: []
     invariants: []
+  hub-quota-inspection-refresh:
+    title: Hub quota stays fresh from the hub's inspection runs when no traffic is proxied
+    statement: >-
+      Each login's shared quota is the newer of the hub's proxied-traffic
+      rate-limit signals and its latest completed codex-inspection run, matched
+      by auth index. A login with no proxied traffic for hours still shows the
+      inspection's read on every machine. Cassy reads runs and one run by id,
+      and refuses the paths that start or cancel a run.
+    tasks: [cas-966b]
+    journeys: []
+    invariants: []
   peer-parent-plan-artifacts:
     title: Peer child review restores authenticated parent plan proof
     statement: >-

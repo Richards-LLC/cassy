@@ -40,9 +40,10 @@ scaffold and `cas qa ledger check` own the row grammar.
 
 ## Escape vocabulary
 
-Park does not check the journey registry, CODEMAP or PRODUCT_OVERVIEW; each
-delivery still keeps the registry true for what it changed. Add a bug case as
-`docs/qa/bug-families/<slug>.yaml` naming the task, own new surface files that
+Park does not check CODEMAP or PRODUCT_OVERVIEW; each delivery still keeps the
+registry true for what it changed. Add a bug case as
+`docs/qa/bug-families/<slug>.yaml` naming the task (park refuses a bug fix on a
+live journey without one, G-168), own new surface files that
 `cas qa impact` lists, and leave the shared docs for release prep.
 <!-- cas-src:begin -->
 The `journey-catalog` lane lint (`scripts/doc-fragments.py check`) refuses a

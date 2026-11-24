@@ -5,7 +5,7 @@ import { joinSpoken } from "./spoken-names";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 import { plainTextMarkdown } from "./markdown-renderer";
 import { providerAvatarMarkup } from "./provider-mark";
-import { supervisorVersion } from "./machine-version";
+import { cassyLoaded, cassyLoadedBadge, supervisorVersion } from "./machine-version";
 import { CODEX_RELOAD_CONFIRM, reloadWaitNode, type CommandReceipt } from "./supervisor-commands";
 import type { ProjectStatusLine } from "./progress-model";
 
@@ -60,6 +60,8 @@ export interface ConversationRow {
   projectName?: string;
   machine_online?: boolean;
   mcp_version?: string;
+  /** When that MCP process loaded its build (cas-8c4f). */
+  mcp_loaded_at?: string;
   installed_version?: string;
   reloadReceipt?: CommandReceipt;
   reloadPending?: boolean;
@@ -296,7 +298,10 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const marks = count || flag ? `<span class="conversation-marks">${count}${flag}</span>` : "";
   const version = rowVersion(row);
   const standby = row.standby ? `<span class="conversation-standby" title="Workers stopped; resume to bring them back">Standby</span>` : "";
-  const badge = standby + (version?.update ? `<span class="supervisor-version update-available" data-testid="supervisor-version" title="${escapeHtml(version.description)}">${escapeHtml(version.version)} <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span></span>` : "");
+  // cas-8c4f: a current supervisor keeps its loaded build and Eastern load time on the card until the next reload.
+  const loaded = version && !version.update ? cassyLoaded(row.mcp_version, row.mcp_loaded_at) : undefined;
+  const badge = standby + (version?.update ? `<span class="supervisor-version update-available" data-testid="supervisor-version" title="${escapeHtml(version.description)}">${escapeHtml(version.version)} <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span></span>`
+    : loaded ? `<span class="supervisor-version loaded" data-testid="supervisor-version" title="${escapeHtml(cassyLoadedBadge(row.mcp_version, row.mcp_loaded_at)!)}">${escapeHtml(loaded.version)} · ${escapeHtml(loaded.time)}</span>` : "");
   // Two sessions of one project on one machine read apart by their codename.
   // cas-6faf: such siblings reserve the same Most recent slot; inactive slots have no spoken name.
   const mark = row.showCodename && row.group ? `<span class="conversation-session-slot"${row.group.active ? "" : ' aria-hidden="true"'}><span class="conversation-session-mark" data-testid="conversation-session-mark">Most recent</span></span>` : "";

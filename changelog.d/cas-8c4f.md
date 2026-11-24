@@ -4,9 +4,11 @@
   Codex. Now: after a one-line confirmation it restarts the Codex supervisor on
   the installed build while workers keep running, and shows the same proof.
 - **Loaded-build badge** — Was: nothing showed which Cassy build a supervisor
-  had loaded after a reload. Now: the conversation header and the factory status
-  bar show "cassy 4.52.0 · loaded 5:44 PM ET" from the live MCP process until
-  the next reload.
+  had loaded after a reload. Now: the supervisor card, the conversation header
+  and the factory status bar show "cassy 4.52.0 · loaded 5:44 PM ET" from the
+  live MCP process until the next reload.
+- **`/reload-cassy`** — Was: only `/mcp` ran Reload Cassy. Now: `/reload-cassy`
+  runs the same command, with the same Codex confirmation.
 
 ### Changed — Commander
 

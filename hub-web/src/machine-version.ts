@@ -39,10 +39,16 @@ export function supervisorVersion(running: string | undefined, installed?: strin
  * catalog, so it survives refreshes and redraws and changes only on a reload.
  */
 export function cassyLoadedBadge(running: string | undefined, loadedAt: string | undefined): string | undefined {
+  const parts = cassyLoaded(running, loadedAt);
+  return parts && `cassy ${parts.version} · loaded ${parts.time} ET`;
+}
+
+/** The badge's version and Eastern load time, for compact placements such as a supervisor card. */
+export function cassyLoaded(running: string | undefined, loadedAt: string | undefined): { version: string; time: string } | undefined {
   const at = loadedAt ? new Date(loadedAt) : undefined;
   if (!parsed(running) || !at || !Number.isFinite(at.getTime())) return undefined;
   const time = at.toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hour12: true });
-  return `cassy ${running!.trim().replace(/^v/, "")} · loaded ${time} ET`;
+  return { version: running!.trim().replace(/^v/, ""), time };
 }
 
 /**

@@ -221,16 +221,21 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(toast(page, "Cassy reloaded: PID 2202")).toBeVisible();
         await expect(receipt).toHaveCount(0);
         await captureReload(page, "reloaded-toast", viewport.width);
-        // In step with its machine the row shows no version (cas-da546).
-        await expect(versionOnRow(/\d+\.\d+\.\d+/)).toHaveCount(0);
-        // The open conversation keeps the loaded build and its Eastern load time (cas-8c4f).
+        // cas-8c4f: the card and the open conversation keep the loaded build and its Eastern load time.
+        await expect(versionOnRow(/9\.99\.2 · 5:44 PM/)).toHaveCount(1);
         await expect(page.getByTestId("conversation-cassy")).toContainText("9.99.2");
         await expect(page.getByTestId("conversation-cassy")).toContainText("5:44 PM");
         await captureReload(page, "loaded-badge", viewport.width);
         await expect(conversationList(page).getByRole("button", { name: "Reload Cassy", exact: true })).toBeHidden();
         expect(hub.sends).toHaveLength(0);
       });
-      await journey.stage("Open the header dropdown beside its button, then submit typed mcp without chat", async () => {
+      await journey.stage("The loaded-build badge survives a Commander refresh", async () => {
+        await page.reload();
+        await expect(versionOnRow(/9\.99\.2 · 5:44 PM/)).toHaveCount(1);
+        await conversationRow(page).click();
+        await expect(page.getByTestId("conversation-cassy")).toContainText("9.99.2");
+      });
+      await journey.stage("Open the header dropdown beside its button, then submit typed reload-cassy without chat", async () => {
         // On a phone the palette opens under the overflow toggle it was chosen from.
         const toggle = page.getByRole("button", { name: phone ? "More conversation actions" : "Supervisor commands", exact: true });
         await openCommands(page);
@@ -247,7 +252,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await page.keyboard.press("Escape");
         await expect(toggle).toBeFocused();
         const input = composer(page);
-        await input.fill("/mcp");
+        // cas-8c4f: /reload-cassy is the same semantic command as /mcp.
+        await input.fill("/reload-cassy");
         await expect(commandButton(page, "mcp")).toContainText(/\S/);
         await input.press("Enter");
         await expect.poll(() => mutations().length).toBe(2);

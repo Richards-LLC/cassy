@@ -19,6 +19,12 @@ const commands: { id: SupervisorCommand; label: string; effect: string; confirm?
   { id: "standby", label: "Standby", effect: "Finish, stop the workers and go quiet", confirm: "Go on standby? The supervisor will finish its wrap-up, stop its workers and go quiet. Resume brings them back." },
   { id: "exit", label: "Exit", effect: "End the supervisor's harness", confirm: "Exit this supervisor? Its harness will end. Check its handoff before leaving." },
 ];
+/** Typed names that mean the same semantic command. */
+const COMMAND_ALIASES: Readonly<Record<string, SupervisorCommand>> = { "reload-cassy": "mcp" };
+function commandMatches(id: SupervisorCommand, query: string): boolean {
+  return id.startsWith(query) || Object.entries(COMMAND_ALIASES).some(([alias, target]) => target === id && query.length > 0 && alias.startsWith(query));
+}
+
 /** Codex has no MCP reconnect, so its Reload Cassy restarts the supervisor (cas-8c4f). */
 export const CODEX_RELOAD_CONFIRM = "Reload Cassy? Codex reloads by restarting its supervisor on the installed build, with a fresh context. Workers keep running.";
 
@@ -124,15 +130,15 @@ export class SlashCommands {
   }
   sync(): void {
     const query = !this.anchor && this.input.value.startsWith("/") ? this.input.value.slice(1).toLowerCase() : "";
-    const suggestion = this.input.value.startsWith("/") && commands.some(command => command.id.startsWith(query));
+    const suggestion = this.input.value.startsWith("/") && commands.some(command => commandMatches(command.id, query));
     this.panel.hidden = this.escaped || (!this.open && !suggestion);
     if (this.panel.hidden || this.pending) return;
     this.panel.replaceChildren();
     const heading = document.createElement("strong"); heading.textContent = `Commands · ${this.options.label()}`; this.panel.append(heading);
     const unavailable = this.options.unavailable();
     if (unavailable) { this.notice(unavailable); return; }
-    const shown = commandsForHarness(this.options.harness()).filter(command => command.id.startsWith(query));
-    if (!shown.length) this.notice(query === "mcp"
+    const shown = commandsForHarness(this.options.harness()).filter(command => commandMatches(command.id, query));
+    if (!shown.length) this.notice(COMMAND_ALIASES[query] === "mcp" || query === "mcp"
       ? `Reload Cassy is unavailable for ${this.options.harness() ?? "unknown"}. It requires Claude Code or Codex.`
       : "No supported command. Choose a listed command without arguments.");
     for (const command of shown) {
@@ -146,9 +152,10 @@ export class SlashCommands {
   submit(): boolean {
     // The normal composer trims chat text; /mcp must stay semantic even
     // when pasted with surrounding whitespace, rather than open Claude's menu.
-    if (this.input.value.trim() === "/mcp") this.input.value = "/mcp";
+    const trimmed = this.input.value.trim();
+    if (trimmed === "/mcp" || trimmed === "/reload-cassy") this.input.value = trimmed;
     const token = this.input.value.split(/\s/, 1)[0];
-    const command = commands.find(item => `/${item.id}` === token);
+    const command = commands.find(item => `/${item.id}` === token || COMMAND_ALIASES[token.slice(1)] === item.id);
     if (!command) return false;
     this.escaped = false; this.open = true; this.sync();
     if (this.pending || this.options.unavailable()) return true;

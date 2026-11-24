@@ -44,6 +44,15 @@ it("names the build a supervisor's live MCP loaded and when, in Eastern time (ca
   expect(badge).toContain("5:44 PM");
   expect(cassyLoadedBadge("unknown", "2026-11-23T22:44:00Z")).toBeUndefined();
   expect(cassyLoadedBadge("4.52.0", undefined)).toBeUndefined();
+  // The supervisor card keeps it while current; an older build keeps its update arrow instead.
+  const base: ConversationRow = { key: "atlas:lead", machineId: "atlas", session: "lead", supervisor: "lead", projectDir: "/projects/cas-src", host: "Atlas", freshness: "now", connection: "Live", attention: 0, selected: false, machine_online: true };
+  const view = document.createElement("div");
+  view.innerHTML = conversationRowMarkup({ ...base, mcp_version: "4.52.0", installed_version: "4.52.0", mcp_loaded_at: "2026-11-23T22:44:00Z" });
+  const card = view.querySelector<HTMLElement>("[data-testid=supervisor-version]");
+  expect(card?.textContent).toContain("4.52.0");
+  expect(card?.textContent).toContain("5:44 PM");
+  view.innerHTML = conversationRowMarkup({ ...base, mcp_version: "4.51.0", installed_version: "4.52.0", mcp_loaded_at: "2026-11-23T22:44:00Z" });
+  expect(view.querySelector(".supervisor-version")?.classList.contains("update-available")).toBe(true);
 });
 
 const reply = { notification_id: 42, reply_to: 41, message: 'Actual supervisor reply <safe>', summary: '', device_id: 'device', operator_label: 'Daniel' };

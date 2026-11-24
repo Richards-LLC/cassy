@@ -11,12 +11,12 @@ describe("supervisor slash commands", () => {
     expect(commandsForHarness("grok")).toEqual([]);
   });
   it("routes /mcp to Reload Cassy for Claude, confirms Codex's supervisor restart, and names unsupported harnesses", async () => {
-    for (const harness of ["claude", "codex", "grok", "other", undefined]) {
+    for (const [harness, typed] of [["claude", " /mcp \n"], ["claude", "/reload-cassy"], ["codex", "/mcp"], ["codex", " /reload-cassy\n"], ["grok", "/mcp"], ["other", "/mcp"], [undefined, "/mcp"]] as const) {
       document.body.innerHTML = '<section><textarea></textarea></section>';
       const input = document.querySelector("textarea")!;
       const run = vi.fn().mockResolvedValue(undefined);
       const commands = new SlashCommands(input, { harness: () => harness, unavailable: () => undefined, label: () => "test supervisor", run });
-      input.value = " /mcp \n";
+      input.value = typed;
       expect(commands.submit()).toBe(true);
       if (harness === "claude") {
         await Promise.resolve();

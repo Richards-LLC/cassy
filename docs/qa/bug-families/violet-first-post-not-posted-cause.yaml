@@ -1,7 +1,7 @@
-title: The first violet_post after a fresh claim and reply_intent returns not_posted with no cause, and a second intent posts
-statement: A post that never reached Violet (a stale idle transport) is reconciled as request_not_found and names resend_same_request_id; a post Violet rejected names new_reply_intent for a managed reply or new_request_id for a plain message, because a rejection consumes the intent.
+title: The first violet_post after a fresh claim and reply_intent returns not_posted, and a second intent posts
+statement: The first post after an idle spell met a closed Violet transport and never reached Violet. The lookup answered request_not_found and the reply intent stayed registered, so the same request_id is resent. If that resend also fails, the answer stays retryable under the same request_id.
 found: '2026-11-15'
-fixed_by: [31bab36ff9]
+fixed_by: [31bab36ff9, 9a79067944]
 tasks: [cas-71bf, cas-4c2b]
 invariants: []
 journeys: [FACTORY-SUPERVISE]

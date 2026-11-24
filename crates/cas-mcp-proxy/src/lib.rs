@@ -3578,6 +3578,9 @@ for line in sys.stdin:
         args = message["params"].get("arguments", {})
         if violet:
             request_id = args.get("request_id")
+            if request_id is not None:
+                request_id = request_id.lower()
+            client_label = "fixture-client"
             with open(log + ".requests", "a") as handle:
                 handle.write(json.dumps({"name": name, "request_id": request_id, "arguments": args}) + "\n")
             state_path = log + ".state"
@@ -3587,51 +3590,44 @@ for line in sys.stdin:
                 mode = args.get("text", "posted")
                 if mode == "drop":
                     os._exit(0)
-                if request_id is not None and schema_mode() == "modern":
-                    state = "not_posted" if mode in ("not_posted", "not_posted_detail", "rejected") else ("outcome_unknown" if mode == "outcome_unknown" else "posted")
-                    with open(state_path, "w") as handle:
-                        json.dump({"request_id": request_id, "state": state, "mode": mode}, handle)
-                if mode == "transport_rollback":
-                    with open(log + ".schema", "w") as handle:
-                        handle.write("legacy")
-                if mode in ("transport", "transport_rollback"):
-                    os._exit(0)
-                if schema_mode() == "legacy" and request_id is not None:
-                    body = {"ok": False, "error": {"code": "invalid_input", "message": "Incomplete managed reply fields.", "retryable": False}}
-                elif mode == "rejected":
-                    body = rejection(request_id)
-                elif mode == "receipt" or (request_id is None and mode == "posted"):
-                    body = receipt(request_id)
-                elif request_id is None:
+                if request_id is None and mode in ("outcome_unknown", "lookup_denied"):
                     body = {"ok": False, "error": {"code": "ambiguous_post", "message": "The post result could not be confirmed; do not retry automatically.", "retryable": False}}
-                else:
+                elif mode in ("rejected", "transport_rejected"):
+                    body = rejection(request_id)
+                elif mode == "outcome_unknown":
                     body = uncertain(request_id)
-            elif name == "violet_reconcile_reply" and not os.path.exists(state_path):
-                body = {"ok": True, "request_id": request_id, "state": "not_posted", "reason": "request_not_found"}
+                else:
+                    body = receipt(request_id)
+                if request_id is not None:
+                    with open(state_path, "w") as handle:
+                        json.dump({"client_label": client_label, "receipt": body}, handle)
+                    if mode == "transport_rollback":
+                        with open(log + ".schema", "w") as handle:
+                            handle.write("legacy")
+                    if mode in ("transport", "transport_rejected", "transport_rollback"):
+                        os._exit(0)
             elif name == "violet_reconcile_reply":
-                with open(state_path) as handle:
-                    state = json.load(handle)
-                receipt_id = state["request_id"]
-                if state["mode"] == "mismatch":
-                    receipt_id = "00000092-2222-4222-8222-000000000092"
-                body = {"ok": state["state"] != "outcome_unknown", "request_id": receipt_id, "state": state["state"], "channel_id": "C123"}
-                if state["state"] == "outcome_unknown":
-                    body["reason"] = "unconfirmed_write"
-                    body["receipt"] = uncertain(receipt_id)
-                elif state["state"] == "posted":
-                    body["receipt"] = receipt(receipt_id)
-                elif state["mode"] in ("not_posted_detail", "rejected"):
-                    body["receipt"] = rejection(receipt_id)
+                stored = {}
+                if os.path.exists(state_path):
+                    with open(state_path) as handle:
+                        stored = json.load(handle)
+                stored_receipt = stored.get("receipt", {})
+                if stored.get("client_label") != client_label or stored_receipt.get("request_id") != request_id:
+                    body = {"ok": True, "request_id": request_id, "state": "not_posted", "reason": "request_not_found"}
+                else:
+                    state = stored_receipt["state"]
+                    body = {"ok": state != "outcome_unknown", "request_id": request_id, "state": state, "channel_id": "C123", "receipt": stored_receipt}
+                    if state == "outcome_unknown":
+                        body["reason"] = "unconfirmed_write"
             elif name == "violet_read":
-                body = digest() if args.get("channel") else {"ok": False, "error": {
-                    "code": "invalid_input", "message": "channel or external_ref is required", "retryable": False}}
+                body = digest()
             else:
                 body = {"ok": True}
             result = {"content": [{"type": "text", "text": json.dumps(body)}]}
             if not body["ok"] and name != "violet_reconcile_reply":
                 result["isError"] = True
             send({"jsonrpc": "2.0", "id": ident, "result": result})
-            if name == "violet_read" and args.get("channel") == "idle_close":
+            if name == "violet_read" and args.get("channel") == "fixture":
                 os._exit(0)
             continue
         if name == "drop":
@@ -3704,11 +3700,10 @@ for line in sys.stdin:
             }
         }
         for (schema, mode, expected) in [("modern", "posted", "posted"), ("modern", "transport", "posted"),
-            ("modern", "outcome_unknown", "outcome_unknown"), ("modern", "not_posted", "not_posted"),
-            ("modern", "not_posted_detail", "not_posted"),
+            ("modern", "outcome_unknown", "outcome_unknown"), ("modern", "transport_rejected", "not_posted"),
             ("modern", "post_only", "posted"), ("modern", "post_only_not_posted", "not_posted"),
             ("modern", "post_only_supervisor", "posted"), ("modern", "lookup_denied", "outcome_unknown"),
-            ("modern", "rejected", "not_posted"), ("modern", "mismatch", "outcome_unknown"),
+            ("modern", "rejected", "not_posted"),
             ("modern", "transport_rollback", "outcome_unknown"),
             ("legacy", "posted", "posted"), ("legacy", "outcome_unknown", "outcome_unknown"),
             ("rollback", "posted", "posted"), ("upgrade", "posted", "posted")] {
@@ -3740,7 +3735,11 @@ for line in sys.stdin:
                 assert!(engine.call_tool(&caller, "violet", "violet_read",
                     Some(serde_json::json!({"channel": "close"}).as_object().unwrap().clone())).await.is_err());
             }
-            let text = if mode == "post_only_not_posted" { "not_posted" } else { mode };
+            let text = match mode {
+                "posted" | "post_only" | "post_only_supervisor" => "transport",
+                "post_only_not_posted" => "transport_rejected",
+                _ => mode,
+            };
             let mut args = serde_json::json!({"channel": "C123", "kind": "message", "text": text});
             if mode == "transport" {
                 args["request_id"] = Value::String("00000091-2222-4222-8222-000000000091".into());
@@ -3778,12 +3777,12 @@ for line in sys.stdin:
                 assert_eq!(audit.last().unwrap().tool, "violet_reconcile_reply");
                 assert!(audit.last().unwrap().allowed);
             }
-            if matches!(mode, "not_posted_detail" | "rejected") {
+            if expected == "not_posted" {
                 assert_eq!(body["error"]["code"], "slack_error");
                 assert_eq!(body["error"]["upstream"]["error"], "channel_not_found");
                 assert_eq!(body["error"]["retryable"], false);
             }
-            if expected == "posted" || matches!(mode, "not_posted_detail" | "rejected") {
+            if matches!(expected, "posted" | "not_posted") {
                 assert_eq!(body["reconcile"], serde_json::json!({
                     "tool": "violet_reconcile_reply", "arguments": {"request_id": request_id},
                 }));
@@ -3798,6 +3797,17 @@ for line in sys.stdin:
                     Some(serde_json::json!({"request_id": request_id}).as_object().unwrap().clone())).await.unwrap();
                 let lookup: Value = serde_json::from_str(lookup["content"][0]["text"].as_str().unwrap()).unwrap();
                 assert_eq!(lookup["state"], expected);
+                if mode == "post_only" {
+                    let state_path = dir.path().join("calls.log.state");
+                    let mut stored: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+                    stored["client_label"] = Value::String("other-client".into());
+                    std::fs::write(&state_path, serde_json::to_vec(&stored).unwrap()).unwrap();
+                    let foreign = engine.call_tool(&caller, "violet", "violet_reconcile_reply",
+                        Some(serde_json::json!({"request_id": request_id}).as_object().unwrap().clone())).await.unwrap();
+                    let foreign: Value = serde_json::from_str(foreign["content"][0]["text"].as_str().unwrap()).unwrap();
+                    assert_eq!(foreign, serde_json::json!({"ok": true, "request_id": request_id,
+                        "state": "not_posted", "reason": "request_not_found"}));
+                }
                 assert!(engine.call_tool(&caller, "violet", "violet_read",
                     Some(serde_json::json!({"channel": "C123"}).as_object().unwrap().clone())).await.is_err());
                 engine.set_policy(Arc::new(ExternalToolAllowlistPolicy::new([
@@ -3824,7 +3834,7 @@ for line in sys.stdin:
             let caller = registered_worker_caller();
             if text == "receipt" {
                 engine.call_tool(&caller, "violet", "violet_read",
-                    Some(serde_json::json!({"channel": "idle_close"}).as_object().unwrap().clone())).await.unwrap();
+                    Some(serde_json::json!({"channel": "fixture"}).as_object().unwrap().clone())).await.unwrap();
             }
             let request_id = "00000071-2222-4222-8222-0000000071bf";
             let result = engine.call_tool(&caller, "violet", "violet_post", Some(serde_json::json!({

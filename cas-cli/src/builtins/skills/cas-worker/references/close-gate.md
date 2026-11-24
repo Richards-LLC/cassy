@@ -33,6 +33,14 @@ Rule-driven sites: [{"rule_id":"<id>","path":"src/file.rs","anchor":"<exact trim
 Use `stakeholder.scope` verbatim and check `cas rules refs <id> --json`. A
 process-rule citation needs no marker.
 
+## Pre-park pass
+
+Run these on your delivery diff only, never the whole repository. The principles are paraphrased from pstack (Lauren Tan, MIT).
+
+- **Comments:** run [cas-no-comments](../../cas-no-comments/SKILL.md). Its output is deletions or a reshape flag; you never add a comment.
+- **Subtract before you add:** remove any branch no caller reaches and any struct that duplicates an existing one; a smaller diff that fully works wins.
+- **Same-surface proof:** a bug fix shows red on the incident's real entry point with the tool the incident used, then green on the same surface.
+
 ## Clean-tree receipt
 
 Run `git status --porcelain` and `git rev-parse HEAD` at every depth: empty

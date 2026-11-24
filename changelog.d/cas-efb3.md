@@ -1,0 +1,3 @@
+### Added — Skills
+
+- **`cas-no-comments` skill, and a pre-park pass in the worker skill** — Was: workers parked deliveries with whatever comments they wrote, and nothing reviewed them. Now: the new `cas-no-comments` builtin skill reviews the delivery diff only and deletes comments outside a short keep list (licence headers, forced external behaviour, public API contracts, constraint links, justified suppressions, `// SAFETY:`), or flags the symbol for a reshape. `///` doc comments that clap or schemars turn into `--help` or MCP descriptions are product text and are never deleted. The worker's delivery reference runs it before park, with a subtract-before-you-add check and same-surface proof for bug fixes. Adapted from pstack by Lauren Tan (MIT).

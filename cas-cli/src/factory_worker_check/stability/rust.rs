@@ -347,6 +347,21 @@ pub(crate) fn platform_gates(repo: &Path, head: &str, tests: &[Identity]) -> Res
         .filter_map(|test| Some((test.identity, test.platforms?))).collect())
 }
 
+/// cas-fcb1: the package and harness that own each of these tests in the
+/// delivered Cargo inventory (`None` harness is `--lib`). An explicit harness
+/// owns its own file and the modules it imports, whatever their file names.
+pub(crate) fn owners(repo: &Path, head: &str, tests: &[Identity]) -> Result<BTreeMap<Identity, (String, Option<String>)>> {
+    let paths = tests.iter().filter(|test| test.path.ends_with(".rs")).map(|test| test.path.clone())
+        .collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+    if paths.is_empty() { return Ok(BTreeMap::new()); }
+    let (inventory, _) = inventory(repo, head, &paths)?;
+    let mut owners = BTreeMap::new();
+    for test in inventory.into_iter().filter(|test| tests.contains(&test.identity)) {
+        owners.entry(test.identity).or_insert((test.package, test.harness));
+    }
+    Ok(owners)
+}
+
 pub(crate) fn changed(repo: &Path, base: &str, head: &str, paths: &[String]) -> Result<Vec<Test>> {
     Discovery::default().changed(repo, base, head, paths)
 }

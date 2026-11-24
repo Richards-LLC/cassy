@@ -73,6 +73,72 @@ fn package(repo: &Path, path: &str) -> Scope {
     Scope::Package(directory.strip_prefix(repo).unwrap_or(Path::new("")).to_string_lossy().into())
 }
 
+/// GH #2369: the package whose own run proves `path` under `runner` when a
+/// focused run of it selects no test: the directory holding the runner's
+/// config for it, else its nearest manifest.
+pub(crate) fn owning_package(repo: &Path, path: &str, runner: &str) -> Scope {
+    javascript::runner_root(repo, path, runner).ok()
+        .and_then(|(directory, _)| directory.strip_prefix(repo).ok().map(|relative| Scope::Package(relative.to_string_lossy().into())))
+        .unwrap_or_else(|| package(repo, path))
+}
+
+/// The package or crate runs that prove `path` (GH #2369): run more, never
+/// an impossible narrower demand. A Rust file's owner is its crate's run.
+fn owners(repo: &Path, path: &str) -> Vec<Scope> {
+    if path.ends_with(".rs") { return vec![package(repo, path)]; }
+    if !javascript::javascript(path) { return Vec::new(); }
+    let mut owners = vec![package(repo, path)];
+    if let Some(runner) = javascript::runner_hint(repo, path).filter(|runner| *runner != "node --test") {
+        owners.push(owning_package(repo, path, runner));
+    }
+    owners
+}
+
+/// Whether a passing run of the package owning `path` is recorded: it proves
+/// that file's changed tests and widened scopes alike (GH #2369).
+///
+/// A Rust changed test keeps its five-pass proof unless its named selection
+/// ran zero tests; only that fallback's crate run stands in for it.
+pub(crate) fn package_proves(passing: &PassingTests<'_>, path: &str) -> bool {
+    let rust = path.ends_with(".rs");
+    owners(passing.repo, path).iter().any(|owner| passing.records().iter()
+        .filter_map(|(_, _, test)| test.widened.as_ref())
+        .any(|proof| &proof.scope == owner && (!rust || proof.reason == ZERO_SELECTION_REASON)))
+}
+
+/// The recorded reason of a crate run that replaced a zero-test selection.
+pub(crate) const ZERO_SELECTION_REASON: &str = "widened:zero-test selection";
+
+/// The journey specs the registry declares at `head` whose Playwright config
+/// targets a deployed host: it starts no local `webServer`, itself or through
+/// a config it imports. Their declared lane (batch QA against that host)
+/// proves them, never a worker's capped run (GH #2362, #2380). A journey
+/// against a locally served app stays owed by the worker.
+pub(crate) fn deployed_journey_specs(cas_root: &Path, repo: &Path, head: &str) -> BTreeSet<String> {
+    let registry = crate::config::Config::load(cas_root).map(|config| config.qa().registry.path)
+        .unwrap_or_else(|_| crate::qa_registry::DEFAULT_PATH.into());
+    git(repo, &["show", &format!("{head}:{registry}")]).ok()
+        .and_then(|contents| crate::qa_registry::parse(&contents).ok())
+        .map(|registry| registry.journeys.into_iter().filter_map(|journey| journey.spec)
+            .filter(|spec| targets_deployed_host(repo, spec)).collect())
+        .unwrap_or_default()
+}
+
+fn targets_deployed_host(repo: &Path, spec: &str) -> bool {
+    let Some(config) = javascript::runner_root(repo, spec, "playwright").ok().and_then(|(_, config)| config) else {
+        return false;
+    };
+    let import = regex::Regex::new(r#"(?:\bfrom|\bimport)\s*\(?\s*['"](\.\.?/[^'"\n]+)['"]"#).expect("import pattern");
+    let source = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+    let config_source = source(&config);
+    let imported = import.captures_iter(&config_source).filter_map(|capture| {
+        let base = config.parent()?.join(&capture[1]);
+        std::iter::once(base.clone()).chain(["ts", "mts", "cts", "js", "mjs", "cjs"].iter()
+            .map(|ext| PathBuf::from(format!("{}.{ext}", base.display())))).find(|path| path.is_file())
+    }).map(|path| source(&path)).collect::<Vec<_>>();
+    !std::iter::once(&config_source).chain(&imported).any(|text| text.contains("webServer"))
+}
+
 /// What resolved for one widened package's changed inputs (GH #2224, #2266).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Covering {
@@ -112,6 +178,8 @@ pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &B
         proof.runner == "playwright" && proof.configs.contains_key(spec)
             && (proof.scope == Scope::File(spec.into()) || matches!(&proof.scope, Scope::Related(_))));
     scopes.iter().filter(|scope| {
+        // GH #2369: the owning package's own passing run proves any input in it.
+        if let Scope::File(path) | Scope::Related(path) = scope && package_proves(passing, path) { return false; }
         if let Scope::Related(helper) = scope {
             let consumers = javascript::related_tests(passing.repo, helper)
                 .filter(|(runner, _)| *runner == "playwright").map(|(_, specs)| specs).unwrap_or_default();
@@ -158,7 +226,11 @@ pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &
         };
         let named = if unresolved.is_empty() { String::new() } else { format!("no spec reads {}; ", unresolved.join(", ")) };
         let Some(path) = path else {
-            return vec![format!("{named}the package needs one capped run of a changed JavaScript file in {scope:?}: `cas factory worker-check --cas-root {} -- <runner> <changed .js/.ts file>`", cas_root.display())];
+            // GH #2164: the package's manifest selects its own run.
+            let Scope::Package(directory) = scope else { return Vec::new() };
+            let manifest = Path::new(directory).join("package.json").to_string_lossy().into_owned();
+            return javascript::runner_hint(repo, &manifest).map(|runner| vec![runner]).unwrap_or_else(|| vec!["jest", "vitest", "playwright"])
+                .into_iter().map(|runner| format!("{named}cas factory worker-check --cas-root {} -- {runner} {manifest}", cas_root.display())).collect();
         };
         let note = (!named.is_empty() && found.is_some()).then(|| format!("{}the covering specs' passes do not prove the package; run the whole package instead", named));
         note.into_iter().chain(javascript::runner_hint(repo, path).map(|runner| vec![runner]).unwrap_or_else(|| vec!["jest", "vitest", "playwright", "node --test"])
@@ -255,6 +327,15 @@ mod tests {
         for command in &commands {
             let args = command.split_once(" -- ").unwrap().1.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
             assert_eq!(javascript::invocation(&args).map(|run| run.files), Some(vec![paths[2].clone()]), "{command}");
+        }
+        // GH #2164: with no JavaScript input left, the package's manifest
+        // selects its own run, and that selection widens to this package.
+        let commands = super::commands(Path::new("/cas"), repo.path(), &paths[..2], &scopes, &Default::default());
+        assert!(!commands.is_empty());
+        for command in &commands {
+            let args = command.split_once(" -- ").unwrap().1.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+            let files = javascript::invocation(&args).map(|run| run.files).unwrap_or_default();
+            assert_eq!(files.iter().map(|file| scope(repo.path(), file)).collect::<Vec<_>>(), scopes, "{command}");
         }
     }
 }

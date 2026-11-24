@@ -791,7 +791,7 @@ impl CasService {
             .and_then(|store| store.get(&pass.task_id).ok())
             .map(|task| task.status);
         let routed = if task_status == Some(TaskStatus::AwaitingMerge) {
-            match cas_store::request_changes_for_parked_delivery(
+            match crate::mcp::tools::core::task::repeat_review::repair_parked(
                 &self.inner.cas_root,
                 &pass.task_id,
                 reviewer,
@@ -805,7 +805,7 @@ impl CasService {
                     )
                 }
                 Err(error) => format!(
-                    "request_changes could not reopen {}: {error}. The supervisor must decline it manually.",
+                    "request_changes could not reopen {}: {error}. The task stays parked.",
                     pass.task_id
                 ),
             }

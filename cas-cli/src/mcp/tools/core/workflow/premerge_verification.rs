@@ -1228,7 +1228,12 @@ impl CasCore {
                 // A lost response/wake retries the same queue key, not the decline.
                 if task.status == TaskStatus::Open && task.deliverables.delivery_cycle == receipt.repair_cycle {
                     crate::store::publish_direct_task_write(&self.cas_root, &task.id).map_err(fail)?;
-                    if supervisor_push::queue_premerge_repair_notice(&self.cas_root, task, &dispatch.id, findings)
+                    let events = crate::store::open_event_store(&self.cas_root).map_err(fail)?
+                        .list_for_entity(cas_types::EventEntityType::Task, &task.id, 10_000).map_err(fail)?;
+                    let brief = events.iter().filter_map(|event| event.metadata.as_ref())
+                        .filter(|metadata| metadata["premerge_repair_dispatch"].as_str() == Some(dispatch.id.as_str()))
+                        .find_map(|metadata| metadata["repair_brief"].as_str()).unwrap_or(findings);
+                    if supervisor_push::queue_premerge_repair_notice(&self.cas_root, task, &dispatch.id, brief)
                         .map_err(fail)?.is_none()
                     { return Ok(None); }
                 }
@@ -1251,8 +1256,15 @@ impl CasCore {
             || !supervisor_push::premerge_repair_worker_available(&self.cas_root, task).map_err(fail)?
         { return Ok(None); }
         let Some(candidate) = candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)? else { return Ok(None); };
-        let outcome = cas_store::auto_return_premerge_rejection(&self.cas_root, &task.id,
-            &dispatch.owner_agent_id, &format!("Automatic non-behavioural repair for dispatch {}.{findings}", dispatch.id), &dispatch.id, &candidate.source_sha).map_err(fail)?;
+        let reason = format!("Automatic non-behavioural repair for dispatch {}.\n{findings}", dispatch.id);
+        let (outcome, brief) = crate::mcp::tools::core::task::repeat_review::repair_transition(
+            &self.cas_root, &task.id, &reason, |brief, reviewed| {
+                cas_store::auto_return_premerge_rejection(&self.cas_root, &task.id,
+                    &dispatch.owner_agent_id, brief,
+                    &dispatch.id, &candidate.source_sha, reviewed)
+                    .map_err(|error| crate::mcp::tools::core::task::repeat_review::transition_error(&task.id, error))
+            },
+        )?;
         if outcome.is_none() {
             let current = self.open_task_store()?.get(&task.id).map_err(fail)?;
             if current.deliverables.premerge_repair.as_ref().is_some_and(|receipt| receipt.dispatch_id == dispatch.id) {
@@ -1262,7 +1274,7 @@ impl CasCore {
         }
         crate::store::publish_direct_task_write(&self.cas_root, &task.id).map_err(fail)?;
         let returned = self.open_task_store()?.get(&task.id).map_err(fail)?;
-        if supervisor_push::queue_premerge_repair_notice(&self.cas_root, &returned, &dispatch.id, findings)
+        if supervisor_push::queue_premerge_repair_notice(&self.cas_root, &returned, &dispatch.id, &brief)
             .map_err(fail)?.is_none()
         { return Ok(None); }
         Ok(Some("\nCassy returned the delivery to its assigned worker with the findings for one automatic repair. A new source commit and independent approval are required; another rejection holds for the supervisor.".into()))

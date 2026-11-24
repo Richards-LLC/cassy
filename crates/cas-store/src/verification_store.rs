@@ -317,6 +317,11 @@ pub struct SqliteVerificationStore {
 }
 
 impl SqliteVerificationStore {
+    pub fn latest_repeated_rejection(&self, task_id: &str) -> Result<Option<(String, DateTime<Utc>)>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        latest_repeated_rejection_with_conn(&conn, task_id)
+    }
+
     /// Open or create a SQLite verification store
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
@@ -2771,8 +2776,19 @@ pub fn request_changes_for_parked_delivery_with_merge_sources(
     reason: &str,
     source_commits: &[String],
 ) -> Result<RequestChangesOutcome> {
+    request_changes_for_reviewed_delivery(cas_dir, task_id, supervisor_agent_id, reason, source_commits, None)
+}
+
+pub fn request_changes_for_reviewed_delivery(
+    cas_dir: &Path,
+    task_id: &str,
+    supervisor_agent_id: &str,
+    reason: &str,
+    source_commits: &[String],
+    reviewed_rejection: Option<&str>,
+) -> Result<RequestChangesOutcome> {
     request_changes_for_parked_delivery_impl(
-        cas_dir, task_id, supervisor_agent_id, reason, source_commits, None,
+        cas_dir, task_id, supervisor_agent_id, reason, source_commits, None, reviewed_rejection,
     ).map(|outcome| outcome.expect("manual request-changes has no repair budget"))
 }
 
@@ -2785,10 +2801,29 @@ pub fn auto_return_premerge_rejection(
     reason: &str,
     dispatch_id: &str,
     rejected_anchor: &str,
+    reviewed_rejection: Option<&str>,
 ) -> Result<Option<RequestChangesOutcome>> {
     request_changes_for_parked_delivery_impl(
-        cas_dir, task_id, owner_id, reason, &[], Some((dispatch_id, rejected_anchor)),
+        cas_dir, task_id, owner_id, reason, &[], Some((dispatch_id, rejected_anchor)), reviewed_rejection,
     )
+}
+
+pub const REPEAT_REVIEW_REQUIRED: &str = "repeat_review_admission_required";
+
+fn latest_repeated_rejection_with_conn(conn: &Connection, task_id: &str) -> Result<Option<(String, DateTime<Utc>)>> {
+    let mut query = conn.prepare_cached(
+        "SELECT id, created_at FROM verifications WHERE task_id = ?1 AND status = 'rejected'
+         ORDER BY created_at DESC, rowid DESC LIMIT 2",
+    )?;
+    let mut rows = query.query([task_id])?;
+    let Some(latest) = rows.next()? else { return Ok(None) };
+    let id = latest.get(0)?;
+    let created_at: String = latest.get(1)?;
+    if rows.next()?.is_none() { return Ok(None); }
+    let created_at = DateTime::parse_from_rfc3339(&created_at)
+        .map_err(|error| StoreError::Parse(format!("invalid rejection timestamp: {error}")))?
+        .with_timezone(&Utc);
+    Ok(Some((id, created_at)))
 }
 
 fn request_changes_for_parked_delivery_impl(
@@ -2798,6 +2833,7 @@ fn request_changes_for_parked_delivery_impl(
     reason: &str,
     source_commits: &[String],
     automatic_repair: Option<(&str, &str)>,
+    reviewed_rejection: Option<&str>,
 ) -> Result<Option<RequestChangesOutcome>> {
     let reason = reason.trim();
     if reason.is_empty() {
@@ -2905,6 +2941,11 @@ fn request_changes_for_parked_delivery_impl(
             params![dispatch_id], |row| row.get(0),
         )?;
         if !rejected { return Ok(None); }
+    }
+    if latest_repeated_rejection_with_conn(&tx, task_id)?
+        .is_some_and(|(id, _)| Some(id.as_str()) != reviewed_rejection)
+    {
+        return Err(StoreError::Parse(REPEAT_REVIEW_REQUIRED.into()));
     }
     // Typed grants come only from the supervisor adapter, never review prose.
     for source in source_commits {
@@ -3074,12 +3115,10 @@ fn request_changes_for_parked_delivery_impl(
             "request_changes task transition raced".to_string(),
         ));
     }
-    let event = Event::new(
-        EventType::TaskNoteAdded,
-        EventEntityType::Task,
-        task_id,
-        note,
-    );
+    let mut event = Event::new(EventType::TaskNoteAdded, EventEntityType::Task, task_id, note);
+    if let Some((dispatch_id, _)) = automatic_repair {
+        event = event.with_metadata(serde_json::json!({"premerge_repair_dispatch": dispatch_id, "repair_brief": reason}));
+    }
     record_event_with_conn(&tx, &event)?;
     tx.commit()?;
     Ok(Some(RequestChangesOutcome {
@@ -4307,7 +4346,7 @@ mod tests {
         let conn = rusqlite::Connection::open(dir.path().join("cas.db")).unwrap();
         resolve_verification_dispatch_with_conn(&conn, &dispatch.id, "owner", None, true).unwrap();
         let grant = |owner: &str, id: &str, anchor: &str| auto_return_premerge_rejection(
-            dir.path(), &task.id, owner, "evidence repair", id, anchor).unwrap();
+            dir.path(), &task.id, owner, "evidence repair", id, anchor, None).unwrap();
         for (owner, id, anchor) in [("foreign", dispatch.id.as_str(), "a".repeat(40)),
             ("owner", "superseded", "a".repeat(40)), ("owner", dispatch.id.as_str(), "b".repeat(40))] {
             assert!(grant(owner, id, &anchor).is_none());
@@ -4322,7 +4361,7 @@ mod tests {
             std::thread::spawn(move || {
                 barrier.wait();
                 auto_return_premerge_rejection(&root, &task_id, "owner", "evidence repair",
-                    &dispatch_id, &"a".repeat(40)).unwrap().is_some()
+                    &dispatch_id, &"a".repeat(40), None).unwrap().is_some()
             })
         }).collect();
         assert_eq!(jobs.into_iter().map(|job| job.join().unwrap()).filter(|granted| *granted).count(), 1);
@@ -4346,7 +4385,9 @@ mod tests {
         assert!(grant("owner", &next.id, &"b".repeat(40)).is_none());
         assert_eq!(tasks.get(&task.id).unwrap().deliverables.premerge_repair, Some(receipt));
         // Explicit supervisor request-changes creates a new manual work cycle.
-        request_changes_for_parked_delivery(dir.path(), &task.id, "owner", "new scope").unwrap();
+        let held = request_changes_for_parked_delivery(dir.path(), &task.id, "owner", "new scope").unwrap_err();
+        assert!(matches!(held, StoreError::Parse(reason) if reason == REPEAT_REVIEW_REQUIRED));
+        request_changes_for_reviewed_delivery(dir.path(), &task.id, "owner", "new scope", &[], Some(&verdict.id)).unwrap();
         let current = tasks.get(&task.id).unwrap();
         assert!(current.deliverables.delivery_cycle > current.deliverables.premerge_repair.unwrap().repair_cycle);
     }

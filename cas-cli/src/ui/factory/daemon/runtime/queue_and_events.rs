@@ -1010,27 +1010,20 @@ fn ensure_worker_preassignment(
     cas_dir: &std::path::Path,
     task_id: &str,
     worker_name: &str,
-) -> Result<String, String> {
-    let assigned = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker(
+) -> Result<(String, Option<String>), String> {
+    let review = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker_with_review(
         cas_dir,
         task_id,
         worker_name,
-    );
+    )?;
     if let Some(reason) = preassign_failure_reason(cas_dir, task_id, worker_name) {
         return Err(reason);
-    }
-    if !assigned {
-        tracing::debug!(
-            task_id,
-            worker_name,
-            "cas-28a4: pre-assignment reported no write but the binding is already correct"
-        );
     }
     let store = crate::store::open_task_store_cached(cas_dir)
         .map_err(|e| format!("task {task_id} is bound but unreadable: {e}"))?;
     store
         .get(task_id)
-        .map(|task| task.title)
+        .map(|task| (task.title, review))
         .map_err(|e| format!("task {task_id} is bound but unreadable: {e}"))
 }
 
@@ -1068,6 +1061,7 @@ pub(crate) fn latest_spawn_brief(notes: &str) -> Option<&str> {
 ///
 /// A pre-assigned worker that boots with no message sits idle burning a seat —
 /// the assignment alone is invisible from inside the worker's session.
+#[cfg(test)]
 fn deliver_worker_task_brief(
     cas_dir: &std::path::Path,
     factory_session: &str,
@@ -1076,9 +1070,15 @@ fn deliver_worker_task_brief(
     task_title: &str,
     worker_cli: cas_mux::SupervisorCli,
 ) -> anyhow::Result<i64> {
-    let message = worker_spawn_prompt(cas_dir, worker_name, task_id, task_title, worker_cli);
+    let message = worker_spawn_prompt(cas_dir, worker_name, task_id, task_title, worker_cli, None);
+    queue_worker_task_brief(cas_dir, factory_session, worker_name, task_id, &message)
+}
+
+fn queue_worker_task_brief(
+    cas_dir: &std::path::Path, factory_session: &str, worker_name: &str, task_id: &str, message: &str,
+) -> anyhow::Result<i64> {
     let id = crate::task_assignment::enqueue_spawn_message(
-        cas_dir, factory_session, worker_name, task_id, &message,
+        cas_dir, factory_session, worker_name, task_id, message,
     )?;
     super::delivery::wake_daemon_after_enqueue(cas_dir);
     Ok(id)
@@ -1087,7 +1087,7 @@ fn deliver_worker_task_brief(
 /// Compose before launching: the first model turn has startup, task and brief.
 pub(crate) fn worker_spawn_prompt(
     cas_dir: &std::path::Path, worker_name: &str, task_id: &str,
-    task_title: &str, worker_cli: cas_mux::SupervisorCli,
+    task_title: &str, worker_cli: cas_mux::SupervisorCli, review: Option<&str>,
 ) -> String {
     let worker_prefix = worker_cli.backend().capabilities().tool_prefix;
     let mut message = format!(
@@ -1097,6 +1097,9 @@ pub(crate) fn worker_spawn_prompt(
          {test_policy}",
         test_policy = crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY,
     );
+    if let Some(review) = review {
+        message.push_str(&crate::mcp::tools::core::task::repeat_review::mismatch_brief(review));
+    }
     // cas-ee68: the supervisor's spawn brief reaches the worker in this
     // message, before it can start the task.
     if let Some(task) = crate::store::open_task_store_cached(cas_dir)
@@ -7012,7 +7015,7 @@ impl FactoryDaemon {
             }
         }
         match ensure_worker_preassignment(self.app.cas_dir(), task_id, worker) {
-            Ok(title) => {
+            Ok((title, review)) => {
                 if let Some(request_id) = request_id {
                     let bound = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
                         .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, worker));
@@ -7029,14 +7032,9 @@ impl FactoryDaemon {
                 );
                 let mut detail =
                     format!("Task {task_id} (\"{title}\") is assigned to this worker.");
-                match deliver_worker_task_brief(
-                    self.app.cas_dir(),
-                    &self.session_name,
-                    worker,
-                    task_id,
-                    &title,
-                    self.app.harness_for(worker),
-                ) {
+                let message = worker_spawn_prompt(self.app.cas_dir(), worker, task_id, &title,
+                    self.app.harness_for(worker), review.as_deref());
+                match queue_worker_task_brief(self.app.cas_dir(), &self.session_name, worker, task_id, &message) {
                     Ok(_) => {
                         // cas-8563b: the brief is the assignment notice for a
                         // pre-assigned spawn; the director must not send a
@@ -12505,11 +12503,17 @@ impl FactoryDaemon {
                             .and_then(|queues| queues.get(&self.session_name, &worker_name))
                             .map(|queue| queue.revision > 0).unwrap_or(true);
                         if !queued_spawn && let Some(ref tid) = task_id {
-                            let _ = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker(
+                            let assignment = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker_with_review(
                                 self.app.cas_dir(),
                                 tid,
                                 &worker_name,
                             );
+                            if let (Some(request_id), Err(error)) = (request_id, assignment)
+                                && crate::gates::codes_in(&error).contains(&"G-170")
+                            {
+                                self.fail_unbound_spawn(request_id, &worker_name, Some(tid), &error);
+                                return;
+                            }
                         }
                         self.app.add_pending_worker(worker_name.clone(), isolate);
                         self.spawn_started_at = Some(Instant::now());
@@ -12599,11 +12603,17 @@ impl FactoryDaemon {
                             .and_then(|queues| queues.get(&self.session_name, &worker_name))
                             .map(|queue| queue.revision > 0).unwrap_or(true);
                         if !queued_spawn && let Some(ref tid) = task_id {
-                            let _ = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker(
+                            let assignment = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker_with_review(
                                 self.app.cas_dir(),
                                 tid,
                                 &worker_name,
                             );
+                            if let (Some(request_id), Err(error)) = (request_id, assignment)
+                                && crate::gates::codes_in(&error).contains(&"G-170")
+                            {
+                                self.fail_unbound_spawn(request_id, &worker_name, Some(tid), &error);
+                                return;
+                            }
                         }
                         self.app.add_pending_worker(worker_name.clone(), isolate);
                         self.spawn_started_at = Some(Instant::now());
@@ -20151,7 +20161,7 @@ mod tests {
             ))
             .unwrap();
 
-        let title = ensure_worker_preassignment(&cas_dir, "cas-aee6", "cosmic-crow-41")
+        let (title, _) = ensure_worker_preassignment(&cas_dir, "cas-aee6", "cosmic-crow-41")
             .expect("a free task must bind at registration");
 
         assert_eq!(title, "awaiting_merge lifecycle");

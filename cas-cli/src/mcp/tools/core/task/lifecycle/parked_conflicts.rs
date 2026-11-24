@@ -39,7 +39,7 @@ pub(crate) fn return_to_worker(
         "merge_conflicted: {} @ {tip} conflicts with {} @ {target_tip}; conflicting paths: {paths}. Merge the target into the delivery branch, resolve, and re-deliver.",
         GitOperations::visible_git_label(source), GitOperations::visible_git_label(target),
     );
-    cas_store::request_changes_for_parked_delivery(root, &expected.id, actor, &reason)?;
+    let (_, reason) = super::super::repeat_review::repair_parked(root, &expected.id, actor, &reason)?;
     let _ = crate::store::publish_direct_task_write(root, &expected.id);
     let returned = store.get(&expected.id)?;
     let notice = supervisor_push::queue_merge_conflict_reopen_notice(root, &returned, tip, target_tip, &reason)

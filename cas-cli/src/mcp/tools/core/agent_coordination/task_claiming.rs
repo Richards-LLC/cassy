@@ -1233,9 +1233,9 @@ impl CasCore {
             });
         }
 
-        if !super::super::task::task_assignee_matches_agent(agent_store.as_ref(), task.assignee.as_deref(), &target_agent) {
-            crate::mcp::tools::core::task::repeat_review::require_review(&self.cas_root, &task.id)?;
-        }
+        let repair_review = if !super::super::task::task_assignee_matches_agent(agent_store.as_ref(), task.assignee.as_deref(), &target_agent) {
+            crate::mcp::tools::core::task::repeat_review::require_review(&self.cas_root, &task.id)?
+        } else { None };
 
         // Validate/copy the branch before releasing a lease or changing the
         // assignment. A rejected adoption leaves the old owner working.
@@ -1291,6 +1291,8 @@ impl CasCore {
             format!("[{timestamp}] Handoff from {agent_id} to {}", target_label)
         };
 
+        let review_brief = repair_review.as_deref().map(crate::mcp::tools::core::task::repeat_review::mismatch_brief).unwrap_or_default();
+        let handoff_note = format!("{handoff_note}{review_brief}");
         if task.notes.is_empty() {
             task.notes = handoff_note;
         } else {
@@ -1407,7 +1409,7 @@ impl CasCore {
 
         let forced_transfer = supervisor_override_requested && (prior_lease_holder.is_some() || transferred_without_lease);
         let response = format!(
-            "Transferred task {} from {} to {}\n{}\nNote: {}{}{}",
+            "Transferred task {} from {} to {}\n{}\nNote: {}{}{}{review_brief}",
             req.task_id,
             previous_holder,
             target_label,

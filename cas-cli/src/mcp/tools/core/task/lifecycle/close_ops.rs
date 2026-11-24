@@ -8186,7 +8186,7 @@ impl CasCore {
             data: None,
         })?;
 
-        if super::super::repeat_review::detach_from_train(&self.cas_root, task_store.as_ref(), &task, None)
+        if super::super::repeat_review::detach_at_park(&self.cas_root, task_store.as_ref(), &task)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
         {
             task = task_store.get(&req.id).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
@@ -14388,37 +14388,20 @@ impl CasCore {
             )));
         }
 
-        let review = super::super::repeat_review::require_review(&self.cas_root, &task.id)?;
-        let reason = review.as_ref().map(|id| format!("{}\nWhole-flow mismatch list: {id}", req.reason.trim()));
-        let reason = reason.as_deref().unwrap_or(&req.reason);
-        let effective_class = crate::mcp::tools::core::task::repair_class::require_class(task_store.as_ref(), &task.id, class_audit)
-            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, format!("task request_changes rejected: {message}")))?;
-
-        // Persist exactly the selector in force; never clear a stored one, and before the
-        // transition so a failed write cannot drop the obligation.
-        if let Some(class) = &effective_class {
-            task_store
-                .patch_execution_state(&task.id, &serde_json::json!({"class_audit": class}))
-                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
-                    format!("task request_changes could not record the class audit: {error}")))?;
-        }
-        // Deliberately no delivery/dispatch precondition: GH #55 and #82 both
-        // deadlocked because the recovery action refused parked tasks whose
-        // proof boundary was merged, unbound, or legacy — exactly the states a
-        // failed review produces. Boundary shape is reported, never gating.
-        let outcome = cas_store::request_changes_for_parked_delivery_with_merge_sources(
-            &self.cas_root,
-            &task.id,
-            &supervisor_id,
-            reason,
-            &source_commits,
-        )
-        .map_err(|error| {
-            Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!("task request_changes rejected: {error}"),
-            )
-        })?;
+        let (outcome, reason) = super::super::repeat_review::repair_transition(
+            &self.cas_root, &task.id, &req.reason, |reason, reviewed| {
+                let effective_class = crate::mcp::tools::core::task::repair_class::require_class(task_store.as_ref(), &task.id, class_audit)
+                    .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, format!("task request_changes rejected: {message}")))?;
+                if let Some(class) = &effective_class {
+                    task_store.patch_execution_state(&task.id, &serde_json::json!({"class_audit": class}))
+                        .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                            format!("task request_changes could not record the class audit: {error}")))?;
+                }
+                cas_store::request_changes_for_reviewed_delivery(
+                    &self.cas_root, &task.id, &supervisor_id, reason, &source_commits, reviewed,
+                ).map_err(|error| super::super::repeat_review::transition_error(&task.id, error))
+            },
+        )?;
         let sync = crate::store::publish_direct_task_write(&self.cas_root, &task.id)
             .err()
             .map(|error| format!(" Cloud sync of this verdict failed ({error}); peer machines will not see it until the task's next write."))

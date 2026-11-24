@@ -253,7 +253,7 @@ pub use loop_store::{LOOP_SCHEMA, LoopStore, SqliteLoopStore};
 // Verification store for task quality gates
 pub use verification_store::{
     IssuedVerifierCapability, ParentDependencyUpdate, ProofScopeCorrectionOutcome,
-    REQUEST_CHANGES_AUDIT_PREFIX, RequestChangesBoundary, RequestChangesOutcome,
+    REPEAT_REVIEW_REQUIRED, REQUEST_CHANGES_AUDIT_PREFIX, RequestChangesBoundary, RequestChangesOutcome,
     SqliteVerificationStore, TaskReopenLifecycleOutbox,
     VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT, VERIFICATION_DURATION_SOURCE_STATEMENT,
     VERIFICATION_SCHEMA, VERIFICATION_ISSUE_TRIAGE_STATEMENT,
@@ -280,6 +280,7 @@ pub use verification_store::{
     issue_server_verifier_handoff_with_secret, issue_verifier_capability,
     reopen_closed_task_atomic, reopen_terminal_task_atomic, request_changes_audit_note,
     request_changes_for_parked_delivery, request_changes_for_parked_delivery_with_merge_sources,
+    request_changes_for_reviewed_delivery,
     auto_return_premerge_rejection,
     resolve_verification_dispatch_for_add,
     resolve_verification_dispatch_for_add_with_conn, resolve_verification_dispatch_with_conn,

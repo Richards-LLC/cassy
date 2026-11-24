@@ -1011,6 +1011,11 @@ mod tests {
                     && integration != Some(true);
                 if batch_park {
                     cas_store::waive_qa_pass(
+                        &root, &task.id, "supervisor", "worker", "factory/worker", &base,
+                        "Reviewed the prior tip", chrono::Utc::now(),
+                    ).unwrap();
+                    assert_eq!(crate::gates::codes_in(&check().unwrap_err()), ["G-171"]);
+                    cas_store::waive_qa_pass(
                         &root, &task.id, "supervisor", "worker", "factory/worker", &head,
                         "Reviewed the exact delivery", chrono::Utc::now(),
                     ).unwrap();
@@ -1021,6 +1026,7 @@ mod tests {
                 assert_eq!(cas_store::has_qa_batch_deferral(&root, &task.id).unwrap(),
                     batch_park);
                 if batch_park {
+                    assert_eq!(crate::gates::override_codes_in(&result.unwrap().join("\n")), ["G-171"]);
                     assert!(check().is_ok());
                     // Once integrated, recorded staging evidence remains due.
                     git(repo, &["branch", "-f", "main", &head]);

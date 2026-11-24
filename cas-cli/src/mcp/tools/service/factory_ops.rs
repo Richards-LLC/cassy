@@ -1752,11 +1752,12 @@ fn resolve_spawn_lane_accounts(
     specs: &mut [cas_mux::WorkerSpec],
     automatic: &[bool],
     snapshot: &cas_factory::CapabilitySnapshot,
+    hub_models: Option<&[String]>,
     policy: &crate::config::AccountsConfig,
     now: chrono::DateTime<chrono::Utc>,
     collect: impl FnOnce() -> std::io::Result<Vec<crate::account_registry::Account>>,
 ) -> Result<(String, Vec<String>), String> {
-    let original = match resolve_lane_account_models(lane, specs, snapshot) {
+    let original = match resolve_lane_account_models(lane, specs, snapshot, hub_models) {
         Ok(decision) => return Ok(decision),
         Err(error) => error,
     };
@@ -1771,14 +1772,14 @@ fn resolve_spawn_lane_accounts(
             let mut candidate = spec.clone();
             candidate.config_dir = Some(account.folder.to_string_lossy().into_owned());
             account.provider == crate::accounts::Provider::Codex
-                && resolve_lane_account_models(lane, std::slice::from_mut(&mut candidate), snapshot).is_ok()
+                && resolve_lane_account_models(lane, std::slice::from_mut(&mut candidate), snapshot, hub_models).is_ok()
         }).cloned().collect::<Vec<_>>();
         if let Some(choice) = crate::account_selection::launch_choice(&supported, crate::accounts::Provider::Codex, now, policy).recommended {
             account_notices.push(format!("Automatic Codex account {} verifies lane {lane}", choice.account.folder.display()));
             spec.config_dir = Some(choice.account.folder.to_string_lossy().into_owned());
         }
     }
-    let (recipe, mut warnings) = resolve_lane_account_models(lane, specs, snapshot)?;
+    let (recipe, mut warnings) = resolve_lane_account_models(lane, specs, snapshot, hub_models)?;
     warnings.extend(account_notices);
     Ok((recipe, warnings))
 }
@@ -3375,7 +3376,7 @@ impl CasService {
         });
         if let (Some(lane), Some(snapshot)) = (req.lane.as_deref(), lane_snapshot.as_ref()) {
             let previous_harnesses = specs.iter().map(|spec| spec.cli).collect::<Vec<_>>();
-            (lane_recipe, lane_warnings) = resolve_spawn_lane_accounts(lane, &mut specs, &lane_automatic_accounts, snapshot, &account_policy, chrono::Utc::now(), || {
+            (lane_recipe, lane_warnings) = resolve_spawn_lane_accounts(lane, &mut specs, &lane_automatic_accounts, snapshot, cas_mux::gateway::codex_hub_models(&self.inner.cas_root).as_deref(), &account_policy, chrono::Utc::now(), || {
                 let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("home directory unavailable"))?;
                 crate::account_registry::collect_for(crate::accounts::Provider::Codex, &home, false)
             })
@@ -14047,7 +14048,7 @@ mod spawn_lifecycle_tests {
                 assert_eq!(spec.config_dir.as_deref(), account.to_str());
                 if case == "fallback" {
                     let mut resolved = vec![spec];
-                    let (recipe, warnings) = resolve_lane_account_models("standard", &mut resolved, &Default::default()).unwrap();
+                    let (recipe, warnings) = resolve_lane_account_models("standard", &mut resolved, &Default::default(), None).unwrap();
                     assert_eq!(recipe, "codex_sol_6");
                     assert!(!warnings.is_empty());
                 }
@@ -14062,10 +14063,28 @@ mod spawn_lifecycle_tests {
         alternate.folder = other.clone();
         for automatic in [false, true] {
             let mut specs = build_lane_spawn_specs(1, "standard", Some(account.to_str().unwrap()), None, &Default::default()).unwrap().0;
-            let result = resolve_spawn_lane_accounts("standard", &mut specs, &[automatic], &Default::default(), &Default::default(), chrono::Utc::now(), || Ok(vec![alternate.clone()]));
+            let result = resolve_spawn_lane_accounts("standard", &mut specs, &[automatic], &Default::default(), None, &Default::default(), chrono::Utc::now(), || Ok(vec![alternate.clone()]));
             assert_eq!(result.is_ok(), automatic);
             assert_eq!(specs[0].config_dir.as_deref(), Some(if automatic { &other } else { &account }.to_str().unwrap()));
         }
+    }
+
+    /// GH #2415: Codex workers routed through the hub have no local
+    /// `auth.json`, so a lane verifies its recipes against the hub's model
+    /// listing instead of refusing every one.
+    #[test]
+    fn lane_recipes_verify_against_the_hub_catalogue_when_workers_route_through_it() {
+        let home = tempfile::tempdir().unwrap();
+        let account = home.path().to_str().unwrap();
+        let resolve = |hub: Option<&[String]>| {
+            let mut specs = build_lane_spawn_specs(1, "standard", Some(account), None, &Default::default()).unwrap().0;
+            resolve_lane_account_models("standard", &mut specs, &Default::default(), hub)
+        };
+        assert!(resolve(None).is_err(), "no auth.json and no hub: nothing verifies the model");
+        let hub = |models: &[&str]| models.iter().map(|m| m.to_string()).collect::<Vec<_>>();
+        assert_eq!(resolve(Some(&hub(&["gpt-6.1-sol", "gpt-6-sol"]))).unwrap().0, "codex_sol_6_1");
+        assert_eq!(resolve(Some(&hub(&["gpt-6-sol"]))).unwrap().0, "codex_sol_6", "falls back past a model the hub lacks");
+        assert!(resolve(Some(&hub(&["gpt-5.6-sol"]))).is_err(), "a hub listing without either model still refuses");
     }
 
     /// cas-c8de: at the spawn preflight, a catalogue cached by an older codex

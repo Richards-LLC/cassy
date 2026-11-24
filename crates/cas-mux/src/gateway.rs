@@ -259,6 +259,11 @@ pub fn validate_endpoint(raw: &str) -> Result<String, String> {
 
 /// Readiness: the hub's model listing must answer 200 for this key.
 fn probe(endpoint: &str, key: &str) -> Result<(), String> {
+    models(endpoint, key).map(|_| ())
+}
+
+/// The model ids the hub lists for this key.
+fn models(endpoint: &str, key: &str) -> Result<Vec<String>, String> {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(2))
         .timeout(Duration::from_secs(5))
@@ -269,12 +274,42 @@ fn probe(endpoint: &str, key: &str) -> Result<(), String> {
         .set("Authorization", &format!("Bearer {key}"))
         .call()
     {
-        Ok(response) if response.status() == 200 => Ok(()),
+        Ok(response) if response.status() == 200 => {
+            let listing: serde_json::Value = response.into_json().unwrap_or_default();
+            Ok(listing
+                .get("data")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
+                .map(str::to_string)
+                .collect())
+        }
         Ok(response) => Err(format!("hub readiness answered {}", response.status())),
         Err(ureq::Error::Status(code @ (401 | 403), _)) => Err(format!("hub refused the client key ({code})")),
         Err(ureq::Error::Status(code, _)) => Err(format!("hub readiness answered {code}")),
         Err(ureq::Error::Transport(error)) => Err(format!("hub unreachable ({})", error.kind())),
     }
+}
+
+/// The model ids the hub lists when a Codex worker spawned now would route
+/// through it (same route and readiness rules as [`apply`]); `None` when it
+/// would start direct, so the account's own catalogue applies instead.
+pub fn codex_hub_models(cas_root: &Path) -> Option<Vec<String>> {
+    codex_hub_models_with(&load(Some(cas_root), pinned_route().as_deref()), models)
+}
+
+fn codex_hub_models_with(
+    settings: &FactoryGatewayConfig,
+    fetch: impl Fn(&str, &str) -> Result<Vec<String>, String>,
+) -> Option<Vec<String>> {
+    let listed = std::cell::RefCell::new(Vec::new());
+    let routed = plan(settings, "codex", |endpoint, key| {
+        *listed.borrow_mut() = fetch(endpoint, key)?;
+        Ok(())
+    });
+    let listed = listed.into_inner();
+    (matches!(routed, Plan::Gateway { .. }) && !listed.is_empty()).then_some(listed)
 }
 
 #[cfg(test)]

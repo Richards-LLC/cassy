@@ -688,7 +688,8 @@ fn original_candidate_for_dispatch(
     };
     let repository = Path::new(&proof.repository_root);
     let tree = git(repository, &["rev-parse", &format!("{}^{{tree}}", proof.head_commit)])?;
-    let candidate = original_candidate_at_ref(root, repository, &bound_key, &proof.head_commit, &tree)?;
+    let candidate = original_candidate_at_ref(root, repository, &bound_key, &proof.head_commit, &tree)
+        .map_err(|error| format!("{error} (dispatch {})", dispatch.id))?;
     if candidate.proof != *proof || candidate.task_id != dispatch.task_id {
         return Err("candidate does not match its immutable dispatch proof".into());
     }

@@ -93,6 +93,16 @@ export function lowPickNote(list: readonly WindowReading[]): string | undefined 
   return left !== undefined && left < LOW_PICK ? `Only ${left}% left: picked first because it resets soonest, so its capacity is used before it expires` : undefined;
 }
 
+/**
+ * A login the hub doesn't carry has no shared number: its machine's own read
+ * is muted text with its date, never a meter.
+ */
+export function localReadLine(list: readonly WindowReading[], observed: string | null | undefined, now = Date.now()): string {
+  const known = list.filter(reading => "left" in reading);
+  const age = observed ? readAge(observed, now) : undefined;
+  return `Not on the hub${known.length ? ` · this machine's ${age ?? "last read"}: ${known.map(reading => `${reading.left}% ${SLOT_LABEL[reading.slot].toLowerCase()}`).join(", ")}` : ""}`;
+}
+
 /** "77% 5h · 62% week · resets in 2 h": the plan strip's one-line summary. */
 export function capacityLine(list: readonly WindowReading[]): string {
   if (list.every(reading => reading.kind === "unreachable")) return "hub unreachable";

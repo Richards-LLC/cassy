@@ -100,3 +100,4 @@ code.accounts-sub { font-family: var(--font-mono); }
 @media (max-width: 600px) { .accounts-row .meter-at { display: none; } }
 /* A check's result lands on the row's meters; only a failure needs words beside ↻. */
 .accounts-actions .account-usage-result:not(.is-error) { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.accounts-tag { color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/20px var(--font-ui); white-space: nowrap; }

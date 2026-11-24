@@ -466,11 +466,11 @@ describe("accounts (cas-9666)", () => {
     const step = dialog().querySelector<HTMLElement>(".launch-account")!;
     expect(step.hidden).toBe(false);
     expect(dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="main"]')!.checked).toBe(true);
-    expect(dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="old@petrastella.io"]')!.disabled).toBe(true);
+    // A logged-out login is a help row with its login command, never a choice.
+    expect(dialog().querySelector('input[name="launch-account"][value="old@petrastella.io"]')).toBeNull();
     expect(step.querySelector(".launch-account-out code")!.textContent).toBe("cas claude login old@petrastella.io");
     // Logged-out logins sit under one disclosure, apart from the pickable rows.
-    expect(step.querySelector('[data-testid="launch-not-offered"] input[value="old@petrastella.io"]')).not.toBeNull();
-    expect(step.querySelector('.launch-accounts input[value="old@petrastella.io"]')).toBeNull();
+    expect(step.querySelector('[data-testid="launch-not-offered"] [data-account="old@petrastella.io"] code')).not.toBeNull();
     pick(dialog(), 'input[name="launch-project"]');
     await flush();
     pick(dialog(), 'input[name="launch-account"][value="support@petrastella.io"]');

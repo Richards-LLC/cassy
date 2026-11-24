@@ -341,7 +341,8 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
       const stale = dialog.getByRole("listitem").filter({ hasText: "old@example.test" });
       await expect(stale).toHaveAttribute("data-login-state", "stale_login");
       await expect(stale).toBeVisible();
-      await expect(dialog.getByRole("listitem").filter({ hasText: "hello@example.test" }).getByText("~/.claude-spare", { exact: true })).toBeVisible();
+      // The row names the profile; the folder it lives in is the tooltip.
+      await expect(dialog.getByRole("listitem").filter({ hasText: "hello@example.test" }).getByTitle(/^~\/\.claude-spare /)).toBeVisible();
       expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
       if (width === 390) {
         await page.mouse.move(200, 600);
@@ -413,7 +414,8 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
     await expect(grant).toBeVisible();
     await expect(grant.getByRole("button", { name: "Copy command", exact: true })).toBeVisible();
     // Every account operation, including those folded in a closed ⋯ menu.
-    for (const button of await dialog.getByRole("group", { name: /^Actions for / }).getByRole("button", { includeHidden: true }).all()) await expect(button).toBeDisabled();
+    // Usage checks (↻) need only read access; every account change is disabled.
+    for (const button of await dialog.getByRole("group", { name: /^Actions for / }).locator("[data-operation]").all()) await expect(button).toBeDisabled();
     await expect(accountsEditor(dialog)).toBeHidden();
     expect(await accountsEditor(dialog).evaluate(node => node.getClientRects().length)).toBe(0);
   });
@@ -498,6 +500,7 @@ test("HUB-J13 choose the home gateway for workers and read the hub's accounts", 
       await route.getByRole("radio", { name: "Home gateway", exact: true }).click();
       await expect(route.getByRole("radio", { name: "Home gateway", exact: true })).toBeChecked();
       await route.scrollIntoViewIfNeeded();
+      await route.locator(".launch-route-more > summary").click();
       await expect(route.locator(".launch-route-note")).toBeVisible();
       expect(await sheet.evaluate(el => el.scrollWidth <= el.clientWidth), "no sideways scrolling").toBe(true);
     });

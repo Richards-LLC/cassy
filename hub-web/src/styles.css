@@ -3787,8 +3787,26 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .launch-plan-meta:empty { display: none; }
 @media (max-width: 40rem) { .launch-plan { grid-template-columns: minmax(0, 1fr); } .launch-plan p { white-space: normal; } }
 /* Account rows: radio · name and the server's reason · two brief meters · ↻. */
-.launch-account-entry { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-2); }
-.launch-account-entry > .account-usage-check { align-self: start; padding-top: var(--space-2); }
+/* The entry is the card: the radio row and its ↻ share one edge, so cards line up with the project list. */
+.launch-account-entry { position: relative; display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: start; background: var(--panel); border: var(--line-width) solid var(--color-transparent); border-radius: var(--radius-card); transition: background-color 120ms ease, border-color 120ms ease; }
+.launch-account-entry:hover { background: var(--bg-hover); }
+.launch-account-entry.is-checked { background: var(--bg-active); border-color: var(--color-action); }
+.launch-account-entry > .launch-account-row, .launch-account-entry > .launch-account-row:hover, .launch-account-entry > .launch-account-row.is-checked { background: transparent; border-color: transparent; }
+.launch-account-entry > .account-usage-check { padding: var(--space-2) var(--space-2) 0 0; }
+.launch-tabs[hidden], .launch-route-warn[hidden], .launch-route-more[hidden] { display: none; }
+.launch-route-line { display: flex; align-items: flex-start; gap: var(--space-2); min-width: 0; }
+.launch-route-line > .field-hint { flex: 1; min-width: 0; }
+.launch-route-more { flex: none; }
+.launch-route-more > summary { display: grid; place-items: center; inline-size: 24px; block-size: 24px; border-radius: var(--radius-pill); color: var(--text-mid); cursor: pointer; list-style: none; font-size: var(--fs-meta); }
+.launch-route-more > summary::-webkit-details-marker { display: none; }
+.launch-route-more > summary:hover { color: var(--text-hi); background: var(--bg-hover); }
+.launch-route-more > summary:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: 2px; }
+.launch-route-more[open] { flex-basis: 100%; order: 2; }
+.launch-route-line:has(.launch-route-more[open]) { flex-wrap: wrap; }
+.launch-route-more[open] > .launch-route-note { display: block; margin-top: var(--space-1); }
+.launch-route-warn { color: var(--state-warn); }
+.launch-not-offered .launch-account-out { display: grid; gap: var(--space-1); padding-inline: var(--space-3); }
+.launch-not-offered .launch-login { padding-inline-start: 0; }
 .launch-account-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--space-2); min-width: 0; }
 .launch-account-pick { padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--bg-active); color: var(--color-verdict); font: var(--weight-semibold) var(--fs-xs)/20px var(--font-ui); white-space: nowrap; }
 .launch-account-why { color: var(--text-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }

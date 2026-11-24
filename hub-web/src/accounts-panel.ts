@@ -1,5 +1,5 @@
 import { AccountUsageChecks, type CheckAccountUsage } from "./account-usage-check";
-import { fillMeters, leastLeft, lowPickNote, meterMarkup, readings } from "./account-meters";
+import { fillMeters, leastLeft, localReadLine, lowPickNote, meterMarkup, readings } from "./account-meters";
 import "./accounts-panel.css";
 import { escapeHtml } from "./cloud-brand";
 import { accountLoginCommand } from "./launch-session";
@@ -252,11 +252,14 @@ export class AccountsSheet {
     const flag = account.duplicate_of ? `<span class="accounts-flag" data-duplicate-of>Duplicate of ${duplicateName(account.duplicate_of, accounts)}</span>` : account.login_state === "stale_login" ? `<span class="accounts-flag">Stale login</span>` : "";
     const shown = readings(checked?.windows ?? account.windows, checked ? checked.observed_at : account.usage_observed_at, Date.now(), checked ? undefined : account.usage_source);
     const low = next && account.recommendation ? lowPickNote(shown) : undefined;
-    const nextTag = next ? `<span class="accounts-next" data-testid="account-next" title="${escapeHtml(account.recommendation ?? "Default profile")}">Next launch</span><span class="accounts-sub" title="${escapeHtml(account.recommendation ?? "default profile")}">${escapeHtml(account.recommendation ?? "default profile")}</span>` : "";
+    // The reason's numbers are already on the meters; the tag carries it as a tooltip.
+    const nextTag = next ? `<span class="accounts-next" data-testid="account-next" title="${escapeHtml(account.recommendation ?? "Default profile")}">Next launch</span>` : "";
     const lowTag = low ? `<span class="accounts-flag accounts-why" data-testid="account-low-pick">${escapeHtml(low)}</span>` : "";
     // With a hub configured, a number that isn't the hub's says whose it is.
-    const local = (checked && account.usage_source) || account.usage_source === "local" ? `<span class="accounts-sub" data-testid="account-local-read">${escapeHtml(machine.label)}'s own read</span>` : "";
-    const sub = [nextTag, lowTag, flag, local, account.is_default ? `<span class="accounts-sub">Default</span>` : "", account.disabled ? `<span class="accounts-sub">disabled</span>` : "", account.location ? `<code class="accounts-sub" title="${escapeHtml(account.location)} on ${escapeHtml(machine.label)}">${escapeHtml(account.location)}</code>` : ""].filter(Boolean).join("");
+    const local = checked && account.usage_source ? `<span class="accounts-sub" data-testid="account-local-read">${escapeHtml(machine.label)}'s own check</span>` : "";
+    // The profile, not its folder: the folder repeats the email; the whole path is the tooltip.
+    const profile = account.name !== account.display_name ? `<code class="accounts-sub" title="${escapeHtml(account.location ?? account.key)} on ${escapeHtml(machine.label)}">${escapeHtml(account.name)}</code>` : "";
+    const sub = [nextTag, account.is_default ? `<span class="accounts-tag">Default</span>` : "", account.disabled ? `<span class="accounts-tag">Disabled</span>` : "", lowTag, flag, local, profile].filter(Boolean).join("");
     const operations = (Object.keys(ACTIONS) as AccountOperation[]).filter(op => op !== (account.disabled ? "disable" : "enable"));
     const button = (op: AccountOperation) => {
       const reason = !manage ? "Needs manage access on this machine" : account.capabilities[op];
@@ -268,9 +271,10 @@ export class AccountsSheet {
     const cells = grok ? `<div class="accounts-cell accounts-span"><p class="accounts-quiet" data-testid="accounts-readonly">Grok uses one account and doesn't report usage.</p></div>`
       : !loggedIn && !checked ? `<div class="accounts-cell accounts-span"><p class="accounts-quiet">Not read · ${account.login_state === "stale_login" ? "stale login" : "logged out"}</p><div class="accounts-login"><code>${escapeHtml(accountLoginCommand(account.provider, account.name))}</code><button type="button" ${attrs} data-login aria-label="Copy login command for ${escapeHtml(account.display_name)}">Copy</button></div></div>`
       // An unreachable hub is said once in the summary; each row holds one quiet line, not two.
+      : !checked && account.usage_source === "local" ? `<div class="accounts-cell accounts-span" data-testid="account-local-read"><p class="accounts-quiet">${escapeHtml(localReadLine(shown, account.usage_observed_at))}</p></div>`
       : shown.every(reading => reading.kind === "unreachable") ? `<div class="accounts-cell accounts-span" data-testid="account-meter" data-state="unreachable"><p class="accounts-quiet">No shared number while the hub is unreachable</p></div>`
       : shown.map(reading => `<div class="accounts-cell" data-col="${reading.slot}">${meterMarkup(reading, { labelled: true })}</div>`).join("");
-    return `<li class="accounts-row${needsCleanup(account) ? " needs-cleanup" : ""}${next ? " is-next" : ""}" data-testid="account-row" data-account-key="${escapeHtml(account.key)}" data-login-state="${escapeHtml(account.login_state)}"><div class="accounts-who">${providerAvatarMarkup({ harness: account.provider, fallback: account.provider.slice(0, 2).toUpperCase(), size: "row" })}<div class="accounts-name"><strong title="${escapeHtml(account.key)}">${escapeHtml(account.display_name)}</strong><span class="sr-only"> (${escapeHtml(account.key)})${lookalike}</span><span class="accounts-subline">${sub}</span></div>${actions}</div>${cells}</li>`;
+    return `<li class="accounts-row${needsCleanup(account) ? " needs-cleanup" : ""}${next ? " is-next" : ""}" data-testid="account-row" data-account-key="${escapeHtml(account.key)}" data-login-state="${escapeHtml(account.login_state)}"><div class="accounts-who">${providerAvatarMarkup({ harness: account.provider, fallback: account.provider.slice(0, 2).toUpperCase(), size: "row" })}<div class="accounts-name"><strong title="${escapeHtml(account.location ? `${account.location} on ${machine.label}` : account.key)}">${escapeHtml(account.display_name)}</strong><span class="sr-only"> (${escapeHtml(account.key)})${lookalike}</span><span class="accounts-subline">${sub}</span></div>${actions}</div>${cells}</li>`;
   }
 
   private begin(machine: AccountsMachine, account: AccountRow, operation: AccountOperation): void {

@@ -116,10 +116,10 @@ it("groups by provider in headroom order, says where each lives, and cleans up s
   // One ledger per provider: the next launch (here the first logged-in row) first, then most headroom, removable cleanup rows last.
   const groups = [...document.querySelectorAll(".accounts-provider-group")];
   expect(groups).toHaveLength(1);
-  expect([...groups[0]!.querySelectorAll<HTMLElement>(".accounts-name > strong")].map(name => name.title)).toEqual([tight.key, healthy.key, protectedMain.key, duplicate.key]);
+  expect([...groups[0]!.querySelectorAll<HTMLElement>("[data-account-key]")].map(row => row.dataset.accountKey)).toEqual([tight.key, healthy.key, protectedMain.key, duplicate.key]);
   for (const line of document.querySelectorAll("[data-duplicate-of]")) expect(line.textContent).not.toContain(healthy.key);
   expect(groups[0]!.querySelector('[data-testid="account-meter"][data-tone="crit"]')).not.toBeNull();
-  expect(groups[0]!.textContent).toContain("~/.claude-work");
+  expect(groups[0]!.querySelector(`[data-account-key="${healthy.key}"] [title^="~/.claude-work"]`)).not.toBeNull();
   expect(groups[0]!.querySelector(`[data-account-key="${healthy.key}"] [data-testid="account-meter"][data-window="week"]`)!.getAttribute("data-left")).toBe("62");
   click("[data-cleanup]");
   // The shared dialog form is a zero-intrinsic-width grid container; inside the banner's flex row it was squeezed to a sliver.

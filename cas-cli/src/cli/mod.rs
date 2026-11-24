@@ -373,7 +373,10 @@ pub enum Commands {
     #[command(name = "release-report", hide = true)]
     ReleaseReport(ReleaseReportArgs),
 
-    /// Friction ledger: interventions, speed, escapes and feature verdicts per release
+    /// Scorecard: spend, sensor health, interventions, speed, escapes and feature verdicts per release
+    Scorecard(ledger::ScorecardArgs),
+
+    /// Ledger records: backfill, estimates (the report is `cas scorecard`)
     Ledger(ledger::LedgerArgs),
 
     /// Branded deliverables: resolve a project's brand from its DESIGN.md
@@ -529,6 +532,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Changelog(_)
         | Commands::Release(_)
         | Commands::ReleaseReport(_)
+        | Commands::Scorecard(_)
         | Commands::Ledger(_)
         | Commands::Deliverable(_)
         | Commands::Hook(_)
@@ -903,6 +907,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Changelog(_) => "changelog".to_string(),
         Commands::Release(_) => "release".to_string(),
         Commands::ReleaseReport(_) => "release-report".to_string(),
+        Commands::Scorecard(_) => "scorecard".to_string(),
         Commands::Ledger(_) => "ledger".to_string(),
         Commands::Deliverable(_) => "deliverable".to_string(),
         Commands::Mcp(_) => "mcp".to_string(),
@@ -1076,6 +1081,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Release(ReleaseCommands::Precheck(args)) => release_precheck::execute(args, cli),
         Commands::Release(ReleaseCommands::Report(args)) => release_report::execute(args, cli),
         Commands::ReleaseReport(args) => release_report::execute(args, cli),
+        Commands::Scorecard(args) => ledger::execute_scorecard(args, cli, require_cas_root(cas_root)?),
         Commands::Ledger(args) => ledger::execute(args, cli, require_cas_root(cas_root)?),
         Commands::Deliverable(cmd) => deliverable::execute(cmd, cli),
         Commands::Mcp(cmd) => mcp_cmd::execute(cmd, cli, require_cas_root(cas_root)?),

@@ -1,6 +1,6 @@
 /**
  * Commander Quality sheet view model (cas-3dd7): release-over-release rubrics from the
- * friction ledger (`GET /v1/sessions/{s}/quality`, one `cas ledger report` per release).
+ * friction ledger (`GET /v1/sessions/{s}/quality`, one `cas scorecard` per release).
  * Rubrics are a registry: adding one is one entry, and a rubric without a signal yet
  * shows its pending source instead of a number. Lower is better for every rubric.
  */

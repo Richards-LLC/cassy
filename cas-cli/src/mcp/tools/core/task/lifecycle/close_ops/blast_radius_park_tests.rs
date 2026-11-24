@@ -1587,6 +1587,8 @@ async fn zero_test_rust_selection_parks_on_its_crate_run_cas_fcb1() {
     let cargo = f.dir.path().join("fake-cargo");
     std::fs::write(&cargo, "#!/bin/sh\ncase \" $* \" in\n  *' -E '*) echo '    Starting 0 tests across 1 binary (1 skipped)'; echo 'error: no tests to run'; exit 4;;\nesac\necho '        PASS [ 0.01s] (1/1) widget gear::tests::turns'\necho '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped'\n").unwrap();
     std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // The runner's private target stays out of the delivered tree.
+    std::fs::write(f.dir.path().join(".git/info/exclude"), "target/\n").unwrap();
     let args = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(=gear::tests::turns)"].map(String::from);
     crate::factory_worker_check::execute_at(&f.cas_dir(), &args, &f.worker_path, &cargo).unwrap();
 

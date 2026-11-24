@@ -2115,6 +2115,7 @@ mod tests {
             let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
             if case == "stalled" {
                 // GH #2325: the host pid is alive but the verifier thread inside it stopped.
+                crate::factory_review_scratch::age_task_checkouts(&root, &task.id);
                 conn.execute("UPDATE agents SET last_heartbeat=?2 WHERE id=?1",
                     rusqlite::params![child.id, (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339()]).unwrap();
             }

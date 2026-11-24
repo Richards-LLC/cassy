@@ -13623,22 +13623,32 @@ mod worker_commit_guard_tests {
         crate::test_paths::warm_stub(
             &gh,
             r#"#!/bin/sh
+printf '%s\n' "$*" >> "$CAS_TEST_PR_LOOKUPS"
 if [ "$1 $2" = 'api graphql' ]; then
   [ "$6" = "id=PR_fixture" ] || exit 1
-  printf '{"data":{"node":{"number":2546,"headRefName":"factory/proof","headRefOid":"%s","repository":{"nameWithOwner":"acme/project"}}}}' "$CAS_TEST_PR_HEAD"
+  case "$4" in
+    *'number url headRefName headRefOid'*) printf '{"data":{"node":{"number":2546,"url":"https://github.com/acme/project/pull/2546","headRefName":"factory/proof","headRefOid":"%s"}}}' "$CAS_TEST_PR_HEAD";;
+    *) exit 1;;
+  esac
   exit
 fi
 [ "$1 $2" = 'pr view' ] || exit 1
 number=$3
+repository=acme/project
 branch=factory/proof
 head=$CAS_TEST_PR_HEAD
 case "$number" in
   2546) ;;
   2547) branch=factory/other;;
   2548) head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;;
+  2549) number=2546; branch=factory/renamed;;
   *) exit 1;;
 esac
-while [ "$1" != '--json' ]; do [ "$#" -gt 1 ] || exit 1; shift; done
+while [ "$1" != '--json' ]; do
+  [ "$#" -gt 1 ] || exit 1
+  if [ "$1" = '--repo' ]; then repository=$2; shift; fi
+  shift
+done
 IFS=,
 separator=''
 printf '{'
@@ -13646,7 +13656,7 @@ for field in $2; do
   printf '%s"%s":' "$separator" "$field"
   case "$field" in
     number) printf '%s' "$number";;
-    url) printf '"https://github.com/acme/project/pull/%s"' "$number";;
+    url) printf '"https://github.com/%s/pull/%s"' "$repository" "$number";;
     headRefName) printf '"%s"' "$branch";;
     headRefOid) printf '"%s"' "$head";;
     statusCheckRollup) printf '[]';;
@@ -13659,6 +13669,8 @@ printf '}'
         );
         env.set("CAS_QA_GH", &gh);
         env.set("CAS_TEST_PR_HEAD", head);
+        let lookups = repo.path().join("pr-lookups");
+        env.set("CAS_TEST_PR_LOOKUPS", &lookups);
         let config = cas_root.join("config.toml");
         std::fs::write(&config, "[qa]\nindependent_pass = false\n").unwrap();
 
@@ -13713,12 +13725,16 @@ printf '}'
                 }))).unwrap();
         };
         let denial_for = |role: &str, command: &str| {
+            std::fs::write(&lookups, "").unwrap();
             let mut input = hook_git_write_input(cwd, command);
             input.agent_role = Some(role.into());
             if role == "supervisor" {
                 input.session_id = supervisor.id.clone();
             }
             let output = handle_pre_tool_use(&input, Some(&cas_root)).unwrap();
+            if role == "worker" {
+                assert_eq!(std::fs::read_to_string(&lookups).unwrap().lines().count(), 1);
+            }
             crate::gates::facts::hook_denial(&output).map(str::to_string)
         };
         let run = |role: &str, command: &str, expected: Option<&str>| {
@@ -13745,6 +13761,8 @@ printf '}'
         run("worker", graphql, Some("PR_VERIFIER_REJECTED"));
         run("worker", &merge(2547), None);
         run("worker", &merge(2548), None);
+        run("worker", &merge(2549), Some("PR_VERIFIER_REJECTED"));
+        run("worker", &format!("{command} --repo other/project"), None);
         run("supervisor", &command, None);
         let overrides = events.list_by_type(EventType::GateOverridden, 10).unwrap();
         let audit = overrides.iter().find(|event| event.entity_id == "H-24").unwrap();

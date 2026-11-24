@@ -122,9 +122,7 @@ pub(crate) fn record_override_code(
     task_id: &str,
     reason: &str,
 ) -> Result<()> {
-    anyhow::ensure!(find(code).is_some(), "{code} is not a registered gate code");
-    anyhow::ensure!(!reason.trim().is_empty(), "an override requires a reason");
-    record(store, EventType::GateOverridden, &[code], Some(task_id), reason)
+    record_override_codes(store, &[code.to_string()], Some(task_id), reason)
 }
 
 /// Record a supervisor-declared false positive of a registered code.

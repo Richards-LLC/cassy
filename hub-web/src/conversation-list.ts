@@ -250,9 +250,12 @@ export function conversationRowSpokenName(row: ConversationRow): string {
   ]);
 }
 
+function canShowBuild(row: ConversationRow): boolean {
+  return !row.ended && !row.unreachable && row.machine_online !== false && row.supervisorState !== "offline";
+}
+
 function rowVersion(row: ConversationRow) {
-  if (row.ended || row.unreachable || row.machine_online === false || row.supervisorState === "offline") return undefined;
-  return supervisorVersion(row.mcp_version, row.installed_version);
+  return canShowBuild(row) ? supervisorVersion(row.mcp_version, row.installed_version) : undefined;
 }
 
 /**
@@ -469,7 +472,7 @@ export class ConversationList {
         if (!confirming) this.reloadConfirming.delete(row.key);
         const direct = control.querySelector<HTMLButtonElement>('[data-reload-cassy="direct"]')!;
         const confirm = control.querySelector<HTMLButtonElement>('[data-reload-cassy="confirm"]')!;
-        direct.hidden = !(row.mcp_reload_needed ?? rowVersion(row)?.update);
+        direct.hidden = !canShowBuild(row) || !(row.mcp_reload_needed ?? rowVersion(row)?.update);
         confirm.hidden = !confirming;
         direct.textContent = confirming ? "Cancel" : "Reload Cassy";
         for (const action of [direct, confirm]) action.disabled = Boolean(unavailable || pending);

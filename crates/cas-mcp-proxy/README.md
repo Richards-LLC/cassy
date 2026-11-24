@@ -180,9 +180,12 @@ the original message arguments and outcome; no request-ID lookup is sent.
 Reconnect refreshes the catalog before deciding which contract to use. A lost response or `outcome_unknown` result triggers a
 read-only `violet_reconcile_reply` lookup using that same ID. A confirmed
 posted receipt is returned to the caller; a definite `not_posted` result or
-an unresolved outcome remains a failure with its request ID. The proxy never
-resends the post. Reconciliation goes through the same authorization boundary;
-an unavailable or denied lookup leaves the outcome unknown.
+an unresolved outcome remains a failure with its request ID. The proxy resends
+the post once, with the same request ID, only when the transport closed or
+failed to send and the lookup reports `request_not_found`. A `not_posted` with
+that reason stays retryable under the same request ID. Reconciliation goes
+through the same authorization boundary; an unavailable or denied lookup
+leaves the outcome unknown.
 
 ## Hot-reload
 

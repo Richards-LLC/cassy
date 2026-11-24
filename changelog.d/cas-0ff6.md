@@ -15,8 +15,12 @@
   verifier is handed the recorded reference and artifacts, never a later
   listing. A changed, republished or revoked report retires the stale dispatch
   and the next close or merge requests a new review; a temporary download
-  failure retries the same dispatch. An unreadable inventory, dispatch or
-  verdict refuses with G-68. `supervisor_override` and the shipped-timeout
+  failure retries the same dispatch. A revocation Cloud reports is recorded
+  locally, so that new review leaves the artifact out. The approval is checked
+  again at the final write of close, `task update status=closed` and release
+  apply and at merge admission, so a report edited, republished or revoked
+  while one of them runs is refused; a release preview changes nothing. An
+  unreadable inventory, dispatch or verdict refuses with G-68. `supervisor_override` and the shipped-timeout
   waiver no longer close a report: a supervisor records a verdict on the
   dispatch instead. Negative-result, evidence-only and decision closes, the
   operator recovery decision and turning verification off are unchanged, as are

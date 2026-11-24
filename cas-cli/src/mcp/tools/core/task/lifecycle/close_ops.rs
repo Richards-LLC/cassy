@@ -13464,7 +13464,7 @@ impl CasCore {
         };
 
         // Check if commit nudge is enabled
-        let commit_nudge = config.tasks().commit_nudge_on_close;
+        let commit_nudge = self.load_config().tasks().commit_nudge_on_close;
         let commit_nudge_msg =
             if commit_nudge && worktree_msg.is_empty() && epic_close_msg.is_empty() {
                 "\n\n💡 Consider committing your changes for this completed task."

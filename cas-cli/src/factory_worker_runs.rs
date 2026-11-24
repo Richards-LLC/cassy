@@ -1,4 +1,5 @@
 //! Durable ownership and completion of capped detached worker commands.
+//! A detached command queues for build admission and wakes its worker once.
 //! Queue acceptance is idempotent; an interrupted notification retries on the
 //! daemon's existing reminder scan, without changing the command's exit status.
 use std::fs::{File, OpenOptions};
@@ -372,18 +373,27 @@ pub(crate) fn finish(root: &Path, id: &str, code: i32, now: DateTime<Utc>) -> Re
     notify(root, &mut run)
 }
 
-fn notify(root: &Path, run: &mut Run) -> Result<()> {
-    if run.notified {
-        return Ok(());
-    }
+fn worker_current(root: &Path, run: &Run) -> Result<bool> {
     let agents = crate::store::open_agent_store(root)?;
-    let current = agents.get(&run.worker_id).ok().is_some_and(|agent| {
+    Ok(agents.get(&run.worker_id).ok().is_some_and(|agent| {
         agent.role == cas_types::AgentRole::Worker
             && agent.is_alive()
             && agent.name == run.worker
             && agent.factory_session == run.session
-    });
-    if !current {
+    }))
+}
+
+/// cas-fa0f: a queued run keeps waiting only while its worker can still
+/// receive the completion; otherwise it exits with the refusal.
+pub(crate) fn owner_current(root: &Path, id: &str) -> bool {
+    load(root, id).and_then(|run| worker_current(root, &run)).unwrap_or(false)
+}
+
+fn notify(root: &Path, run: &mut Run) -> Result<()> {
+    if run.notified {
+        return Ok(());
+    }
+    if !worker_current(root, run)? {
         return Ok(());
     }
     let completion = Completion {
@@ -395,7 +405,7 @@ fn notify(root: &Path, run: &mut Run) -> Result<()> {
         log: run.log.clone(),
     };
     let body = format!(
-        "{}\nTask: {}\nRead the log and continue the assigned task; obey any recorded admission retry time. This is a command completion, not a task verdict.",
+        "{}\nTask: {}\nRead the log and continue the assigned task. This is a command completion, not a task verdict.",
         completion.detail(),
         run.task.as_deref().unwrap_or("not bound at launch")
     );
@@ -423,6 +433,9 @@ pub(crate) fn monitor(root: &Path, id: &str, execute: impl FnOnce() -> Result<()
         bail!("detached completion belongs to another checkout");
     }
     bind(root, id, std::process::id())?;
+    // A detached run owes its worker this one wake, so it queues for build
+    // capacity; an attended run's caller sees a refusal at once.
+    let _queued = (!run.notified).then(|| crate::factory_worker_check::QueuedRun::enter(root, id));
     let result = execute();
     if let Err(error) = finish(root, id, if result.is_ok() { 0 } else { 1 }, Utc::now()) {
         eprintln!("worker-check completion pending daemon retry: {error}");

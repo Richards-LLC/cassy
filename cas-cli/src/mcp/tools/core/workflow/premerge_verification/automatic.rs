@@ -369,24 +369,12 @@ pub(super) fn recover_expired_claim_with_probes(
     let Some(child) = dispatch.verifier_agent_id.as_deref().and_then(|id| agents.get(id).ok()) else {
         return Ok(dispatch.clone());
     };
-    // Only a claim whose child carries this dispatch's daemon marker is daemon
-    // owned. A child registered before the launcher stamped its machine has no
-    // machine id; the marker and a local owner are its proof of locality.
-    let machine = cas_types::Agent::get_or_generate_machine_id();
-    let daemon_owned = child.metadata.get(OWNER_KEY) == Some(&dispatch.id);
-    let local = child.machine_id.as_deref() == Some(machine.as_str())
-        || (child.machine_id.is_none() && daemon_owned && owner.machine_id.as_deref() == Some(machine.as_str()));
-    if !local {
+    if child.machine_id.as_deref() != Some(cas_types::Agent::get_or_generate_machine_id().as_str()) {
         return Ok(dispatch.clone());
     }
     // Daemon liveness treats unreadable fingerprints as suspicious. Revoking
-    // review authority needs positive death evidence, not that ambiguity. A
-    // daemon-hosted verifier shares its host's pid, so a stalled attempt inside
-    // a live host reads as alive; the daemon sweep extends only a progressing
-    // review, so one with no heartbeat and no active lane has stopped.
-    let stalled = daemon_owned
-        && !crate::factory_review_scratch::verifier_progressing(&core.cas_root, dispatch, Some(&child), now);
-    let confirmed_dead = stalled || child.status == cas_types::AgentStatus::Shutdown
+    // review authority needs positive death evidence, not that ambiguity.
+    let confirmed_dead = child.status == cas_types::AgentStatus::Shutdown
         || child.pid.is_some_and(|pid| {
             if !pid_alive(pid) { return true; }
             child.pid_starttime.or_else(|| child.metadata
@@ -514,7 +502,6 @@ fn launch_with_preparation(
     // The daemon owns this identity and submits the harness's structured
     // verdict. The subprocess never receives a credential or this identity.
     child.pid = Some(std::process::id());
-    child.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
     crate::mcp::daemon::stamp_pid_fingerprint(&mut child, std::process::id());
     child.metadata.insert(OWNER_KEY.into(), live.id.clone());
     child.factory_session = core
@@ -1087,11 +1074,43 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair[0] == "--sandbox" && pair[1] == "read-only"));
     }
 
-    /// GH #2023: after a harness failure, the merge retry starts exactly one
-    /// replacement through the factory daemon and reports it as scheduled.
     #[cfg(target_os = "linux")]
     #[test]
-    fn merge_retry_after_harness_failure_schedules_one_replacement_gh_2023() {
+    fn merge_retry_replaces_only_a_failed_or_stalled_verifier_gh_2023_gh_2325() {
+        for case in ["harness-failure", "stalled", "legacy-stalled", "heartbeat", "lane"] {
+            merge_retry(case);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn age_claim(root: &Path, claim: &VerificationDispatch, by: chrono::Duration) {
+        let aged = |at: &str| (chrono::DateTime::parse_from_rfc3339(at).unwrap() - by).to_rfc3339();
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        for (table, key, id, columns) in [
+            ("verification_dispatches", "id", Some(&claim.id), &["requested_at", "deadline_at"][..]),
+            ("verification_capabilities", "id", claim.capability_id.as_ref(), &["issued_at", "expires_at", "bound_at"][..]),
+            ("verification_handoffs", "capability_id", claim.capability_id.as_ref(), &["created_at", "bound_at"][..]),
+            ("agents", "id", claim.verifier_agent_id.as_ref(), &["registered_at", "last_heartbeat"][..]),
+        ] {
+            for column in columns {
+                let at: String = conn.query_row(
+                    &format!("SELECT {column} FROM {table} WHERE {key}=?1"), [id], |row| row.get(0),
+                ).unwrap();
+                conn.execute(&format!("UPDATE {table} SET {column}=?2 WHERE {key}=?1"),
+                    rusqlite::params![id, aged(&at)]).unwrap();
+            }
+        }
+        let checkout = Path::new(&claim.repository.as_ref().unwrap().worktree_root)
+            .parent().unwrap().join("owner.json");
+        let mut owner: serde_json::Value = serde_json::from_slice(&std::fs::read(&checkout).unwrap()).unwrap();
+        for field in ["created_at", "last_used_at"] {
+            owner[field] = aged(owner[field].as_str().unwrap()).into();
+        }
+        std::fs::write(&checkout, owner.to_string()).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn merge_retry(case: &'static str) {
         use crate::ui::factory::{
             ClientMessage, DaemonMessage, FRAME_HEADER_SIZE, PROTOCOL_VERSION, SessionState,
             decode_length, encode_message, gui_socket_path, local_gui_capabilities,
@@ -1122,6 +1141,7 @@ mod tests {
             "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
         );
         owner.factory_session = Some("gh-2023".into());
+        owner.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
         core.open_agent_store().unwrap().register(&owner).unwrap();
         core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
         let mut task = Task::new("cas-2023-retry".into(), "Retry after harness failure".into());
@@ -1176,27 +1196,94 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let mut failing = Command::new("sh");
         failing.args(["-c", "exit 1"]);
-        launch_with_preparation(&core, &task, &dispatch, directory.join("verdict.json"),
-            move |_| Ok((failing, None)))
+        let (resume, stall) = std::sync::mpsc::channel::<()>();
+        let attempt = launch_with_preparation(&core, &task, &dispatch, directory.join("verdict.json"),
+            move |_| {
+                if case == "harness-failure" { return Ok((failing, None)); }
+                stall.recv().ok();
+                Err("stalled provider".into())
+            })
             .unwrap()
-            .unwrap()
-            .join()
             .unwrap();
-        let released = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
-        assert_eq!(released.state, cas_types::VerificationDispatchState::Pending);
+        let agents = core.open_agent_store().unwrap();
+        let attempt = if case == "harness-failure" {
+            attempt.join().unwrap();
+            None
+        } else {
+            let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+            assert_eq!(claimed.state, cas_types::VerificationDispatchState::Claimed);
+            assert!(owns(&root, &claimed));
+            age_claim(&root, &claimed, chrono::Duration::minutes(11));
+            let child = claimed.verifier_agent_id.clone().unwrap();
+            match case {
+                "legacy-stalled" => {
+                    rusqlite::Connection::open(root.join("cas.db")).unwrap()
+                        .execute("UPDATE agents SET machine_id=NULL WHERE id=?1", [&child]).unwrap();
+                }
+                "heartbeat" => agents.heartbeat(&child).unwrap(),
+                "lane" => drop(crate::factory_review_scratch::create(
+                    &root, repo, &task.id, Some(&dispatch.id),
+                    &dispatch.repository.as_ref().unwrap().head_commit,
+                ).unwrap()),
+                _ => {}
+            }
+            Some((attempt, child))
+        };
+        let before = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert_eq!(before.state, if attempt.is_some() {
+            cas_types::VerificationDispatchState::Claimed
+        } else {
+            cas_types::VerificationDispatchState::Pending
+        });
 
         let held = core
             .prepare_premerge_verification(&task, repo, "factory/worker", "epic/train")
             .err()
             .expect("an unreviewed delivery stays held");
 
-        assert_eq!(
-            held.data.as_ref().map(|data| data["reason"].clone()),
-            Some(serde_json::json!("verifier_replacement_scheduled")),
-            "{held:?}"
-        );
-        assert_eq!(launches.recv_timeout(wait).unwrap(), dispatch.id);
-        assert!(launches.recv_timeout(std::time::Duration::from_secs(2)).is_err());
+        let after = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+        let recoveries: i64 = rusqlite::Connection::open(root.join("cas.db")).unwrap().query_row(
+            "SELECT COUNT(*) FROM events WHERE json_extract(metadata,'$.code')='expired_verifier_claim_recovered' AND json_extract(metadata,'$.dispatch_id')=?1",
+            [&dispatch.id], |row| row.get(0),
+        ).unwrap();
+        if matches!(case, "heartbeat" | "lane") {
+            assert_eq!(serde_json::to_value(&after).unwrap(), serde_json::to_value(&before).unwrap(), "{case}");
+            assert_eq!(recoveries, 0, "{case}");
+            assert!(held.data.is_none(), "{case}: {held:?}");
+        } else {
+            assert_eq!(
+                held.data.as_ref().map(|data| data["reason"].clone()),
+                Some(serde_json::json!("verifier_replacement_scheduled")),
+                "{case}: {held:?}"
+            );
+            assert_eq!((&after.id, &after.repository), (&dispatch.id, &dispatch.repository), "{case}");
+            assert_eq!(after.state, cas_types::VerificationDispatchState::Pending, "{case}");
+            assert_eq!(recoveries, i64::from(attempt.is_some()), "{case}");
+            assert_eq!(launches.recv_timeout(wait).unwrap(), dispatch.id, "{case}");
+            assert!(launches.recv_timeout(std::time::Duration::from_secs(2)).is_err(), "{case}");
+        }
+        let Some((stalled, child)) = attempt else { return };
+        if after.state == cas_types::VerificationDispatchState::Pending {
+            let (finish, review) = std::sync::mpsc::channel::<()>();
+            let replacement = launch_with_preparation(&core, &task, &after, directory.join("replacement.json"),
+                move |_| {
+                    review.recv().ok();
+                    Err("replacement stopped".into())
+                })
+                .unwrap()
+                .expect("the released dispatch admits its replacement");
+            resume.send(()).unwrap();
+            stalled.join().unwrap();
+            let replaced = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+            assert_eq!(replaced.state, cas_types::VerificationDispatchState::Claimed, "{case}");
+            assert_eq!(replaced.repository, dispatch.repository, "{case}");
+            assert!(replaced.verifier_agent_id.as_ref().is_some_and(|id| *id != child), "{case}");
+            finish.send(()).unwrap();
+            replacement.join().unwrap();
+        } else {
+            resume.send(()).unwrap();
+            stalled.join().unwrap();
+        }
     }
 
     #[test]
@@ -1525,82 +1612,6 @@ mod tests {
         let recovered = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
         assert_eq!(recovered.state, cas_types::VerificationDispatchState::Pending);
         assert!(!owns(&root, &recovered));
-    }
-
-    /// GH #2325: a daemon verifier whose provider startup stalls inside its live
-    /// host keeps a Claimed row past the deadline. The owning retry releases it
-    /// and schedules exactly one replacement on the same dispatch.
-    #[test]
-    fn stalled_daemon_verifier_claim_is_replaced_once_gh_2325() {
-        use std::sync::mpsc;
-        use std::time::Duration;
-
-        let mut env = crate::test_support::TestEnvGuard::temp_home();
-        let dir = tempfile::tempdir().unwrap();
-        let root = crate::store::init_cas_dir(dir.path()).unwrap();
-        env.set("CAS_ROOT", &root);
-        let core = CasCore::with_daemon(root.clone(), None, None);
-        let mut owner = cas_types::Agent::new_with_role(
-            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
-        );
-        owner.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
-        core.open_agent_store().unwrap().register(&owner).unwrap();
-        core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
-        let mut task = Task::new("cas-81c2-stall".into(), "Stalled verifier".into());
-        task.status = cas_types::TaskStatus::AwaitingMerge;
-        core.open_task_store().unwrap().add(&task).unwrap();
-        let dispatch = cas_store::create_verification_dispatch_bound(
-            &root, &task.id, &owner.id, &owner.id,
-            &cas_types::VerificationProofBoundary::task(),
-            chrono::Utc::now() + chrono::Duration::minutes(10), false,
-        ).unwrap();
-        let gate = |entered: mpsc::Sender<()>, hold: mpsc::Receiver<()>| move |_: &Path| {
-            entered.send(()).unwrap();
-            hold.recv().ok();
-            Err::<(Command, Option<String>), String>("stalled provider".into())
-        };
-        let (first_entered_tx, first_entered_rx) = mpsc::channel();
-        let (first_hold_tx, first_hold_rx) = mpsc::channel();
-        let stalled = launch_with_preparation(
-            &core, &task, &dispatch, root.join("first.json"), gate(first_entered_tx, first_hold_rx),
-        ).unwrap().unwrap();
-        first_entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
-        assert_eq!(claimed.state, cas_types::VerificationDispatchState::Claimed);
-        assert!(owns(&root, &claimed));
-        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
-        conn.execute("UPDATE agents SET last_heartbeat=?2 WHERE id=?1", rusqlite::params![
-            claimed.verifier_agent_id, (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339(),
-        ]).unwrap();
-        conn.execute("UPDATE verification_dispatches SET deadline_at=?2 WHERE id=?1", rusqlite::params![
-            dispatch.id, (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
-        ]).unwrap();
-        let expired = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
-
-        let recovered = recover_expired_claim(&core, &expired).unwrap();
-        assert_eq!(recovered.state, cas_types::VerificationDispatchState::Pending);
-        assert!(recovered.verifier_agent_id.is_none());
-
-        let (second_entered_tx, second_entered_rx) = mpsc::channel();
-        let (second_hold_tx, second_hold_rx) = mpsc::channel();
-        let replacement = launch_with_preparation(
-            &core, &task, &recovered, root.join("second.json"), gate(second_entered_tx, second_hold_rx),
-        ).unwrap().expect("the released dispatch starts one replacement");
-        second_entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let live = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
-        assert_eq!(live.state, cas_types::VerificationDispatchState::Claimed);
-        assert_ne!(live.verifier_agent_id, claimed.verifier_agent_id);
-        assert!(launch_with_preparation(
-            &core, &task, &live, root.join("third.json"),
-            |_| panic!("a claimed dispatch must not start a second replacement"),
-        ).unwrap().is_none());
-
-        first_hold_tx.send(()).unwrap();
-        stalled.join().unwrap();
-        let after_stalled = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
-        assert_eq!(after_stalled.verifier_agent_id, live.verifier_agent_id, "the stalled attempt cannot take the replacement's claim");
-        second_hold_tx.send(()).unwrap();
-        replacement.join().unwrap();
     }
 
     #[test]

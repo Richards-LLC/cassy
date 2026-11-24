@@ -1914,9 +1914,6 @@ pub fn release_failed_verifier_dispatch(
     Ok(true)
 }
 
-/// Metadata key a daemon-hosted verifier child carries, valued with its dispatch
-/// id. It is the store's evidence that an unstamped child belongs to this
-/// machine's daemon.
 pub const AUTOMATIC_PREMERGE_OWNER_KEY: &str = "automatic_premerge_dispatch";
 
 /// Retry an expired review after the caller positively established local child

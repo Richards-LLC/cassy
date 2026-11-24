@@ -444,9 +444,6 @@ pub(crate) fn verifier_lane_active(
     })
 }
 
-/// A verifier is progressing while its child identity heartbeats or its
-/// verifier lane is active at the bound head. The daemon's deadline extension
-/// and the expired-claim recovery share this one definition.
 pub(crate) fn verifier_progressing(
     cas: &Path,
     dispatch: &cas_types::VerificationDispatch,

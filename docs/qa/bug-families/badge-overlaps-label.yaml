@@ -1,4 +1,0 @@
-title: A status badge appended to a one-line identity row cannot shrink, so it paints over the machine label or under the header actions
-found: '2026-11-24'
-tasks: [cas-0d58]
-journeys: [HUB-J27]

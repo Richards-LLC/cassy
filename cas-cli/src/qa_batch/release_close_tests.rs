@@ -858,6 +858,11 @@ fn published_train_closes_members_independently_cas_734b() {
     assert!(complete.residuals.is_empty());
     assert!(!complete.exceptions.is_empty());
     use crate::mcp::tools::core::task::lifecycle::{close_ops::lifecycle_race_hook, report_proof::require_report_verdict};
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    agents.init().unwrap();
+    agents.register(&cas_types::Agent::new_with_role(
+        "supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+    )).unwrap();
     let artifacts = cas_store::SqliteArtifactStore::open(&root).unwrap();
     let mut report_proofs = BTreeMap::new();
     let mut reviews = BTreeMap::new();

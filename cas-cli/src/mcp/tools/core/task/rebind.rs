@@ -131,6 +131,9 @@ pub(crate) fn rebind_start(
     audit: StartAudit,
 ) -> Option<FactoryBranchStart> {
     let previous = task.deliverables.factory_branch_start.replace(start.clone());
+    // A legacy row may name its earlier train only in the start it is
+    // replacing; keep that target so its history stays upstream.
+    task.deliverables.record_prior_work_target(previous.as_ref().map(|prior| &prior.work_target));
     if audit == StartAudit::Recorded || previous.is_none() || previous.as_ref() == Some(&start) {
         return previous;
     }

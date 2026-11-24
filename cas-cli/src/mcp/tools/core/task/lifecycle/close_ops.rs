@@ -10673,7 +10673,7 @@ impl CasCore {
                 // was requested for. A revised report, or an approval that never
                 // recorded its proof, retires that approval so this close mints a
                 // new dispatch and needs a new passing verdict.
-                if !is_epic
+                if task.task_type == TaskType::Spike
                     && task.execution_note.as_deref() == Some("no-code")
                     && let Some(dispatch) = typed_dispatch.as_ref()
                     && dispatch.state == cas_types::VerificationDispatchState::Resolved

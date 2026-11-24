@@ -1977,14 +1977,17 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
 async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
     use cas_store::VerificationStore;
     let mut env = TestEnvGuard::temp_home();
-    for case in ["approved", "rejected"] {
+    // A mechanical no-code chore keeps its approval across a revised proof.
+    for (case, task_type) in [
+        ("approved", TaskType::Spike), ("rejected", TaskType::Spike), ("chore", TaskType::Chore),
+    ] {
         let f = fixture(&mut env, "main");
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
         config.set("verification.enabled", "true").unwrap();
         config.save(&f.cas_dir()).unwrap();
         env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
         let id = "cas-2372";
-        let mut spike = assigned(id, TaskType::Spike, "main");
+        let mut spike = assigned(id, task_type, "main");
         spike.execution_note = Some("no-code".into());
         spike.external_ref = Some(PROOF.into());
         f.put(&spike);
@@ -1994,10 +1997,10 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         let reviewed = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap()
             .unwrap_or_else(|| panic!("{case}: {pending}"));
         let mut verdict = cas_types::Verification::new(format!("ver-2372-{case}"), id.into());
-        verdict.status = if case == "approved" {
-            cas_types::VerificationStatus::Approved
-        } else {
+        verdict.status = if case == "rejected" {
             cas_types::VerificationStatus::Rejected
+        } else {
+            cas_types::VerificationStatus::Approved
         };
         verdict.summary = "Original report reviewed".into();
         verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
@@ -2015,6 +2018,10 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         revised.status = TaskStatus::AwaitingMerge;
         f.put(&revised);
         let response = call(&f.supervisor, request).await;
+        if case == "chore" {
+            assert_eq!(f.task(id).status, TaskStatus::Closed, "{case}: {response}");
+            continue;
+        }
         assert_ne!(f.task(id).status, TaskStatus::Closed, "{case}: {response}");
         let latest = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap();
         if case == "approved" {

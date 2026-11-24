@@ -8382,6 +8382,8 @@ impl CasCore {
                 Ok(receipt) => receipt,
                 Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-24", message))),
             };
+        let verification_configured = self.load_config().verification_enabled();
+        let policy = verification_policy(supervisor_harness_from_env(), worker_harness_from_env());
         let report_gate = if negative_result_receipt.is_none() && evidence_only_receipt.is_none()
             && task.task_type != TaskType::Gate
         {
@@ -8391,7 +8393,9 @@ impl CasCore {
                 inline_execution_note.as_deref(),
                 inline_external_ref.as_deref(),
             );
-            match super::report_proof::require_report_verdict(&self.cas_root, &close_snapshot, &effective) {
+            match super::report_proof::require_report_verdict(
+                &self.cas_root, verification_configured && policy.task_required(), &close_snapshot, &effective,
+            ).and_then(|gate| gate.retire_stale(&self.cas_root)) {
                 Ok(gate) => gate,
                 Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-68", message))),
             }
@@ -9072,26 +9076,35 @@ impl CasCore {
         // bound to that still-valid dispatch in the identity set so a
         // supervisor-created merge receipt is not mistaken for unrelated
         // history solely because its epoch precedes the newest lease.
-        let approved_dispatch =
-            cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
-                .ok()
-                .flatten();
-        let approved_verification = approved_dispatch
-            .as_ref()
-            .filter(|dispatch| {
-                dispatch.state == cas_types::VerificationDispatchState::Resolved
-            })
-            .and_then(|dispatch| {
-                cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
+        if let Some(approval) = report_gate.approval() {
+            include_approved_verification_delivery_commits(
+                &mut task_commit_identity,
+                &task.id,
+                Some(&approval.dispatch),
+                Some(&approval.verdict),
+            );
+        } else {
+            let approved_dispatch =
+                cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
                     .ok()
-                    .flatten()
-            });
-        include_approved_verification_delivery_commits(
-            &mut task_commit_identity,
-            &task.id,
-            approved_dispatch.as_ref(),
-            approved_verification.as_ref(),
-        );
+                    .flatten();
+            let approved_verification = approved_dispatch
+                .as_ref()
+                .filter(|dispatch| {
+                    dispatch.state == cas_types::VerificationDispatchState::Resolved
+                })
+                .and_then(|dispatch| {
+                    cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
+                        .ok()
+                        .flatten()
+                });
+            include_approved_verification_delivery_commits(
+                &mut task_commit_identity,
+                &task.id,
+                approved_dispatch.as_ref(),
+                approved_verification.as_ref(),
+            );
+        }
         // A supplied commit_receipt is not durable evidence until the close
         // gates accept it. It may still be needed to recognize a delivery
         // from an earlier continuation, though, because the latest lease
@@ -10455,13 +10468,11 @@ impl CasCore {
         // A trusted fast-lane receipt replaces batch QA, never its own approval.
         let depth_light = depth_light && !fast_lane_receipt_passed && !report_covered;
         // Check verification status if enabled
-        let config = self.load_config();
-        let policy = verification_policy(supervisor_harness_from_env(), worker_harness_from_env());
         let is_factory_worker = std::env::var("CAS_AGENT_ROLE")
             .map(|r| r.eq_ignore_ascii_case("worker"))
             .unwrap_or(false)
             && std::env::var("CAS_FACTORY_MODE").is_ok();
-        let verification_enabled = config.verification_enabled()
+        let verification_enabled = verification_configured
             && if task.task_type == TaskType::Epic {
                 if is_supervisor_from_env() {
                     policy.epic_required()
@@ -10646,23 +10657,26 @@ impl CasCore {
                 } else {
                     verification_store.get_latest_for_task(&req.id)
                 };
-                let mut typed_dispatch = match cas_store::get_latest_verification_dispatch(
-                    &self.cas_root,
-                    &req.id,
-                ) {
-                    Ok(dispatch) => dispatch,
-                    Err(error) => {
-                        return Ok(Self::tool_error(crate::gates::tag("G-68", format!(
-                            "⚠️ VERIFICATION DISPATCH INVALID\n\n\
-                                 Task {} has unreadable durable verification-dispatch state: {}. \
-                                 Cassy refuses to infer authority or recovery from corrupt metadata.",
-                            req.id, error
-                        ))));
-                    }
+                let mut typed_dispatch = match report_gate.approval() {
+                    Some(approval) => Some(approval.dispatch.clone()),
+                    None => match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id) {
+                        Ok(dispatch) => dispatch,
+                        Err(error) => {
+                            return Ok(Self::tool_error(crate::gates::tag("G-68", format!(
+                                "⚠️ VERIFICATION DISPATCH INVALID\n\n\
+                                     Task {} has unreadable durable verification-dispatch state: {}. \
+                                     Cassy refuses to infer authority or recovery from corrupt metadata.",
+                                req.id, error
+                            ))));
+                        }
+                    },
                 };
                 let mut superseded_approved_verdict_id = None;
 
-                let resolved_verdict = close_cycle_verdict(&self.cas_root, typed_dispatch.as_ref(), None);
+                let resolved_verdict = match report_gate.approval() {
+                    Some(approval) => Ok(Some(approval.verdict.clone())),
+                    None => close_cycle_verdict(&self.cas_root, typed_dispatch.as_ref(), None),
+                };
                 if let Some(dispatch) = typed_dispatch.as_ref()
                     && let Ok(Some(verdict)) = resolved_verdict.as_ref()
                     && verdict.status == VerificationStatus::Approved
@@ -10736,14 +10750,13 @@ impl CasCore {
                 // resolved. Task-wide rows remain readable for legacy timeout
                 // diagnostics but can never authorize a current close.
                 let latest = match &report_gate {
-                    super::report_proof::ReportGate::Exempt if typed_dispatch.is_some() => resolved_verdict,
+                    super::report_proof::ReportGate::Exempt | super::report_proof::ReportGate::Bound(_)
+                        if typed_dispatch.is_some() =>
+                    {
+                        resolved_verdict
+                    }
                     super::report_proof::ReportGate::Exempt => {
                         close_cycle_verdict(&self.cas_root, None, task_wide_latest.as_ref().ok().and_then(|row| row.as_ref()))
-                    }
-                    super::report_proof::ReportGate::Bound { dispatch, verdict, .. }
-                        if typed_dispatch.as_ref().is_some_and(|typed| &typed.id == dispatch) =>
-                    {
-                        resolved_verdict.map(|found| found.filter(|found| &found.id == verdict))
                     }
                     _ => Ok(None),
                 };
@@ -12972,11 +12985,6 @@ impl CasCore {
                 req.id, req.id, req.id
             )))
         };
-        if let super::report_proof::ReportGate::Bound { proof, .. } = &report_gate
-            && super::report_proof::ReportProof::current(&self.cas_root, &task).ok().as_ref() != Some(proof)
-        {
-            return Ok(close_refused("its approved report proof no longer matches the report"));
-        }
         let pending_notes = close_notes.pending(&task).to_owned();
         let mut current = task_store.get(&req.id).ok();
         let mut retried_notes = false;
@@ -12986,6 +12994,9 @@ impl CasCore {
                     return Ok(Self::success(already_closed_message(current)));
                 }
                 if let Some(change) = concurrent_close_change(&close_snapshot, &task, current) {
+                    return Ok(close_refused(change));
+                }
+                if let Err(change) = report_gate.recheck(&self.cas_root, &close_snapshot, &task, current) {
                     return Ok(close_refused(change));
                 }
                 // Keep the stored timeline verbatim, including repeated entries
@@ -13005,6 +13016,9 @@ impl CasCore {
             lifecycle_race_hook::fire_before_cas(&req.id);
             let written = match current.as_ref() {
                 Some(current) => task_store.update_if_current(&task, current),
+                None if report_gate.approval().is_some() => {
+                    return Ok(close_refused("its stored row could not be read"));
+                }
                 None => task_store.update(&task),
             };
             match written {

@@ -989,6 +989,10 @@ impl Approval {
         {
             return Err(crate::gates::tag("G-104", "the exact candidate approval is no longer current"));
         }
+        let report = crate::mcp::tools::core::task::lifecycle::report_proof::require_report_verdict(root, true, task, task);
+        if !report.is_ok_and(|report| !report.covered() || report.approves(&self.dispatch_id, &self.verdict_id)) {
+            return Err(crate::gates::tag("G-104", "the approved report proof is no longer current"));
+        }
         self.candidate.validate(root, task).map_err(|error| crate::gates::tag("G-104", error))
     }
 
@@ -1340,11 +1344,12 @@ impl CasCore {
         let config = self.load_config();
         let fast_lane =
             crate::fast_lane::owns_review(&self.cas_root, task, repo, Some((source, target)));
-        use crate::mcp::tools::core::task::lifecycle::report_proof::{ReportGate, require_report_verdict};
+        use crate::mcp::tools::core::task::lifecycle::report_proof::{ReportGate, require_report_verdict, verification_on};
         let report = if task.task_type == cas_types::TaskType::Epic {
             ReportGate::Exempt
         } else {
-            require_report_verdict(&self.cas_root, &current, task)
+            require_report_verdict(&self.cas_root, verification_on(&config), &current, task)
+                .and_then(|gate| gate.retire_stale(&self.cas_root))
                 .map_err(|message| fail(crate::gates::tag("G-68", message)))?
         };
         if task.task_type == cas_types::TaskType::Epic
@@ -1412,8 +1417,9 @@ impl CasCore {
             let verdict = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
                 .map_err(fail)?;
             let unbound_report_approval = report.covered()
-                && !matches!(report, ReportGate::Bound { .. })
-                && verdict.as_ref().is_some_and(|verdict| verdict.status == VerificationStatus::Approved);
+                && verdict.as_ref().is_some_and(|verdict| {
+                    verdict.status == VerificationStatus::Approved && !report.approves(&dispatch.id, &verdict.id)
+                });
             if dispatch.state == cas_types::VerificationDispatchState::Resolved
                 && !unbound_report_approval
                 && candidate.repository == repository

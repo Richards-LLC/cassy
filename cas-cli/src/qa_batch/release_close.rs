@@ -702,10 +702,11 @@ pub(crate) fn reconcile_members(
 ) -> Result<BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>, String> {
     use cas_store::TaskStore;
     use cas_types::TaskStatus;
-    use crate::mcp::tools::core::task::lifecycle::{merge_close::CassyMergeClose, review_tier::{self, VerificationTier}};
+    use crate::mcp::tools::core::task::lifecycle::{merge_close::CassyMergeClose, report_proof, review_tier::{self, VerificationTier}};
     let tasks = read_tasks(root)?;
     let receipts = read_receipts(root, &inventory.scope.project_id)?;
     let review = ReleaseClose::prepare(root, repo, inventory)?;
+    let verification_on = report_proof::verification_on(&crate::config::Config::load(root).unwrap_or_default());
     let ids: std::collections::BTreeSet<_> = inventory.deliveries.iter().map(|d| d.task_id.clone())
         .chain(inventory.exceptions.iter().map(|e| e.task_id.clone()))
         .chain(inventory.scope.included_task_ids.iter().cloned())
@@ -762,9 +763,9 @@ pub(crate) fn reconcile_members(
                         [&task.id], |row| row.get::<_, bool>(0)).map_err(|e| e.to_string())?;
                 }
             }
-            use crate::mcp::tools::core::task::lifecycle::report_proof::{ReportGate, require_report_verdict};
-            let report = require_report_verdict(root, &task, &task).map_err(|_| "REVIEW_MISSING".to_string())?;
-            if report.covered() && !matches!(report, ReportGate::Bound { .. }) {
+            let report = report_proof::read_report_verdict(&conn, verification_on, &task, &task)
+                .map_err(|_| "REVIEW_MISSING".to_string())?;
+            if report.covered() && report.approval().is_none() {
                 return Err("REVIEW_MISSING".into());
             }
             let exempt = !report.covered() && delivery.membership != ReleaseMembership::ExplicitNoCode && no_review
@@ -821,6 +822,7 @@ pub(crate) fn reconcile_members(
                 closed.pending_verification = false;
                 closed.pending_worktree_merge = false;
                 let store = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
+                report.recheck(root, &task, &task, &task).map_err(|_| "REVIEW_MISSING".to_string())?;
                 store.update_if_current(&closed, &task).map_err(|error| format!("RELEASE_CLOSE_WRITE: {error}"))?;
             }
             Ok(CassyMergeClose::Closed { notice: "completion included in release receipt".into() })

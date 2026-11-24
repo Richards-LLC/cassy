@@ -374,7 +374,6 @@ impl SqliteVerificationStore {
     }
 
     fn load_issues(
-        &self,
         conn: &Connection,
         verification_id: &str,
     ) -> Result<Vec<VerificationIssue>> {
@@ -513,6 +512,13 @@ pub fn get_verification_for_dispatch(
 ) -> Result<Option<Verification>> {
     let store = SqliteVerificationStore::open(cas_dir)?;
     let conn = crate::shared_db::lock_connection(&store.conn)?;
+    get_verification_for_dispatch_with_conn(&conn, dispatch_id)
+}
+
+pub fn get_verification_for_dispatch_with_conn(
+    conn: &Connection,
+    dispatch_id: &str,
+) -> Result<Option<Verification>> {
     let verification = conn
         .query_row(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
@@ -527,7 +533,7 @@ pub fn get_verification_for_dispatch(
         .map_err(StoreError::Database)?;
     match verification {
         Some(mut verification) => {
-            verification.issues = store.load_issues(&conn, &verification.id)?;
+            verification.issues = SqliteVerificationStore::load_issues(conn, &verification.id)?;
             Ok(Some(verification))
         }
         None => Ok(None),
@@ -1054,9 +1060,7 @@ pub fn has_active_verification_dispatch(cas_dir: &Path, task_id: &str) -> Result
     ).map_err(StoreError::Database)
 }
 
-pub fn verification_dispatch_reviewed_proof(cas_dir: &Path, dispatch_id: &str) -> Result<Option<String>> {
-    let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = crate::shared_db::lock_connection(&store.conn)?;
+pub fn verification_dispatch_reviewed_proof_with_conn(conn: &Connection, dispatch_id: &str) -> Result<Option<String>> {
     conn.query_row(
         "SELECT reviewed_proof FROM verification_dispatches WHERE id = ?1",
         params![dispatch_id], |row| row.get(0),
@@ -2100,9 +2104,10 @@ pub fn invalidate_verification_dispatch_for_proof_drift(
         "SELECT reviewed_proof IS NOT NULL FROM verification_dispatches WHERE id = ?1",
         params![dispatch_id], |row| row.get(0),
     )?;
-    if latest.id != dispatch.id || !recorded {
+    let active = matches!(dispatch.state, VerificationDispatchState::Pending | VerificationDispatchState::Claimed);
+    if latest.id != dispatch.id || !(recorded || active) {
         return Err(StoreError::Parse(format!(
-            "proof drift invalidation requires the latest dispatch with a recorded proof (named {}; latest {})",
+            "proof drift invalidation requires the latest dispatch, active or with a recorded proof (named {}; latest {})",
             dispatch.id, latest.id
         )));
     }
@@ -4108,7 +4113,7 @@ impl VerificationStore for SqliteVerificationStore {
                 _ => StoreError::Database(e),
             })?;
 
-        verification.issues = self.load_issues(&conn, id)?;
+        verification.issues = SqliteVerificationStore::load_issues(&conn, id)?;
 
         Ok(verification)
     }
@@ -4234,7 +4239,7 @@ impl VerificationStore for SqliteVerificationStore {
 
         match verification {
             Some(mut v) => {
-                v.issues = self.load_issues(&conn, &v.id)?;
+                v.issues = SqliteVerificationStore::load_issues(&conn, &v.id)?;
                 Ok(Some(v))
             }
             None => Ok(None),
@@ -4263,7 +4268,7 @@ impl VerificationStore for SqliteVerificationStore {
 
         match verification {
             Some(mut v) => {
-                v.issues = self.load_issues(&conn, &v.id)?;
+                v.issues = SqliteVerificationStore::load_issues(&conn, &v.id)?;
                 Ok(Some(v))
             }
             None => Ok(None),

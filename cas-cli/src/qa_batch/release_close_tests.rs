@@ -882,7 +882,7 @@ fn published_train_closes_members_independently_cas_734b() {
         artifacts.mark_uploaded(&artifact, &id.replacen("cas", "cloud", 1)).unwrap();
         artifacts.mark_committed(&artifact, None).unwrap();
         let report = tasks.get(id).unwrap();
-        let reviewed = require_report_verdict(&root, &report, &report).unwrap().proof_to_record().unwrap();
+        let reviewed = require_report_verdict(&root, true, &report, &report).unwrap().proof_to_record().unwrap();
         let dispatch = cas_store::create_verification_dispatch_reviewing_with_conn(
             &conn, id, "supervisor", "supervisor", &cas_types::VerificationProofBoundary::task(),
             Some(&reviewed), chrono::Utc::now() + chrono::Duration::hours(1), false,

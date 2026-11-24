@@ -131,7 +131,7 @@ pub use accepted_proposal_store::{
 pub use artifact_store::{
     ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, ARTIFACT_REVOCATION_SCHEMA_STATEMENTS,
     ArtifactRevocation, NewArtifact, PublishedArtifact,
-    SqliteArtifactStore, looks_like_signed_upload_url,
+    SqliteArtifactStore, list_task_artifacts_with_conn, looks_like_signed_upload_url,
 };
 pub use code_index_purge::{
     BatchedWrites, CODE_WRITE_DEFAULT_BATCH, CODE_WRITE_MAX_BATCH, CodeIndexPurgeStats,
@@ -261,7 +261,7 @@ pub use verification_store::{
     VERIFICATION_STATUS_DETAIL_STATEMENT, VERIFICATION_STATUS_NORMALIZE_STATEMENT,
     VerificationStore, add_system_verification, add_verification_with_conn,
     adopt_orphaned_verification_dispatches, adopt_retired_verification_dispatch, bind_server_verifier_handoff,
-    create_verification_dispatch_reviewing_with_conn, verification_dispatch_reviewed_proof,
+    create_verification_dispatch_reviewing_with_conn, verification_dispatch_reviewed_proof_with_conn,
     bind_server_verifier_handoff_and_register_child, bind_verifier_capability, issue_and_bind_server_verifier_handoff,
     cancel_unbound_server_verifier_handoff, claim_verification_dispatch,
     claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,
@@ -274,6 +274,7 @@ pub use verification_store::{
     extend_verification_dispatch_deadline,
     get_latest_verification_dispatch, get_latest_verification_dispatch_with_conn,
     get_verification_dispatch, get_verification_dispatch_with_conn, get_verification_for_dispatch,
+    get_verification_for_dispatch_with_conn,
     has_active_verification_dispatch, import_peer_premerge_verification, verification_dispatch_is_stale, inspect_bound_server_verifier_handoff,
     inspect_verifier_capability, invalidate_verification_dispatch_and_reopen_task_exact,
     invalidate_verification_dispatch_for_new_cycle, invalidate_verification_dispatch_for_proof_drift,

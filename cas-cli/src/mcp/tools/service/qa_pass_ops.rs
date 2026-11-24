@@ -385,6 +385,9 @@ impl CasService {
                 )),
             ));
         };
+        let production_waiver = crate::qa_batch::production::candidate_for_waiver(
+            &self.inner.cas_root, &repo, &task, &target, &chosen.head,
+        ).map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-119", error)))?;
         let (pass, retired) = self.inner.waive_qa_round(
             task_id,
             &supervisor,
@@ -394,6 +397,10 @@ impl CasService {
             reason,
         )
         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-119", format!("qa_waive rejected: {error}"))))?;
+        if let Some(candidate) = production_waiver {
+            crate::qa_pass::sync::record_production_waiver(&self.inner.cas_root, &pass, candidate)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        }
         // What the receipt adds: why a newer tip was chosen, or that the
         // branch has moved past the waived tip so the merge will still refuse.
         let short = |sha: &str| sha[..sha.len().min(8)].to_string();

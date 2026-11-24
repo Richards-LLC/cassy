@@ -111,7 +111,7 @@ fn train_with_fragments_freezes_then_cuts_on_green_within_guards() {
         assert!(release_freeze::freeze_of(&peer_train).is_none());
         release_freeze::check_merge(&peer_root, LANE, None).unwrap();
         let declined = attempt(&peer_root, &peer_train, LANE,
-            &run(repo, &["rev-parse", LANE]), false, false, now).unwrap();
+            &run(repo, &["rev-parse", LANE]), false, false, now, false).unwrap();
         let Outcome::Declined(reason) = declined else { panic!("peer auto-cut accepted") };
         assert_eq!(crate::gates::codes_in(&reason), vec!["G-122"]);
         // GH #1826: the refusal resolves the owner, and its machine when registered.
@@ -253,7 +253,7 @@ async fn replay_partial_train_scope(train_id: &str, lane: &str, landed: &str, re
     poll();
     assert!(!frozen(), "one landed fragment cannot freeze the declared unfinished scope");
     let outcome = attempt(&root, &store.get(train_id).unwrap(), lane,
-        &run(repo, &["rev-parse", lane]), false, false, now).unwrap();
+        &run(repo, &["rev-parse", lane]), false, false, now, false).unwrap();
     let Outcome::Declined(reason) = outcome else { panic!("unfinished scope was accepted") };
     assert!(required.iter().all(|id| reason.contains(id)), "{reason}");
 

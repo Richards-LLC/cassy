@@ -392,6 +392,34 @@ prepare() {
 
 pr_number=""
 
+admit_production() {
+    local head="$1" base_sha="$2" cli default target
+    local train=()
+    if "$train_tracking"; then
+        train=(--train "$(jq -er .train_id <<<"$context")")
+    fi
+    for cli in "${release_candidate:-}" "$cas_bin"; do
+        if [[ -n "$cli" ]] && "$cli" qa admit-production --help >/dev/null 2>&1; then
+            CAS_ROOT="$release_store_root" "$cli" qa admit-production \
+                --target "$base" --base "$base_sha" --head "$head" "${train[@]}"
+            return
+        fi
+    done
+    default="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
+    default="${default#origin/}"
+    if [[ -z "$default" ]]; then
+        if git show-ref --verify --quiet refs/heads/main; then default=main
+        elif git show-ref --verify --quiet refs/heads/master; then default=master; fi
+    fi
+    target="$(CAS_ROOT="$release_store_root" "$cas_bin" config get factory.epic_base_branch 2>/dev/null || true)"
+    if jq -e '(.included_task_ids // []) | length == 0' "$release_input_report" >/dev/null ||
+        [[ -n "$default" && ( "$base" != "$default" || ( -n "$target" && "$target" != "$default" ) ) ]]; then
+        return 0
+    fi
+    printf 'PRODUCTION_BATCH_QA_CLI_REQUIRED candidate_sha=%s\n' "$head" >&2
+    return 1
+}
+
 open_or_update_pr() {
     local version="$1" title body candidate_sha base_sha
     title="Release v$version: $branch"
@@ -419,17 +447,12 @@ open_or_update_pr() {
     # cas-d637: batch landing can add another PR after this entry's prebuild.
     # Build concurrency stays independent; only landing must be a singleton.
     singleton_queue <<<"$state"
+    fetch_base
+    candidate_sha="$(git rev-parse HEAD)"
+    base_sha="$(git rev-parse "$remote/$base")"
+    admit_production "$candidate_sha" "$base_sha" \
+        || die "production candidate $candidate_sha was not admitted for PR #$pr_number"
     if ! admitted <<<"$state"; then
-        fetch_base
-        candidate_sha="$(git rev-parse HEAD)"
-        base_sha="$(git rev-parse "$remote/$base")"
-        local qa_train=()
-        if "$train_tracking"; then
-            qa_train=(--train "$(jq -er .train_id <<<"$context")")
-        fi
-        CAS_ROOT="$release_store_root" "${release_candidate:-$cas_bin}" qa admit-production \
-            --target "$base" --base "$base_sha" --head "$candidate_sha" "${qa_train[@]}" \
-            || die "production candidate $candidate_sha was not admitted; PR #$pr_number was not enqueued"
         "$gh_bin" pr merge "$pr_number" --auto --merge --match-head-commit "$candidate_sha" >/dev/null
         state="$(pr_state)"
         singleton_queue <<<"$state"

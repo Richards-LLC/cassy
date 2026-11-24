@@ -422,7 +422,7 @@ pub(crate) fn notify_train_cuts(
         // cas-e060: a train with changelog fragments is frozen and cut by
         // Cassy; the notice below only covers trains auto-cut declines.
         use crate::mcp::tools::core::workflow::release_auto_cut::{self, Outcome};
-        let auto_cut = match release_auto_cut::attempt(cas_dir, &epic, &train, &tip, green, !queued.is_empty(), now) {
+        let auto_cut = match release_auto_cut::attempt(cas_dir, &epic, &train, &tip, green, !queued.is_empty(), now, frozen) {
             Ok(Outcome::Handled) => continue,
             Ok(Outcome::Declined(reason)) => crate::gates::tag("G-122", format!("Auto-cut: {reason}.")),
             Err(error) => format!("Auto-cut failed: {error:#}."),

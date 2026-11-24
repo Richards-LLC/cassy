@@ -314,7 +314,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// Build the tree the merge will ship, including repository-owned regeneration.
-fn regenerated_merge_tree(repo: &Path, target: &str, source: &str) -> Result<String, String> {
+pub(crate) fn regenerated_merge_tree(repo: &Path, target: &str, source: &str) -> Result<String, String> {
     let merged = git(repo, &["merge-tree", "--write-tree", target, source])?;
     let tree = merged.lines().next().ok_or("merge candidate tree missing")?;
     if git(

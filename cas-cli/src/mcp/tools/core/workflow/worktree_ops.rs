@@ -5982,27 +5982,33 @@ impl CasCore {
                     .or_else(|| manager.git().resolve_commit(&worktree.branch));
                 let base = manager.git().resolve_commit(target);
                 if let (Some(source), Some(base)) = (source, base)
-                    && !crate::qa_batch::production::affected(&cas_root, &cwd, target, &base, &source)
-                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("PRODUCTION_BATCH_QA_SCOPE_UNRESOLVED candidate_sha={source}: {error}")))?.is_empty()
                 {
-                    let refusal = |head| Self::error(ErrorCode::INVALID_PARAMS, format!("PRODUCTION_BATCH_QA_REQUIRED candidate_sha={head}"));
-                    let built;
-                    let reviewed = match &premerge_approval {
-                        Some(approval) => &approval.candidate,
-                        None => {
-                            let task = scoped_task.as_deref().ok_or_else(|| refusal(&source))?;
-                            built = self.build_verification_candidate_for_batch(task, &cwd, &worktree.branch, target)?;
-                            &built
+                    let scope = crate::qa_batch::production::affected_deliveries(&cas_root, &cwd, target, &base, &source)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("PRODUCTION_BATCH_QA_SCOPE_UNRESOLVED candidate_sha={source}: {error}")))?;
+                    if scope.is_empty() {
+                        None
+                    } else {
+                        let refusal = |head| Self::error(ErrorCode::INVALID_PARAMS, format!("PRODUCTION_BATCH_QA_REQUIRED candidate_sha={head}"));
+                        let built;
+                        let reviewed = match premerge_approval.as_ref().filter(|approval| {
+                            approval.candidate.source_sha == source && approval.candidate.target_sha == base
+                        }) {
+                            Some(approval) => &approval.candidate,
+                            None => {
+                                let task = scoped_task.as_deref().ok_or_else(|| refusal(&source))?;
+                                built = self.build_verification_candidate_for_batch(task, &cwd, &worktree.branch, target)?;
+                                &built
+                            }
+                        };
+                        let head = &reviewed.proof.head_commit;
+                        if reviewed.source_sha != source || reviewed.target_sha != base {
+                            return Err(refusal(head));
                         }
-                    };
-                    let head = &reviewed.proof.head_commit;
-                    if reviewed.source_sha != source || reviewed.target_sha != base {
-                        return Err(refusal(head));
+                        let candidate = cas_store::ProductionCandidate { source_sha: source, base_sha: base, tree: reviewed.tree.clone() };
+                        crate::qa_batch::production::admit_scoped(&cas_root, &candidate, Some(head), task_id, &scope)
+                            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                        Some((candidate, head.clone()))
                     }
-                    let candidate = cas_store::ProductionCandidate { source_sha: source, base_sha: base, tree: reviewed.tree.clone() };
-                    crate::qa_batch::production::admit(&cas_root, &cwd, target, &candidate, Some(head), task_id)
-                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
-                    Some((candidate, head.clone()))
                 } else {
                     None
                 }
@@ -6471,11 +6477,11 @@ impl CasCore {
             // landing proof and the delivery can reconcile normally.
             // Receipt identity and typed failure state above precede network
             // access. A reconciled delivery still needs fresh publication evidence.
-            if reconciled_delivery && reconciled_publication.is_none() && early_target_push.is_none() {
+            let refreshed_target = if reconciled_delivery && reconciled_publication.is_none() && early_target_push.is_none() {
                 manager.git().fetch_merge_target(&receipt.target_branch)
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-110",
-                        format!("Cannot refresh publication target {}: {error}. No target push was attempted.", receipt.target_branch))))?;
-            }
+                        format!("Cannot refresh publication target {}: {error}. No target push was attempted.", receipt.target_branch))))?
+            } else { None };
             let default_branch = manager.git().detect_default_branch();
             let remote_target = format!("origin/{}", receipt.target_branch);
             let pr_landed_sha = (receipt.target_branch == default_branch)
@@ -6513,15 +6519,15 @@ impl CasCore {
                 && manager.git().has_origin_remote()
             {
                 let required = || Self::error(ErrorCode::INVALID_PARAMS, format!("PRODUCTION_BATCH_QA_REQUIRED candidate_sha={target_tip}"));
-                let base = manager.git().fetch_merge_target(&receipt.target_branch).ok().flatten().ok_or_else(required)?;
+                let base = refreshed_target.ok_or_else(required)?;
                 if !manager.git().is_ancestor(&target_tip, &base) {
-                    let tree = crate::git_evidence::git_text(&cwd, &["rev-parse", &format!("{target_tip}^{{tree}}")]).ok_or_else(required)?;
-                    let candidate = cas_store::ProductionCandidate { base_sha: base, source_sha: receipt.commit_sha.clone(), tree };
-                    if !crate::qa_batch::production::affected(&cas_root, &cwd, &receipt.target_branch, &candidate.base_sha, &candidate.source_sha)
-                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?.is_empty()
-                    {
+                    let scope = crate::qa_batch::production::affected_deliveries(&cas_root, &cwd, &receipt.target_branch, &base, &receipt.commit_sha)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                    if !scope.is_empty() {
+                        let tree = crate::git_evidence::git_text(&cwd, &["rev-parse", &format!("{target_tip}^{{tree}}")]).ok_or_else(required)?;
+                        let candidate = cas_store::ProductionCandidate { base_sha: base, source_sha: receipt.commit_sha.clone(), tree };
                         crate::qa_batch::production::validate_landing(&cwd, &candidate, &target_tip, &target_tip, &candidate.base_sha)
-                            .and_then(|()| crate::qa_batch::production::admit(&cas_root, &cwd, &receipt.target_branch, &candidate, None, task_id))
+                            .and_then(|()| crate::qa_batch::production::admit_scoped(&cas_root, &candidate, None, task_id, &scope))
                             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
                     }
                 }

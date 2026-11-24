@@ -986,6 +986,7 @@ pub(crate) fn prepare_receipt(
     let mut heads = BTreeMap::new();
     let mut overrides = BTreeMap::new();
     let mut production_candidate = None;
+    let mut production_journeys = Vec::new();
     for id in task_ids {
         let task = tasks.get(id).map_err(|e| format!("task {id}: {e}"))?;
         if !crate::mcp::tools::core::task::task_owned_by_project(&task, root, Some(&project)) {
@@ -1019,17 +1020,19 @@ pub(crate) fn prepare_receipt(
                 "task {id} delivery anchor is not an ancestor of staging_sha"
             ));
         }
-        if let Some(report) = &batch_report
-            && let Some(candidate) = production::recording_candidate(
-                root, &repo, &task, &anchor, &staging, &body, &ledger, report,
-            )?
+        if batch_report.is_some()
+            && let Some((candidate, journeys)) = production::recording_candidate(root, &repo, &task, &anchor, &staging)?
         {
             if production_candidate.as_ref().is_some_and(|existing| existing != &candidate) {
                 return Err(format!("PRODUCTION_BATCH_QA_BUILD_MISMATCH candidate_sha={staging}"));
             }
             production_candidate = Some(candidate);
+            production_journeys.extend(journeys);
         }
         heads.insert(id.clone(), anchor);
+    }
+    if production_candidate.is_some() && let Some(report) = &batch_report {
+        production::validate_recording_ledger(staging, &production_journeys, &body, &ledger, report)?;
     }
     Ok(QaBatchReceipt {
         schema_version: schema,
@@ -1313,7 +1316,7 @@ fn walk_receipts(
             if !inside_review { break 'judge Some("HEAD_OUTSIDE_REVIEW"); }
             if receipt.project_id != project { break 'judge Some("PROJECT_MISMATCH"); }
             if ancestor(repo, reviewed, head) != Some(true) { break 'judge Some("REVIEWED_NOT_IN_HEAD"); }
-            if ancestor(repo, reviewed, &receipt.staging_sha) != Some(true) { break 'judge Some("REVIEWED_NOT_IN_STAGING"); }
+            if ancestor(repo, reviewed, staging) != Some(true) { break 'judge Some("REVIEWED_NOT_IN_STAGING"); }
             if !(ancestor(repo, head, staging) == Some(true)
                 || (ancestor(repo, staging, head) == Some(true)
                     && integration_state(repo, head, target) == Some(true)))

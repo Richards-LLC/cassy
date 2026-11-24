@@ -7,7 +7,6 @@ use rmcp::model::ErrorCode;
 
 use super::release_train;
 
-const GATE: &str = "G-170";
 const REVIEW_NOTE: &str = "whole-flow review:";
 const KEEP_NOTE: &str = "keep release train:";
 
@@ -37,11 +36,12 @@ fn supervisor_decisions(root: &Path, task_id: &str) -> anyhow::Result<Vec<String
         .collect())
 }
 
+// gate[G-170 repair]: Whole-flow review required after repeated verifier rejections
 fn refusal(task_id: &str) -> McpError {
     let prefix = crate::mcp::tools::core::guidance::caller_prefix();
     McpError {
         code: ErrorCode::INVALID_PARAMS,
-        message: crate::gates::tag(GATE, format!(
+        message: crate::gates::tag("G-170", format!(
             "Whole-flow review required for {task_id} after repeated verifier rejections. Have an independent reviewer compare every actor and operation against the design in a table and list every mismatch. Publish the table with `{prefix}artifact action=publish task_id={task_id} path=<file>`. A supervisor then links it with `{prefix}task action=notes id={task_id} note_type=decision notes=\"{REVIEW_NOTE} <artifact-id>\"`. Retry with a repair brief covering the full mismatch list."
         )).into(),
         data: None,

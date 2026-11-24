@@ -1552,17 +1552,23 @@ impl CasCore {
         }
         let requester = self.get_agent_id()?;
         let owner = self.verification_dispatch_owner(&requester)?;
+        let boundary = cycle::boundary(&self.cas_root, task, candidate.proof.clone()).map_err(fail)?;
+        let reviewed_proof = crate::mcp::tools::core::task::lifecycle::close_ops::no_code_reviewed_proof(&self.cas_root, task);
+        let conn = rusqlite::Connection::open(self.cas_root.join("cas.db")).map_err(fail)?;
+        cas_store::shared_db::install_busy_handler(&conn).map_err(fail)?;
         // gate[N-12 notice]: Premerge candidate verification dispatch
-        let dispatch = cas_store::create_verification_dispatch_bound(
-            &self.cas_root,
+        let dispatch = cas_store::create_verification_dispatch_reviewing_with_conn(
+            &conn,
             &task.id,
             &requester,
             &owner,
-            &cycle::boundary(&self.cas_root, task, candidate.proof.clone()).map_err(fail)?,
+            &boundary,
+            reviewed_proof.as_deref(),
             chrono::Utc::now() + chrono::Duration::minutes(10),
             false,
         )
         .map_err(fail)?;
+        drop(conn);
         if self.emit_premerge_review_handoff(task, &dispatch)?.is_some() || automatic::owns(&self.cas_root, &cas_store::get_verification_dispatch(&self.cas_root, &dispatch.id).map_err(fail)?) {
             return Err(fail(format!(
                 "task {}: merge held on verification dispatch {}. Automatic verifier startup is scheduled. Approval continues the merge automatically; verdicts needing attention wake you. Do not spawn another verifier",

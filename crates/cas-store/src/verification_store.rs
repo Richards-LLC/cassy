@@ -1054,18 +1054,6 @@ pub fn has_active_verification_dispatch(cas_dir: &Path, task_id: &str) -> Result
     ).map_err(StoreError::Database)
 }
 
-pub fn bind_verification_dispatch_reviewed_proof_with_conn(
-    conn: &Connection,
-    dispatch_id: &str,
-    reviewed_proof: &str,
-) -> Result<()> {
-    conn.execute(
-        "UPDATE verification_dispatches SET reviewed_proof = ?2 WHERE id = ?1 AND reviewed_proof IS NULL",
-        params![dispatch_id, reviewed_proof],
-    )?;
-    Ok(())
-}
-
 pub fn verification_dispatch_reviewed_proof(cas_dir: &Path, dispatch_id: &str) -> Result<Option<String>> {
     let store = SqliteVerificationStore::open(cas_dir)?;
     let conn = crate::shared_db::lock_connection(&store.conn)?;
@@ -1178,6 +1166,7 @@ pub fn create_verification_dispatch_bound(
         requester_agent_id,
         owner_agent_id,
         boundary,
+        None,
         deadline_at,
         supervisor_recovery,
     )?;
@@ -1200,6 +1189,29 @@ pub fn create_verification_dispatch_bound_with_conn(
     deadline_at: DateTime<Utc>,
     supervisor_recovery: bool,
 ) -> Result<VerificationDispatch> {
+    create_verification_dispatch_reviewing_with_conn(
+        conn,
+        task_id,
+        requester_agent_id,
+        owner_agent_id,
+        boundary,
+        None,
+        deadline_at,
+        supervisor_recovery,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_verification_dispatch_reviewing_with_conn(
+    conn: &Connection,
+    task_id: &str,
+    requester_agent_id: &str,
+    owner_agent_id: &str,
+    boundary: &VerificationProofBoundary,
+    reviewed_proof: Option<&str>,
+    deadline_at: DateTime<Utc>,
+    supervisor_recovery: bool,
+) -> Result<VerificationDispatch> {
     if conn.is_autocommit() {
         let tx = crate::shared_db::begin_immediate_with_retry(conn)?;
         let dispatch = create_verification_dispatch_bound_in_transaction(
@@ -1208,6 +1220,7 @@ pub fn create_verification_dispatch_bound_with_conn(
             requester_agent_id,
             owner_agent_id,
             boundary,
+            reviewed_proof,
             deadline_at,
             supervisor_recovery,
         )?;
@@ -1221,17 +1234,20 @@ pub fn create_verification_dispatch_bound_with_conn(
         requester_agent_id,
         owner_agent_id,
         boundary,
+        reviewed_proof,
         deadline_at,
         supervisor_recovery,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_verification_dispatch_bound_in_transaction(
     conn: &Connection,
     task_id: &str,
     requester_agent_id: &str,
     owner_agent_id: &str,
     boundary: &VerificationProofBoundary,
+    reviewed_proof: Option<&str>,
     deadline_at: DateTime<Utc>,
     supervisor_recovery: bool,
 ) -> Result<VerificationDispatch> {
@@ -1319,8 +1335,8 @@ fn create_verification_dispatch_bound_in_transaction(
         "INSERT INTO verification_dispatches
          (id, task_id, receipt_id, delivery_transaction_id, repository_proof, requester_agent_id,
           owner_agent_id, verifier_agent_id, capability_id, state, requested_at,
-          deadline_at, resolved_at, recovery_action)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, NULL, ?11)",
+          deadline_at, resolved_at, recovery_action, reviewed_proof)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, NULL, ?11, ?12)",
         params![
             dispatch.id,
             dispatch.task_id,
@@ -1338,6 +1354,7 @@ fn create_verification_dispatch_bound_in_transaction(
             dispatch.requested_at.to_rfc3339(),
             dispatch.deadline_at.to_rfc3339(),
             dispatch.recovery_action.to_string(),
+            reviewed_proof,
         ],
     )?;
     Ok(dispatch)

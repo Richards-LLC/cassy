@@ -275,7 +275,8 @@ fn models(endpoint: &str, key: &str) -> Result<Vec<String>, String> {
         .call()
     {
         Ok(response) if response.status() == 200 => {
-            let listing: serde_json::Value = response.into_json().unwrap_or_default();
+            let listing: serde_json::Value =
+                serde_json::from_str(&response.into_string().unwrap_or_default()).unwrap_or_default();
             Ok(listing
                 .get("data")
                 .and_then(serde_json::Value::as_array)

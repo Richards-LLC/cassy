@@ -1153,8 +1153,8 @@ async fn park_requires_red_first_evidence_gh_2422() {
         ("test at tip", Some("test-first"), Some(("HEAD", &nextest[..])), false),
     ] {
         let f = fixture_with_gear(&mut env, if case == "compile failure at base" { &broken } else { &red }, &checkpoint);
-        let run = |args: &[&str]| crate::factory_worker_check::execute_at(&f.cas_dir(),
-            &args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>(), &f.worker_path, cargo);
+        let run = |checkout: &Path, args: &[&str]| crate::factory_worker_check::execute_at(&f.cas_dir(),
+            &args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>(), checkout, cargo);
         let mut task = f.task();
         task.execution_note = methodology.map(str::to_string);
         task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
@@ -1210,9 +1210,23 @@ async fn park_requires_red_first_evidence_gh_2422() {
         git(&f.worker_path, &["commit", "-qam", "fix(cas-br01): correct the gear"]);
         git(&f.worker_path, &["push", "-q", "origin", LANE]);
         if let Some((revision, args)) = failure {
-            git(&f.worker_path, &["checkout", "-q", "--detach", revision]);
+            let linked = f.worker_path.with_file_name("previous-worker");
+            let set_checkout = |checkout: &Path| {
+                let agents = open_agent_store(&f.cas_dir()).unwrap();
+                let mut agent = agents.get("br-worker-session").unwrap();
+                agent.metadata.insert("clone_path".into(), checkout.to_str().unwrap().into());
+                agents.update(&agent).unwrap();
+            };
+            let checkout = if case == "red checkpoint" {
+                git(&f.worker_path, &["worktree", "add", "-q", "--detach", linked.to_str().unwrap(), revision]);
+                set_checkout(&linked);
+                &linked
+            } else {
+                git(&f.worker_path, &["checkout", "-q", "--detach", revision]);
+                &f.worker_path
+            };
             if revision == "HEAD" { env.set("CI", "fixture-red-tip"); }
-            assert!(run(args).is_err(), "{case}");
+            assert!(run(checkout, args).is_err(), "{case}");
             if revision == "HEAD" { env.set("CI", "true"); }
             let written = std::fs::read_dir(f.cas_dir().join("worker-checks")).into_iter().flatten()
                 .flatten().filter_map(|directory| std::fs::read_dir(directory.path()).ok()).flatten().flatten()
@@ -1220,10 +1234,14 @@ async fn park_requires_red_first_evidence_gh_2422() {
             if written != (case != "node file setup failure") {
                 violations.push(format!("{case}: unexpected red receipt presence {written}"));
             }
-            git(&f.worker_path, &["checkout", "-q", LANE]);
+            if checkout == &linked {
+                set_checkout(&f.worker_path);
+            } else {
+                git(&f.worker_path, &["checkout", "-q", LANE]);
+            }
         }
-        run(passing_rust).unwrap_or_else(|error| panic!("{case}: {error:#}\n{}", git(&f.worker_path, &["status", "--porcelain"])));
-        if case.starts_with("node ") { run(&node).unwrap_or_else(|error| panic!("{case}: {error:#}")); }
+        run(&f.worker_path, passing_rust).unwrap_or_else(|error| panic!("{case}: {error:#}\n{}", git(&f.worker_path, &["status", "--porcelain"])));
+        if case.starts_with("node ") { run(&f.worker_path, &node).unwrap_or_else(|error| panic!("{case}: {error:#}")); }
         let reply = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
         let status = if parked { TaskStatus::AwaitingMerge } else { TaskStatus::InProgress };
         if crate::gates::codes_in(&reply).contains(&"G-170") == parked || f.task().status != status {

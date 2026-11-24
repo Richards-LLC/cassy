@@ -422,7 +422,7 @@ impl CasCore {
             }
             let ranges = window.and_then(|window| task_attribution::range_bounds(repo, target, window, Some(head)))
                 .ok_or_else(|| format!("Cannot attribute reviewed correction {head}"))?;
-            let paths = window.and_then(|window| task_attribution::paths(repo, target, window, Some(head)))
+            let paths = task_attribution::paths_from_ranges(repo, ranges.iter().map(|(base, tip)| (base.as_str(), tip.as_str())))
                 .ok_or_else(|| format!("Cannot measure reviewed correction {head}"))?;
             if let Some(refusal) =
                 receipt_scope::park_refusal(&self.cas_root, repo, task, &paths, head, target, Some(&ranges))

@@ -317,12 +317,12 @@ fn rust_red_first_failure(test: Option<&TargetedTest>, status: Option<i32>, log:
             .is_match(&log).then_some(RedFirstFailure::Compile);
     }
     let test = test.filter(|_| status == Some(100))?;
-    if !regex::Regex::new(r"(?m)^ *Summary +\[[^\r\n]*\] +[1-9][0-9]* tests? run: [0-9]+ passed, [1-9][0-9]* failed(?:,|$)").ok()?.is_match(&log) {
+    if regex::Regex::new(r"(?m)^[ \t]*Summary +\[[^\]\r\n]*\] +[1-9][0-9]* tests? run: [^\r\n]+$").ok()?.find_iter(&log).count() != 1 {
         return None;
     }
     let (package, _) = package_selector(&test.package)?;
     let binary = test.harness.as_ref().map_or_else(|| package.to_string(), |harness| format!("{package}::{harness}"));
-    let names = regex::Regex::new(r"(?m)^ *FAIL +\[[^\]\r\n]*\] +\( *[0-9]+/ *[0-9]+\) +(\S+) +(\S+)[ \t]*$").ok()?
+    let names = regex::Regex::new(r"(?m)^[ \t]*(?:FAIL|TIMEOUT)[ \t]+\[[^\]\r\n]*\][ \t]+(?:\([ \t]*[0-9]+/[ \t]*[0-9]+\)[ \t]+)?(\S+)[ \t]+(\S+)[ \t]*$").ok()?
         .captures_iter(&log).filter(|row| row[1] == binary && stability::rust::filter_matches(&test.filter, &row[2]))
         .map(|row| row[2].to_string()).collect::<BTreeSet<_>>();
     (!names.is_empty()).then(|| RedFirstFailure::Rust { package: test.package.clone(), harness: test.harness.clone(), names })
@@ -1242,16 +1242,15 @@ impl PassingTests<'_> {
 pub(crate) fn has_red_first_evidence(&self, task: &str, start_base: Option<&str>,
     ranges: &[(String, String)], delivered: &[stability::Identity]) -> bool {
     let Ok(repo) = self.repo.canonicalize() else { return false };
-    let path = receipt_path(self.cas_root, &repo, self.head);
-    let Some(Ok(entries)) = path.parent().map(std::fs::read_dir) else { return false };
     let mut checkpoints = BTreeSet::new();
-    for entry in entries.flatten().filter(|entry| {
+    let parameterized = std::cell::OnceCell::new();
+    for (checkout, entry) in worktree_receipt_entries(self.cas_root, &repo, self.head).filter(|(_, entry)| {
         entry.file_name().to_str().is_some_and(|name| name.contains("-red-") && name.ends_with(".json"))
             && entry.file_type().is_ok_and(|kind| kind.is_file())
     }) {
         let Some(record) = std::fs::read(entry.path()).ok()
             .and_then(|bytes| serde_json::from_slice::<RedFirstReceipt>(&bytes).ok()) else { continue };
-        if record.repo != repo || record.task != task || record.head == self.head || !valid_git_oid(&record.head)
+        if record.repo != checkout || record.task != task || record.head == self.head || !valid_git_oid(&record.head)
             || record.evidence.is_empty() || entry.path() != record.path(self.cas_root) { continue; }
         let at_base = start_base == Some(record.head.as_str()) && receipt_head_is_ancestor(&repo, &record.head, self.head);
         if matches!(record.failure, RedFirstFailure::Compile) && at_base {
@@ -1260,8 +1259,20 @@ pub(crate) fn has_red_first_evidence(&self, task: &str, start_base: Option<&str>
         let matched = self.records().iter().any(|(_, package, test)| {
             let Some(proof) = test.stability.as_ref().filter(|proof| stability::valid(proof)) else { return false; };
             proof.tests.iter().filter(|identity| delivered.contains(identity)).any(|identity| match &record.failure {
-                RedFirstFailure::Rust { package: failed_package, harness, names } => proof.runner == "nextest"
-                    && package.as_ref() == Some(failed_package) && &test.harness == harness && names.contains(&identity.name),
+                RedFirstFailure::Rust { package: failed_package, harness, names } => {
+                    if proof.runner != "nextest" || package.as_ref() != Some(failed_package) || &test.harness != harness {
+                        return false;
+                    }
+                    if names.contains(&identity.name) { return true; }
+                    names.iter().any(|name| name.strip_prefix(&identity.name)
+                        .is_some_and(|suffix| suffix.starts_with("::")))
+                        && package_selector(failed_package).is_some_and(|(package, _)| {
+                            parameterized.get_or_init(|| stability::rust::parameterized_tests(&repo, self.head, delivered)
+                                .unwrap_or_default()).iter().any(|test| {
+                                &test.identity == identity && test.package == package && &test.harness == harness
+                            })
+                        })
+                }
                 RedFirstFailure::JavaScript { runner, tests } => &proof.runner == runner && tests.iter().any(|failed| identity.selects(failed)),
                 RedFirstFailure::Compile => false,
             })
@@ -1501,18 +1512,9 @@ fn passing_test_records(
     let Ok(repo) = repo.canonicalize() else {
         return Default::default();
     };
-    let mut entries = Vec::new();
-    for checkout in std::iter::once(repo.clone()).chain(sibling_worktrees(&repo)) {
-        let Some(Ok(found)) = receipt_path(cas_root, &checkout, head).parent().map(std::fs::read_dir) else {
-            continue;
-        };
-        let mut found = found.flatten().collect::<Vec<_>>();
-        found.sort_by_key(std::fs::DirEntry::file_name);
-        entries.extend(found.into_iter().map(|entry| (checkout.clone(), entry)));
-    }
     let mut exact = BTreeMap::new();
     let mut ancestors = Vec::new();
-    for (checkout, entry) in entries {
+    for (checkout, entry) in worktree_receipt_entries(cas_root, &repo, head) {
         let Some((receipt_head, package, test)) =
             read_passing_test_record(cas_root, &checkout, &entry)
         else {
@@ -1591,6 +1593,15 @@ fn passing_test_records(
         .map(|((package, _, _), (receipt_head, test))| (receipt_head, package, test))
         .collect();
     (records, voided)
+}
+
+fn worktree_receipt_entries(cas_root: &Path, repo: &Path, head: &str) -> impl Iterator<Item = (PathBuf, std::fs::DirEntry)> {
+    std::iter::once(repo.to_path_buf()).chain(sibling_worktrees(repo)).flat_map(move |checkout| {
+        let mut entries = receipt_path(cas_root, &checkout, head).parent().and_then(|path| std::fs::read_dir(path).ok())
+            .into_iter().flatten().flatten().collect::<Vec<_>>();
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        entries.into_iter().map(move |entry| (checkout.clone(), entry))
+    })
 }
 
 /// GH #2378: the other checkouts of this repository. A receipt binds a clean

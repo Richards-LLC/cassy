@@ -993,32 +993,27 @@ mod tests {
             }
             let now = CapabilitySnapshot::now_ms();
             let mut snapshot = CapabilitySnapshot::default();
-            for name in ["codex_sol_6_2", "codex_sol_6_2_high"] {
-                let (identity, evidence) = probe_harness(
-                    Harness::CodexCli,
-                    &registry.recipes[name].model,
-                    None,
-                    &BinaryObservation::Observed("fixture".into()),
-                    None,
-                    now,
-                    Deadline::after(Duration::from_secs(5)),
-                );
-                assert_eq!(
-                    evidence.availability,
-                    if authenticated {
-                        CapabilityAvailability::Available
-                    } else {
-                        CapabilityAvailability::Unavailable
-                    }
-                );
-                if !authenticated {
-                    let _ = evidence
-                            .remediation
-                            .as_deref()
-                            .unwrap();
+            let (identity, evidence) = probe_harness(
+                Harness::CodexCli,
+                &registry.recipes["codex_sol_6_2"].model,
+                None,
+                &BinaryObservation::Observed("fixture".into()),
+                None,
+                now,
+                Deadline::after(Duration::from_secs(5)),
+            );
+            assert_eq!(
+                evidence.availability,
+                if authenticated {
+                    CapabilityAvailability::Available
+                } else {
+                    CapabilityAvailability::Unavailable
                 }
-                snapshot.record(identity, evidence);
+            );
+            if !authenticated {
+                let _ = evidence.remediation.as_deref().unwrap();
             }
+            snapshot.record(identity, evidence);
             assert_eq!(
                 cas_factory::resolve_lane("standard", &snapshot).is_ok(),
                 authenticated

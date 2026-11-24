@@ -1,0 +1,4 @@
+title: A failed status read during a reconnect is shown as the held command's own outcome
+found: '2026-11-24'
+tasks: [cas-6b21]
+journeys: [HUB-J27]

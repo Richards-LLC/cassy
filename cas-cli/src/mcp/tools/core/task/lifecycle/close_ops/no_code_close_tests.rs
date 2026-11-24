@@ -1964,6 +1964,63 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
     }
 }
 
+#[tokio::test]
+async fn diag_train_no_code_spike_flow_gh2417() {
+    use cas_store::VerificationStore;
+    let mut env = TestEnvGuard::temp_home();
+    let target = "epic/owner-review";
+    let f = fixture(&mut env, target);
+    let owner_id = "nocode-supervisor-session";
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut owner = agents.get(owner_id).unwrap();
+    owner.pid = Some(std::process::id());
+    owner.cc_session_id = Some("owner-session".into());
+    agents.update(&owner).unwrap();
+    let mut epic = Task::new("cas-2417-train".into(), "owned train".into());
+    epic.task_type = TaskType::Epic;
+    epic.status = TaskStatus::InProgress;
+    epic.branch = Some(target.into());
+    epic.epic_verification_owner = Some(owner_id.into());
+    f.put(&epic);
+    let id = "cas-2417-child";
+    let mut child = assigned(id, TaskType::Spike, target);
+    child.execution_note = Some("no-code".into());
+    f.put(&child);
+    open_task_store(&f.cas_dir()).unwrap().add_dependency(&Dependency::new(
+        id.into(), epic.id.clone(), DependencyType::ParentChild,
+    )).unwrap();
+    claim(&f, id);
+    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&f.cas_dir()).unwrap();
+    let request = serde_json::json!({"action": "close", "id": id, "reason": "Report recorded", "external_ref": PROOF});
+    let mut trace = String::new();
+    let r1 = call(&f.worker, request.clone()).await;
+    let d1 = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap();
+    trace += &format!("\nW1 status={:?} dispatch={:?}\n{}", f.task(id).status, d1.as_ref().map(|d| (d.id.clone(), d.state)), r1.chars().take(600).collect::<String>());
+    if let Some(d1) = d1 {
+        let mut verdict = cas_types::Verification::new("ver-2417-rej".into(), id.into());
+        verdict.status = cas_types::VerificationStatus::Rejected;
+        verdict.summary = "Earlier report rejected".into();
+        verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+        verdict.agent_id = Some(owner_id.into());
+        verdict.issuer_agent_id = verdict.agent_id.clone();
+        verdict.dispatch_id = Some(d1.id.clone());
+        cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap().add(&verdict).unwrap();
+        let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+        cas_store::resolve_verification_dispatch_with_conn(&conn, &d1.id, owner_id, None, true).unwrap();
+    }
+    let r2 = call(&f.worker, request.clone()).await;
+    let d2 = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap();
+    trace += &format!("\nW2 status={:?} dispatch={:?}\n{}", f.task(id).status, d2.as_ref().map(|d| (d.id.clone(), d.state)), r2.chars().take(600).collect::<String>());
+    let mut sup_req = request.clone();
+    sup_req.as_object_mut().unwrap().remove("external_ref");
+    let r3 = call(&f.supervisor, sup_req).await;
+    let d3 = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap();
+    trace += &format!("\nS1 status={:?} dispatch={:?}\n{}", f.task(id).status, d3.as_ref().map(|d| (d.id.clone(), d.state)), r3.chars().take(600).collect::<String>());
+    panic!("{trace}");
+}
+
 /// cas-b38a: a code methodology keeps the evidence measurement. A test-first
 /// task with no commit of its own is not closed on evidence alone.
 #[tokio::test]

@@ -1038,7 +1038,8 @@ mod tests {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         // cas-8c4f: proof is the installed build, so the fixture names one.
         *crate::factory_binary_skew::INSTALLED_VERSION_FOR_TEST.lock().unwrap() = Some("9.99.2".into());
-        *crate::factory_binary_skew::INSTALLED_BUILD_FOR_TEST.lock().unwrap() = Some("build-a".into());
+        // The fixture servers record this test binary's own build hash.
+        *crate::factory_binary_skew::INSTALLED_BUILD_FOR_TEST.lock().unwrap() = option_env!("CAS_GIT_HASH").map(str::to_owned);
         struct Child(std::process::Child);
         impl Drop for Child { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
         fn process() -> Child { Child(std::process::Command::new("/bin/sleep").arg("120").spawn().unwrap()) }
@@ -1049,7 +1050,7 @@ mod tests {
             crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, pid);
             store.update(&agent).unwrap();
             let mut epoch = crate::history::epochs::current_daemon_epoch(&Utc::now().to_rfc3339());
-            epoch.pid = Some(pid.into()); epoch.version = version.map(str::to_owned); epoch.build = Some("build-a".into());
+            epoch.pid = Some(pid.into()); epoch.version = version.map(str::to_owned);
             cas_store::SqliteHistoryStore::open(daemon.app.cas_dir()).unwrap().record_epoch(&epoch).unwrap();
         }
         let command: Command = serde_json::from_str("\"mcp\"").unwrap();
@@ -1230,7 +1231,7 @@ mod tests {
             }).await.expect("status bar badge");
             assert!(daemon.app.supervisor_cassy_badge.as_deref().is_some_and(|badge| badge.contains("9.99.2")));
             // cas-724e: a rebuild installed at the same version is not current.
-            *crate::factory_binary_skew::INSTALLED_BUILD_FOR_TEST.lock().unwrap() = Some("build-b".into());
+            *crate::factory_binary_skew::INSTALLED_BUILD_FOR_TEST.lock().unwrap() = Some("another-build".into());
             let rebuilt = daemon.dispatch_supervisor_command(Request::Run { command, confirmed: false }, "reload-rebuild".into(), owner.clone()).await.unwrap();
             assert!(matches!(rebuilt, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase != Phase::Observed));
             assert!(reload_observation(daemon.app.cas_dir(), &daemon.session_name, &name, old.0.id()).is_some_and(|(phase, _)| phase == Phase::Unconfirmed),

@@ -1,0 +1,4 @@
+title: An operations-only epic with approved verification closes by ordinary close even when its branch has no structural range, while any child code delivery keeps the pre-close lint and its refusal
+found: '2026-11-23'
+tasks: [cas-d24f]
+journeys: [FACTORY-CLOSE]

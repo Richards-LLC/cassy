@@ -1,0 +1,4 @@
+title: Park evidence requires only cited files, skips fetched copies and replaces its summary on retry
+statement: A park requires an evidence file only when the close reason cites a concrete file. Prose such as "target" or "target/owner", directories, and brace or placeholder paths are never required. Fetched art-<id>- copies are never republished, and a retried park replaces its earlier evidence summary while the close history guard still keeps every unrelated note.
+tasks: [cas-7c35]
+journeys: [FACTORY-CLOSE]

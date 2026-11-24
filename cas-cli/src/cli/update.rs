@@ -43,6 +43,7 @@ mod bindings;
 pub(crate) mod findings;
 mod fixture;
 mod live;
+#[cfg(target_os = "macos")]
 mod macos_signing;
 mod preview;
 
@@ -4363,13 +4364,27 @@ fn remove_quarantine_if_present(_installed_binary: &Path) -> anyhow::Result<()> 
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn stabilize_macos_identity(installed: &Path) {
-    if let Err(error) = macos_signing::stabilize(installed, None) {
+    if let Err(error) = macos_signing::stabilize(installed) {
         report_update_warning(
-            &format!("could not re-sign {} with \"{}\": {error:#}", installed.display(), macos_signing::LOCAL_IDENTITY),
-            "macOS may ask again for privacy permissions; see docs/onboarding/macbook-from-zero.md, \"Keep macOS permissions across updates\"",
+            &format!("could not give {} a stable code signature: {error:#}", installed.display()),
+            "The installed binary was kept. macOS may ask for privacy permissions again.",
         );
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn stabilize_macos_identity(_installed: &Path) {}
+
+#[cfg(target_os = "macos")]
+pub fn sign_installed_macos() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        std::env::var("CAS_AGENT_ROLE").as_deref() != Ok("worker"),
+        "only the supervisor can install a signing identity"
+    );
+    stabilize_macos_identity(&std::env::current_exe()?);
+    Ok(())
 }
 
 /// Time from process creation through dyld and CLI dispatch to the post-swap

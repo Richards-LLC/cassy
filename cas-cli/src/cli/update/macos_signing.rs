@@ -1,226 +1,277 @@
-//! A stable code identity for the installed binary on macOS (cas-f77b).
-//!
-//! Releases are ad-hoc signed, so their designated requirement is the cdhash
-//! and every version is a new identity to TCC. Each privacy grant held by
-//! `cas`, such as Desktop folder access or Developer Tools, stops matching
-//! after an update, and macOS asks again. If the operator has created the
-//! local identity described in docs/onboarding/macbook-from-zero.md, the update
-//! re-signs the installed binary with it. The requirement then becomes this
-//! identifier plus that certificate, which every later version keeps.
-
+use anyhow::{Context, Result, ensure};
+use std::fs::{self, DirBuilder, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+use std::process::{Command, Output, Stdio};
 
-/// Common name of the operator-created code-signing certificate.
-pub(crate) const LOCAL_IDENTITY: &str = "Cassy Local Code Signing";
-/// Signing identifier shared by every locally re-signed version.
-#[cfg(target_os = "macos")]
-pub(crate) const IDENTIFIER: &str = "dev.cassy.cas";
+const LOCAL_IDENTITY: &str = "Cassy Local Code Signing";
+const IDENTIFIER: &str = "dev.cassy.cas";
+const SECURITY: &str = "/usr/bin/security";
+const OPENSSL: &str = "/usr/bin/openssl";
+const CODESIGN: &str = "/usr/bin/codesign";
 
-/// Re-sign `installed` with the local identity when the keychain holds one.
-/// The signed copy replaces the binary by rename, so no reader sees a partly
-/// written file. Returns whether the binary was re-signed.
-#[cfg(target_os = "macos")]
-pub(crate) fn stabilize(installed: &Path, keychain: Option<&Path>) -> anyhow::Result<bool> {
-    use anyhow::Context;
-    use std::process::Command;
+pub(super) fn stabilize(installed: &Path) -> Result<()> {
+    let state = dirs::home_dir()
+        .context("could not locate the home directory")?
+        .join(".cas/macos-signing");
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&state)?;
+    let metadata = state.symlink_metadata()?;
+    ensure!(
+        metadata.is_dir() && metadata.permissions().mode() & 0o077 == 0,
+        "the local signing directory must be private"
+    );
+    let lock = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(state.join("setup.lock"))?;
+    fs2::FileExt::try_lock_exclusive(&lock)
+        .context("could not lock the local signing directory")?;
 
-    let mut find = Command::new("/usr/bin/security");
-    find.args(["find-identity", "-p", "codesigning"]);
-    if let Some(keychain) = keychain {
-        find.arg(keychain);
+    let keychain = state.join("cassy.keychain-db");
+    let password_file = state.join("password");
+    if !keychain.try_exists()? && !password_file.try_exists()? {
+        create_identity(&state, &keychain, &password_file)?;
     }
-    let listing = find
-        .output()
-        .context("could not list code-signing identities")?;
-    // Rows read `  1) <40-hex SHA-1> "<name>"`, possibly followed by a trust note.
+    ensure!(
+        keychain.symlink_metadata()?.is_file() && password_file.symlink_metadata()?.is_file(),
+        "the local signing keychain and password must be regular files"
+    );
+    let password = fs::read_to_string(&password_file).context("could not read signing password")?;
+    let password = password.trim();
+    ensure!(!password.is_empty(), "the signing password is empty");
+    run(
+        Command::new(SECURITY)
+            .args(["unlock-keychain", "-p", password])
+            .arg(&keychain),
+        "unlock local signing keychain",
+    )?;
+    let listing = run(
+        Command::new(SECURITY)
+            .args(["find-identity", "-p", "codesigning"])
+            .arg(&keychain),
+        "find local code-signing identity",
+    )?;
     let quoted = format!("\"{LOCAL_IDENTITY}\"");
-    let Some(hash) = String::from_utf8_lossy(&listing.stdout)
-        .lines()
-        .find_map(|line| {
-            let (_, rest) = line.split_once(") ")?;
-            let (hash, name) = rest.split_once(' ')?;
-            (hash.len() == 40
-                && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                && name.starts_with(&quoted))
-            .then(|| hash.to_owned())
-        })
-    else {
-        return Ok(false);
-    };
+    let listing = String::from_utf8_lossy(&listing.stdout);
+    let mut identities = listing.lines().filter_map(|line| {
+        let (_, rest) = line.split_once(") ")?;
+        let (hash, name) = rest.split_once(' ')?;
+        (hash.len() == 40
+            && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && name.starts_with(&quoted))
+        .then_some(hash)
+    });
+    let hash = identities
+        .next()
+        .context("local code-signing identity not found")?;
+    ensure!(
+        identities.all(|identity| identity == hash),
+        "multiple local code-signing identities found"
+    );
+
+    if verify(installed, hash).is_ok() {
+        return Ok(());
+    }
     let parent = installed
         .parent()
         .context("installed binary has no parent directory")?;
     let staged = tempfile::Builder::new()
         .prefix(".cas-sign-")
-        .tempfile_in(parent)
-        .context("could not stage signed binary beside installation")?;
-    std::fs::copy(installed, staged.path())
-        .context("could not copy installed binary for signing")?;
-    let mut sign = Command::new("/usr/bin/codesign");
-    sign.args(["--force", "--sign", &hash, "--identifier", IDENTIFIER]);
-    if let Some(keychain) = keychain {
-        sign.arg("--keychain").arg(keychain);
-    }
-    let signed = sign
-        .arg(staged.path())
-        .output()
-        .context("could not run codesign")?;
-    if !signed.status.success() {
-        anyhow::bail!(
-            "codesign failed: {}",
-            String::from_utf8_lossy(&signed.stderr).trim()
-        );
-    }
+        .tempfile_in(parent)?;
+    fs::copy(installed, staged.path()).context("could not stage a copy of the installed binary")?;
+    run(
+        &mut signing_command(&keychain, hash, staged.path()),
+        "re-sign the staged binary",
+    )?;
+    verify(staged.path(), hash)?;
     staged
         .persist(installed)
-        .context("could not replace installed binary with signed copy")?;
-    Ok(true)
+        .context("could not replace the installed binary with the signed copy")?;
+    Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn stabilize(_installed: &Path, _keychain: Option<&Path>) -> anyhow::Result<bool> {
-    Ok(false)
+fn create_identity(state: &Path, keychain: &Path, password_file: &Path) -> Result<()> {
+    let materials = tempfile::tempdir_in(state)?;
+    let password = run(
+        Command::new(OPENSSL).args(["rand", "-hex", "32"]),
+        "generate signing password",
+    )?;
+    let password = std::str::from_utf8(&password.stdout)?.trim();
+    ensure!(
+        !password.is_empty(),
+        "could not generate the signing password"
+    );
+    let mut saved_password = tempfile::NamedTempFile::new_in(&materials)?;
+    saved_password.write_all(password.as_bytes())?;
+    fs::write(
+        materials.path().join("cert.cnf"),
+        format!(
+            "[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN={LOCAL_IDENTITY}\n\
+                  [ext]\nbasicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature\n\
+                  extendedKeyUsage=critical,codeSigning\n"
+        ),
+    )?;
+    run(
+        Command::new(OPENSSL).current_dir(&materials).args([
+            "req", "-batch", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes", "-keyout",
+            "key.pem", "-out", "cert.pem", "-days", "3650", "-config", "cert.cnf",
+        ]),
+        "generate local code-signing certificate",
+    )?;
+    run(
+        Command::new(OPENSSL)
+            .current_dir(&materials)
+            .args([
+                "pkcs12",
+                "-export",
+                "-inkey",
+                "key.pem",
+                "-in",
+                "cert.pem",
+                "-out",
+                "identity.p12",
+                "-passout",
+                "env:CASSY_SIGNING_PASSWORD",
+            ])
+            .env("CASSY_SIGNING_PASSWORD", password),
+        "package local code-signing identity",
+    )?;
+
+    let setup = (|| {
+        run(
+            Command::new(SECURITY)
+                .args(["create-keychain", "-p", password])
+                .arg(keychain),
+            "create local signing keychain",
+        )?;
+        run(
+            Command::new(SECURITY)
+                .args(["unlock-keychain", "-p", password])
+                .arg(keychain),
+            "unlock new signing keychain",
+        )?;
+        run(
+            Command::new(SECURITY)
+                .current_dir(&materials)
+                .args(["import", "identity.p12", "-k"])
+                .arg(keychain)
+                .args(["-P", password, "-T", CODESIGN]),
+            "import local code-signing identity",
+        )?;
+        run(
+            Command::new(SECURITY)
+                .args([
+                    "set-key-partition-list",
+                    "-S",
+                    "apple-tool:,apple:,codesign:",
+                    "-s",
+                    "-k",
+                    password,
+                ])
+                .arg(keychain),
+            "allow codesign to use the key non-interactively",
+        )?;
+        saved_password.persist_noclobber(password_file)?;
+        Ok(())
+    })();
+    if setup.is_err() && keychain.exists() {
+        run(
+            Command::new(SECURITY).arg("delete-keychain").arg(keychain),
+            "remove incomplete signing keychain",
+        )?;
+    }
+    setup
 }
 
-#[cfg(all(test, target_os = "macos"))]
+fn requirement(hash: &str) -> String {
+    format!("identifier \"{IDENTIFIER}\" and certificate leaf = H\"{hash}\"")
+}
+
+fn signing_command(keychain: &Path, hash: &str, staged: &Path) -> Command {
+    let mut command = Command::new(CODESIGN);
+    command
+        .args([
+            "--force",
+            "--sign",
+            hash,
+            "--identifier",
+            IDENTIFIER,
+            "--timestamp=none",
+            "--keychain",
+        ])
+        .arg(keychain)
+        .arg("--requirements")
+        .arg(format!("=designated => {}", requirement(hash)))
+        .arg(staged);
+    command
+}
+
+fn verify(binary: &Path, hash: &str) -> Result<()> {
+    run(
+        Command::new(CODESIGN)
+            .arg("--verify")
+            .arg("-R")
+            .arg(format!("={}", requirement(hash)))
+            .arg(binary),
+        "verify the local code signature",
+    )?;
+    Ok(())
+}
+
+fn run(command: &mut Command, operation: &str) -> Result<Output> {
+    let output = command
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| operation.to_owned())?;
+    if !output.status.success() && command.get_program() == CODESIGN {
+        anyhow::bail!(
+            "{operation}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    ensure!(
+        output.status.success(),
+        "{operation} failed ({})",
+        output.status
+    );
+    Ok(output)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
-    fn run(program: &str, args: &[&str], dir: &Path) {
-        let output = Command::new(program)
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{program} {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    struct Keychain(std::path::PathBuf);
-    impl Drop for Keychain {
-        fn drop(&mut self) {
-            let _ = Command::new("/usr/bin/security")
-                .arg("delete-keychain")
-                .arg(&self.0)
-                .output();
-        }
-    }
-
-    fn requirement(binary: &Path) -> String {
-        let output = Command::new("/usr/bin/codesign")
-            .args(["-d", "-r-"])
-            .arg(binary)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_owned()
-    }
-
-    /// Two different releases keep one designated requirement, so a TCC grant
-    /// made to the first still matches the second.
     #[test]
-    fn local_identity_gives_every_update_one_designated_requirement_cas_f77b() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        // A throwaway keychain; the user's keychain search list is not changed.
-        std::fs::write(root.join("cert.cnf"), format!(
-            "[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN={LOCAL_IDENTITY}\n\
-             [ext]\nbasicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature\n\
-             extendedKeyUsage=critical,codeSigning\n")).unwrap();
-        run(
-            "/usr/bin/openssl",
-            &[
-                "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "key.pem", "-out",
-                "cert.pem", "-days", "2", "-config", "cert.cnf",
-            ],
-            root,
+    fn signs_with_the_dedicated_keychain_and_stable_requirement() {
+        let keychain = Path::new("/private/cassy.keychain-db");
+        let staged = Path::new("/private/install/.cas-sign-fixture");
+        let hash = "0123456789ABCDEF0123456789ABCDEF01234567";
+        let command = signing_command(keychain, hash, staged);
+        let requirement_arg = format!(
+            "=designated => identifier \"dev.cassy.cas\" and certificate leaf = H\"{hash}\""
         );
-        run(
-            "/usr/bin/openssl",
-            &[
-                "pkcs12", "-export", "-inkey", "key.pem", "-in", "cert.pem", "-out", "id.p12",
-                "-passout", "pass:pw",
-            ],
-            root,
-        );
-        let keychain = root.join("test.keychain-db");
-        let kc = keychain.to_str().unwrap();
-        run(
-            "/usr/bin/security",
-            &["create-keychain", "-p", "pw", kc],
-            root,
-        );
-        let _cleanup = Keychain(keychain.clone());
-        run(
-            "/usr/bin/security",
-            &["unlock-keychain", "-p", "pw", kc],
-            root,
-        );
-        run(
-            "/usr/bin/security",
-            &[
-                "import",
-                "id.p12",
-                "-k",
-                kc,
-                "-P",
-                "pw",
-                "-T",
-                "/usr/bin/codesign",
-            ],
-            root,
-        );
-        run(
-            "/usr/bin/security",
-            &[
-                "set-key-partition-list",
-                "-S",
-                "apple-tool:,apple:,codesign:",
-                "-s",
-                "-k",
-                "pw",
-                kc,
-            ],
-            root,
-        );
-
-        // Two ad-hoc "releases" with different bytes, as the update installs them.
-        let mut requirements = Vec::new();
-        let mut original_requirements = Vec::new();
-        for (release, source) in [("old", "/usr/bin/true"), ("new", "/usr/bin/false")] {
-            let installed = root.join(release).join("cas");
-            std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
-            std::fs::copy(source, &installed).unwrap();
-            run(
-                "/usr/bin/codesign",
-                &["--force", "--sign", "-", installed.to_str().unwrap()],
-                root,
-            );
-            let before = requirement(&installed);
-            assert!(before.contains("cdhash"), "{before}");
-            original_requirements.push(before);
-            assert!(stabilize(&installed, Some(&keychain)).unwrap());
-            run(
-                "/usr/bin/codesign",
-                &["--verify", installed.to_str().unwrap()],
-                root,
-            );
-            requirements.push(requirement(&installed));
-        }
-        assert_ne!(original_requirements[0], original_requirements[1]);
-        assert_eq!(requirements[0], requirements[1]);
-        assert!(
-            requirements[0].contains(IDENTIFIER) && !requirements[0].contains("cdhash"),
-            "{}",
-            requirements[0]
+        assert_eq!(command.get_program(), CODESIGN);
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "--force",
+                "--sign",
+                hash,
+                "--identifier",
+                "dev.cassy.cas",
+                "--timestamp=none",
+                "--keychain",
+                keychain.to_str().unwrap(),
+                "--requirements",
+                &requirement_arg,
+                staged.to_str().unwrap()
+            ]
         );
     }
 }

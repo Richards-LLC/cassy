@@ -400,8 +400,14 @@ download_and_install() {
   # GitHub-downloaded binaries can retain the quarantine attribute on macOS.
   # Clearing it is harmless when the attribute is absent and lets the first
   # `cas` invocation proceed without a Gatekeeper rejection.
-  if [ "$(uname -s)" = "Darwin" ] && command -v xattr &>/dev/null; then
-    xattr -d com.apple.quarantine "${INSTALL_DIR}/${BINARY_NAME}" 2>/dev/null || true
+  if [ "$(uname -s)" = "Darwin" ]; then
+    if command -v xattr &>/dev/null; then
+      xattr -d com.apple.quarantine "${INSTALL_DIR}/${BINARY_NAME}" 2>/dev/null || true
+    fi
+    if [ -w "$INSTALL_DIR" ]; then
+      "${INSTALL_DIR}/${BINARY_NAME}" --internal-sign-installed >/dev/null || \
+        warn "Local code signing was unavailable; the installed binary was kept."
+    fi
   fi
 }
 

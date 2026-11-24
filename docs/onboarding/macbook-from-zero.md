@@ -368,42 +368,20 @@ Subsequent rebuilds are seconds (incremental cargo), unless `vendor/ghostty` cha
 
 ## Keep macOS permissions across updates
 
-Published releases are ad-hoc signed. macOS ties each privacy grant
-(for example "cas would like to access files in your Desktop folder") to the
-exact build, so every update asks again. Create a local code-signing
-identity once. From then on, `cas update` re-signs each new version with it,
-and later versions keep the grants you already approved. Nothing is relaxed:
-the key never leaves your login keychain, and Gatekeeper is unchanged.
+Published releases are ad-hoc signed. Without a stable identity, macOS can ask
+again for previously granted access, such as access to the Desktop folder, after
+an update. The installer and `cas update` now sign the per-user install with a
+local identity. Setup works over SSH without an Apple Developer account, your
+login password, or a keychain dialog. Cassy uses a separate keychain and a
+generated password in `~/.cas/macos-signing`; it doesn't change your login
+keychain or system trust settings.
 
-```bash
-cd "$(mktemp -d)"
-cat > cert.cnf <<'EOF'
-[req]
-distinguished_name=dn
-x509_extensions=ext
-prompt=no
-[dn]
-CN=Cassy Local Code Signing
-[ext]
-basicConstraints=critical,CA:false
-keyUsage=critical,digitalSignature
-extendedKeyUsage=critical,codeSigning
-EOF
-/usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 3650 -config cert.cnf
-/usr/bin/openssl pkcs12 -export -inkey key.pem -in cert.pem -out id.p12 -passout pass:cassy
-security import id.p12 -k ~/Library/Keychains/login.keychain-db -P cassy -T /usr/bin/codesign
-# Lets codesign use the key without a dialog during unattended updates; asks for your login password.
-security set-key-partition-list -S apple-tool:,apple:,codesign: -s -l "Cassy Local Code Signing" ~/Library/Keychains/login.keychain-db
-rm key.pem id.p12
-security find-identity -p codesigning | grep "Cassy Local Code Signing"   # expect one row
-```
-
-The common name must be exactly `Cassy Local Code Signing`; a
-`CSSMERR_TP_NOT_TRUSTED` note on that row is expected and harmless. The next
-`cas update` signs the new version, macOS asks one last time, and later
-versions keep the grant. Check an installed binary with
-`codesign -d -r- ~/.local/bin/cas`: it should name
-`identifier "dev.cassy.cas" and certificate leaf`, not `cdhash`.
+You may need to approve access once for the new identity, including if you used
+the old manual login-keychain setup. Keep `~/.cas/macos-signing` between updates
+to keep using the same certificate. If signing fails, Cassy warns and keeps the
+downloaded binary. Check the installed signature with
+`codesign -d -r- ~/.local/bin/cas`: a stable signature names
+`identifier "dev.cassy.cas"` and a certificate leaf instead of a `cdhash`.
 
 ---
 

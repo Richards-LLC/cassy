@@ -252,3 +252,23 @@ true",
     }
     assert!(!text.contains("WRITTEN"), "a protected git, secret, sibling task or scratch root path was written: {text}");
 }
+
+/// GH #2324: the factory host lists `~/Library/LaunchAgents` in `write_roots`,
+/// which made it an `allowWrite` entry. Anything a worker wrote there runs at
+/// the next login outside the sandbox, so the profile denies it whatever the
+/// operator's roots say (a deny outranks an allow).
+#[test]
+fn login_persistence_dir_is_denied_even_when_write_roots_list_it() {
+    let launch_agents = dirs::home_dir().expect("home dir").join("Library/LaunchAgents");
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, worktree) = linked_worktree(tmp.path());
+    let git = git_paths(&worktree).unwrap();
+    let mut sandbox = claude_sandbox_block(&ProfileRoots {
+        write_roots: &[launch_agents.clone()],
+        cas_root: &tmp.path().join("cas"),
+    });
+    apply_worktree(&mut sandbox, &worktree, Some(&git), &[]);
+    assert!(allow_list(&sandbox).contains(&launch_agents), "the operator root is still granted");
+    let denied = sandbox["filesystem"]["denyWrite"].as_array().unwrap();
+    assert!(denied.iter().any(|path| path.as_str() == launch_agents.to_str()), "LaunchAgents is not denied: {denied:?}");
+}

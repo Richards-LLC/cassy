@@ -13,10 +13,10 @@ use std::path::{Path, PathBuf};
 
 const PROJECT: &str = "cas-d6eb-fixture";
 const WORKER: &str = "br-worker";
-const LANE: &str = "factory/br-worker";
-const ID: &str = "cas-br01";
+pub(super) const LANE: &str = "factory/br-worker";
+pub(super) const ID: &str = "cas-br01";
 
-fn git(repo: &Path, args: &[&str]) -> String {
+pub(super) fn git(repo: &Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .args(args)
         .current_dir(repo)
@@ -32,7 +32,7 @@ fn git(repo: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-async fn call(service: &CasService, request: serde_json::Value) -> String {
+pub(super) async fn call(service: &CasService, request: serde_json::Value) -> String {
     let request = serde_json::from_value(request).unwrap();
     match service.task(Parameters(request)).await {
         Ok(result) => result
@@ -48,11 +48,11 @@ async fn call(service: &CasService, request: serde_json::Value) -> String {
     }
 }
 
-struct Fixture {
-    dir: tempfile::TempDir,
+pub(super) struct Fixture {
+    pub(super) dir: tempfile::TempDir,
     _origin: tempfile::TempDir,
-    worker_path: PathBuf,
-    worker: CasService,
+    pub(super) worker_path: PathBuf,
+    pub(super) worker: CasService,
     supervisor: CasService,
 }
 
@@ -68,7 +68,7 @@ impl Fixture {
 
 /// A workspace with crate `widget`; the worker's pushed, unmerged lane
 /// changes `widget::gear`; its task declares only an unrelated target.
-fn fixture(env: &mut TestEnvGuard) -> Fixture {
+pub(super) fn fixture(env: &mut TestEnvGuard) -> Fixture {
     // Task identity precedes its delivery; store setup can exceed the
     // attribution clock-skew allowance on a busy disk.
     let mut task = Task::new(ID.into(), "turn the gear".into());

@@ -2061,8 +2061,11 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
         }
         // GH #1867: a no-code close dispatch has no candidate proof. The same
         // daemon-owned verifier reviews it and records the exact verdict, and
-        // the owner hears about either outcome.
-        for status in ["approved", "rejected"] {
+        // the owner hears about either outcome. GH #2383: an approval of a
+        // train delivery whose worker blocked on the wait closes it for the
+        // train owner; a real gate stays held and is recorded on the task.
+        for case in ["approved", "foreign-train", "rejected"] {
+            let status = if case == "rejected" { "rejected" } else { "approved" };
             let dir = tempfile::tempdir().unwrap();
             let repo = dir.path();
             super::super::tests::run(repo, &["init", "-q", "-b", "main"]);
@@ -2145,6 +2148,13 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             task.execution_note = Some("no-code".into());
             task.external_ref = Some("artifact:cas-e50f/report".into());
             core.open_task_store().unwrap().add(&task).unwrap();
+            let mut train = Task::new("cas-2383-train".into(), "Train".into());
+            train.task_type = cas_types::TaskType::Epic;
+            train.epic_verification_owner = Some(if case == "foreign-train" { "other-owner".into() } else { owner.id.clone() });
+            core.open_task_store().unwrap().add(&train).unwrap();
+            core.open_task_store().unwrap().add_dependency(&cas_types::Dependency::new(
+                task.id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild,
+            )).unwrap();
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             let request = serde_json::from_value(serde_json::json!({
                 "id": task.id, "reason": "External artifact published; no source changes",
@@ -2163,6 +2173,12 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             assert!(owns(&root, &dispatch));
             assert_ne!(dispatch.verifier_agent_id.as_deref(), Some(worker.id.as_str()));
             assert_ne!(dispatch.verifier_agent_id.as_deref(), Some(owner.id.as_str()));
+            // The worker records the documented verification wait (GH #2383).
+            let wait = crate::mcp::tools::core::task::block_hold::verification_wait_note(&dispatch.id);
+            let blocked = runtime.block_on(core.cas_task_update(rmcp::handler::server::wrapper::Parameters(
+                serde_json::from_value(serde_json::json!({"id": task.id, "status": "blocked", "notes": wait})).unwrap(),
+            ))).unwrap();
+            assert_ne!(blocked.is_error, Some(true), "{blocked:?}");
             std::fs::write(&gate, "go").unwrap();
             broker.join().unwrap();
             let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
@@ -2173,14 +2189,23 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             assert_eq!(verdict.status.to_string(), status);
             assert_eq!(verdict.agent_id,
                 cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().verifier_agent_id);
-            // Approval queues the ordinary close recovery; a held verdict
-            // queues its own notice. Either way the owner sees one row.
+            let closed = core.open_task_store().unwrap().get(&task.id).unwrap();
+            assert_eq!(closed.status == cas_types::TaskStatus::Closed, case == "approved",
+                "{case}: {:?} notes {}; notices {prompts:?}", closed.status, closed.notes);
+            if case == "foreign-train" {
+                assert_eq!(closed.status, cas_types::TaskStatus::Blocked);
+                let gate = crate::mcp::tools::core::task::lifecycle::merge_close::no_delivery_close_hold(&closed.notes, &dispatch.id);
+                assert!(gate.is_some_and(|gate| gate.contains("G-113")), "{case}: {}", closed.notes);
+                continue;
+            }
+            // Approval closes and tells the worker; a held verdict queues its
+            // own notice. Either way one row names the dispatch.
             assert_eq!(
                 prompts.iter().filter(|row| row.prompt.contains(&dispatch.id)).count(),
                 1,
                 "{status}: {prompts:?}"
             );
-            eprintln!("NO_CODE_CLOSE status={status} dispatch={} verifier={:?} verdict={}",
+            eprintln!("NO_CODE_CLOSE case={case} status={status} dispatch={} verifier={:?} verdict={}",
                 dispatch.id, verdict.agent_id, verdict.id);
         }
         // With no eligible home left, the refusal names each home's state

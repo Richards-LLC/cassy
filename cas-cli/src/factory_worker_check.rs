@@ -5732,7 +5732,10 @@ PY"#);
         crate::factory_worker_runs::reconcile(&root, Some("fa0f-session"), chrono::Utc::now()).unwrap();
         for name in ["first", "second"] {
             assert_eq!(run(name).completion.unwrap().exit_code, Some(0), "{name} ran after admission");
-            assert_eq!(wakes(name), 1, "{name}: exactly one completion wake");
+            let rows = open_prompt_queue_store(&root).unwrap()
+                .peek_for_targets(&[name], Some("fa0f-session"), 10).unwrap();
+            assert_eq!(rows.len(), 1, "{name}: exactly one completion wake");
+            assert!(rows[0].prompt.contains("check: PASS "), "{name}: the wake carries the receipt");
         }
         assert!(!queued("second"), "admission ends the wait");
     }

@@ -389,6 +389,29 @@ pub(crate) fn owner_current(root: &Path, id: &str) -> bool {
     load(root, id).and_then(|run| worker_current(root, &run)).unwrap_or(false)
 }
 
+/// cas-fa0f: the PASS receipt lines this run appended to its log, so the one
+/// completion wake carries the result without a log read.
+fn receipt_lines(run: &Run) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 1 << 20;
+    let read = || -> Result<String> {
+        let mut file = File::open(&run.log)?;
+        let start = file.metadata()?.len().saturating_sub(TAIL).max(run.log_offset);
+        file.seek(SeekFrom::Start(start))?;
+        let mut tail = Vec::new();
+        file.take(TAIL).read_to_end(&mut tail)?;
+        Ok(String::from_utf8_lossy(&tail).into_owned())
+    };
+    let tail = read().unwrap_or_default();
+    let mut lines: Vec<String> = tail.lines()
+        .filter(|line| ["check: PASS ", "test: PASS ", "stability: PASS ", "widened: PASS "]
+            .iter().any(|prefix| line.starts_with(prefix)))
+        .map(str::to_owned)
+        .collect();
+    lines.drain(..lines.len().saturating_sub(8));
+    lines
+}
+
 fn notify(root: &Path, run: &mut Run) -> Result<()> {
     if run.notified {
         return Ok(());
@@ -404,10 +427,12 @@ fn notify(root: &Path, run: &mut Run) -> Result<()> {
         exit_code: run.exit_code,
         log: run.log.clone(),
     };
+    let receipts = receipt_lines(run);
     let body = format!(
-        "{}\nTask: {}\nRead the log and continue the assigned task. This is a command completion, not a task verdict.",
+        "{}\nTask: {}\nReceipts: {}\nContinue the assigned task; read the log for failures. This is a command completion, not a task verdict.",
         completion.detail(),
-        run.task.as_deref().unwrap_or("not bound at launch")
+        run.task.as_deref().unwrap_or("not bound at launch"),
+        if receipts.is_empty() { "none in this run's log".to_string() } else { receipts.join("; ") }
     );
     let queue = crate::store::open_prompt_queue_store(root)?;
     queue.enqueue_idempotent(

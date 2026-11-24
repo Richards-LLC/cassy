@@ -313,7 +313,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       });
     });
     test("HUB-J27 reload Cassy on a Codex supervisor only after confirming its restart", journeyPart, async ({ page, journey }) => {
-      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "codex" as const, mcp_version: "9.99.2", installed_version: "9.99.2", mcp_reload_needed: true })) };
+      const machine = { ...ATLAS, sessions: [{ ...ATLAS.sessions[0]!, harness: "codex" as const, mcp_version: "9.99.2", installed_version: "9.99.2", mcp_reload_needed: true, ws_port: 48101, started_at: journeyStamp(-60_000) }] };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
       const mutations = () => hub.frames.filter(frame => frame.kind === "SupervisorCommand");
       await journey.stage("The Codex card names the restart before anything is sent", async () => {
@@ -347,16 +347,22 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(reload).toBeVisible();
         await page.keyboard.press("ArrowRight");
         await expect(reload).toBeFocused();
-        const priorComposer = await input.elementHandle();
-        const peer = { ...machine.sessions[0]!, name: "calm-wren-2", supervisor: "calm-wren-2", project_dir: "/projects/peer-project", workers: [] };
+        const peer = { ...machine.sessions[0]!, name: "calm-wren-2", supervisor: "calm-wren-2", project_dir: "/projects/peer-project", workers: [], ws_port: 48102, started_at: journeyStamp(-30_000) };
         machine.sessions.push(peer);
         await hub.announceCatalog(machine.id, { added: [peer.name] });
         const navigation = page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true });
-        await expect(navigation.getByRole("button", { name: /^peer-project on /, includeHidden: true })).toHaveCount(1);
-        await expect.poll(() => priorComposer.evaluate(composer => composer.isConnected)).toBe(false);
+        const peerRow = navigation.getByRole("button", { name: /^peer-project on /, includeHidden: true });
+        await expect(peerRow).toHaveCount(1);
         await expect(reload).toBeFocused();
+        await captureReload(page, "typed-confirm-after-catalog", viewport.width);
+        await reload.hover();
+        await page.mouse.down();
+        const arriving = { ...peer, name: "bright-robin-3", supervisor: "bright-robin-3", project_dir: "/projects/arriving-project", ws_port: 48103, started_at: journeyStamp(-10_000) };
+        machine.sessions.push(arriving);
+        await hub.announceCatalog(machine.id, { added: [arriving.name] });
+        await expect(navigation.getByRole("button", { name: /^arriving-project on /, includeHidden: true })).toHaveCount(1);
         expect(mutations()).toHaveLength(1);
-        await reload.click();
+        await page.mouse.up();
         await expect.poll(() => mutations().length).toBe(2);
         expect(mutations()[1].body).toMatchObject({ command: "mcp", confirmed: true });
         await expect(input).toHaveValue("");

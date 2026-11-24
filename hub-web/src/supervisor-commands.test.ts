@@ -32,20 +32,23 @@ describe("supervisor slash commands", () => {
       } else if (harness === "codex") {
         const panel = document.querySelector<HTMLElement>("#supervisor-command-palette")!;
         const reload = () => panel.querySelector<HTMLButtonElement>('[data-command-confirm="mcp"]');
-        const confirmation = reload();
-        expect(confirmation).not.toBeNull();
+        const expectConfirmation = () => {
+          expect(panel.querySelector('[role="alertdialog"]')?.closest("[hidden]")).toBeNull();
+          expect(reload()?.closest("[hidden]")).toBeNull();
+          expect(reload()?.disabled).toBe(false);
+        };
+        expectConfirmation();
         input.dispatchEvent(new Event("input", { bubbles: true }));
-        expect(reload()).toBe(confirmation);
+        expectConfirmation();
         commands.sync();
-        expect(reload()).toBe(confirmation);
-        expect(panel.hidden).toBe(false);
-        expect(panel.querySelector("[data-supervisor-command]")).toBeNull();
+        expectConfirmation();
         panel.querySelector<HTMLButtonElement>('[role="alertdialog"] button.secondary')!.click();
         expect(panel.hidden).toBe(true);
         expect(run).not.toHaveBeenCalled();
         typeAndSubmit();
         reload()!.click();
         await Promise.resolve();
+        expect(run).toHaveBeenCalledTimes(1);
         expect(run).toHaveBeenCalledWith("mcp", true);
         await vi.waitFor(() => expect(input.value).toBe(""));
       } else {

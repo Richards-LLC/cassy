@@ -2854,6 +2854,29 @@ pub(crate) fn has_recorded_code_delivery(task: &Task) -> bool {
         || !delivery.historical_factory_branch_anchors.is_empty()
 }
 
+/// GH #2384: an operations-only epic has no structural range for the declared
+/// pre-close hook to lint. Neither it nor any child records a code delivery,
+/// every child is terminal and its epic verification is approved. Returns the
+/// audit note naming that verdict; any code delivery keeps the hook.
+fn ops_only_epic_close_note(
+    epic: &Task,
+    children: &[Task],
+    approved_epic_verdict: Option<&str>,
+) -> Option<String> {
+    let verdict = approved_epic_verdict?;
+    (epic.task_type == TaskType::Epic
+        && !has_recorded_code_delivery(epic)
+        && !children.is_empty()
+        && children.iter().all(|child| child.is_terminal() && !has_recorded_code_delivery(child)))
+    .then(|| format!(
+        "decision: operations-only epic `{}`: {} child task(s) are terminal with no code \
+         delivery and epic verification {verdict} is approved. It has no structural range, \
+         so the pre-close structural lint was not run.",
+        epic.id,
+        children.len(),
+    ))
+}
+
 /// A supervisor's artifact-only scope correction retires measured evidence,
 /// never an unmeasured code delivery. The caller persists this atomically with
 /// invalidating the prior proof cycle; no Git ref is moved.
@@ -9077,6 +9100,7 @@ impl CasCore {
         // the hand-supplied commit_receipt the delivery-tip gate needs.
         let mut gone_epic_branch_receipt: Option<String> = None;
         let mut published_epic_proof = None;
+        let mut ops_only_epic_note = None;
         // For Epics: Check that all worker branches are merged before verification
         // This ensures epic-level verification runs on the complete merged code
         if task.task_type == TaskType::Epic {
@@ -9165,6 +9189,11 @@ impl CasCore {
                 Some(gone) => epic_autoclose::retarget_children(&subtasks, gone, &target_branch),
                 None => subtasks,
             };
+            let approved_epic_verdict = self.open_verification_store().ok()
+                .and_then(|store| store.get_latest_for_task_by_type(&task.id, VerificationType::Epic).ok().flatten())
+                .filter(|verdict| verdict.status == VerificationStatus::Approved)
+                .map(|verdict| verdict.id);
+            ops_only_epic_note = ops_only_epic_close_note(&task, &subtasks, approved_epic_verdict.as_deref());
             // cas-9452: closed children prove the content reached the epic
             // branch, not the default branch. Release closes carry their own
             // batch receipt, so only a close outside one is measured here.
@@ -11643,6 +11672,9 @@ impl CasCore {
             || empty_delivery
             || task.execution_note.as_deref() == Some("no-code")
         {
+            None
+        } else if let Some(note) = ops_only_epic_note.as_deref() {
+            close_notes.record(&mut task, note);
             None
         } else if let Some(context) = declared_repo_context.as_ref() {
             match run_declared_pre_close_hook(

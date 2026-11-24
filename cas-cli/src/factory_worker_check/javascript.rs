@@ -3403,10 +3403,11 @@ mod tests {
         // The default config selects `.spec.ts`; a sibling config selects the integration spec.
         write(&backend.join("jest.config.js"),
             r"module.exports = { testRegex: '.*\\.spec\\.ts$' };");
-        // GH #2196: the sibling config's rootDir is the backend, and the spec reads
-        // its migration relative to that directory.
+        // GH #2196: the sibling config sits in `test/` with a rootDir that is neither its
+        // own directory nor the package; Jest never enters rootDir, so the spec reads its
+        // migration relative to the package (the raw run's cwd).
         let sibling = test.join("jest-inbox-tools.integration.config.js");
-        write(&sibling, r"module.exports = { rootDir: '..', testRegex: '.*\\.integration\\.ts$' };");
+        write(&sibling, r"module.exports = { rootDir: '../src', testRegex: '.*\\.integration\\.ts$' };");
         write(&backend.join("prisma/migrations/20261112200000_workspace_reports/migration.sql"), "SELECT 1;");
         // A stand-in Jest: lists the files its config selects under its rootDir and
         // runs a spec only when its config lists it ("No tests found" otherwise) and
@@ -3430,7 +3431,7 @@ process.exit(ok ? 0 : 1);
 "#);
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&jest, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let spec = "apps/backend/test/inbox-analysis-pool.integration.ts";
+        let spec = "apps/backend/src/inbox-analysis-pool.integration.ts";
         let source = |body: &str| format!("describe('pool', () => {{\n  it('drains', () => {{ {body} }});\n}});\n");
         write(&repo.path().join(spec), &source("throw 0;"));
         git(&["add", "."]);

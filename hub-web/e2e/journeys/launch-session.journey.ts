@@ -442,7 +442,7 @@ test("HUB-J13 check native account usage before starting without switching", jou
       for (const provider of ["claude", "codex"]) {
         // A phone row keeps its width for the name: the check sits in the ⋯ menu there.
         if (width === 390) {
-          await dialog.getByRole("button", { name: `More actions for ${provider} main`, exact: true }).click();
+          await dialog.getByLabel(`More actions for ${provider} main`, { exact: true }).click();
           await dialog.locator(`[data-account-key="${provider}:main"] .accounts-menu`).getByRole("button", { name: "Refresh usage", exact: true }).click();
         } else await dialog.getByRole("button", { name: `Check usage for ${provider}:main`, exact: true }).click();
         // The check's windows land on the row's meters as "% left"; its reason reaches the status.

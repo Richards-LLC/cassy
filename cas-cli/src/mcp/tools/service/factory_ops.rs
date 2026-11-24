@@ -17413,7 +17413,7 @@ mod tests {
                 let err = build_spawn_spec_json(cli, Some(model), Some("low"))
                     .expect_err("Haiku may not reach the spawn queue");
 
-                assert!(err.contains("gpt-6-luna"), "{err}");
+                assert!(err.contains("light lane"), "{err}");
             }
         }
     }

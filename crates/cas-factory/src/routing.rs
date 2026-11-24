@@ -813,7 +813,7 @@ pub fn validate_explicit(
     if let Some(model) = spec.model.as_deref() {
         if is_haiku_model(model) {
             return Err(RoutingError::Policy(format!(
-                "Haiku is disabled by operator policy; use the light lane (codex/gpt-6-luna/xhigh, fallback claude/claude-opus-5-5/low) instead of {model:?}"
+                "Haiku is disabled by operator policy; use the light lane instead of {model:?}"
             )));
         }
         if let Err(reason) = validate_model_matches_cli(spec.cli, model) {
@@ -941,7 +941,7 @@ pub fn validate_model_slug_with(
     accepted: impl Fn(&str) -> bool,
 ) -> Result<(), String> {
     if is_haiku_model(model) {
-        return Err("Haiku is disabled by operator policy; use the light lane (codex/gpt-6-luna/xhigh, fallback claude/claude-opus-5-5/low)".to_string());
+        return Err("Haiku is disabled by operator policy; use the light lane".to_string());
     }
     if cli != SupervisorCli::Claude {
         return Ok(());

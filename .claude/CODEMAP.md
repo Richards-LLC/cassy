@@ -43,7 +43,7 @@
 - `cas-cli/src/account_lifecycle.rs`, `cas-cli/src/account_links.rs`, `cas-cli/src/cli/account_picker.rs` — account mutations, links and selection.
 - `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/codex.rs`, `cas-cli/src/agent_model.rs` — harness launches and model observations.
 - `cas-cli/src/worker_sandbox_profile.rs`, `crates/cas-mux/src/worker_sandbox.rs` — macOS Claude worker sandbox profile generation and launch; bypass corpus in `crates/cas-mux/src/worker_sandbox_corpus.json`.
-- `cas-cli/src/cli/doctor/`, `cas-cli/src/cli/update.rs`, `cas-cli/src/ops/` — diagnostics, upgrades and operational commands.
+- `cas-cli/src/cli/doctor/`, `cas-cli/src/cli/update.rs`, `cas-cli/src/ops/` — diagnostics (`doctor/worker_names.rs`: worker branch namespaces), upgrades and operational commands.
 - `cas-cli/src/cli/release_precheck.rs`, `scripts/release-precheck.py` — exact-SHA prechecks and dispatch recovery.
 - `cas-cli/src/cli/release_automation.rs`, `cas-cli/src/cli/release_adapters.rs` — release inventory, promotion and reconciliation adapters; shared default-train election in `cas-cli/src/mcp/tools/core/task/release_train.rs` uses origin history and cut admission markers.
 - `cas-cli/src/cli/release_notice_failure.rs`, `cas-cli/src/issue_reconcile.rs` — exhausted release notices and issue reconciliation.
@@ -77,7 +77,7 @@
 - `cas-cli/src/coordination.rs`, `cas-cli/src/coordination/`, `cas-cli/src/orchestration/` — external-thread authority, binding repair and agent names.
 - `cas-cli/src/factory_auth_health.rs`, `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/factory_review_scratch.rs` — authentication, candidate and review checkout ownership.
 - `cas-cli/src/factory_worker_check.rs`, `cas-cli/src/factory_worker_runs.rs` — capped proof commands, selected-test captures, detached jobs and completion records.
-- `cas-cli/src/factory_worker_check/` — JavaScript discovery, Rust/JavaScript stability identities and widened proof receipts; `javascript/web_attribution.rs` replays widened Playwright failures at the merge base through lane CI's attribution engine.
+- `cas-cli/src/factory_worker_check/` — JavaScript discovery, Rust/JavaScript stability identities and widened proof receipts; `javascript/importers.rs` maps helpers to their importing tests; `javascript/web_attribution.rs` replays widened Playwright failures at the merge base through lane CI's attribution engine.
 - `cas-cli/src/factory_build_routing.rs` — machine-wide worker counts and build placement.
 - `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_capacity_wait.rs`, `cas-cli/src/factory_target_cache/` — build admission, capacity and target ownership.
 - `cas-cli/src/supervisor_auto_clear.rs`, `cas-cli/src/supervisor_continuity.rs`, `cas-cli/src/supervisor_message_wakes.rs` — continuity and typed wakes.
@@ -88,6 +88,7 @@
 - `cas-cli/src/git_evidence/` — shared bounded ref, ancestry, tree and delivery measurement probes.
 - `cas-cli/src/cli/factory/hold.rs`, `crates/cas-store/src/project_hold.rs` — operator project holds.
 - `crates/cas-pty/src/adopt.rs`, `crates/cas-mux/src/pane/handoff.rs`, `cas-cli/src/ui/factory/daemon/reexec.rs` — daemon replacement and terminal adoption.
+- `crates/cas-types/src/factory_gateway.rs`, `crates/cas-mux/src/gateway.rs`, `crates/cas-pty/src/gateway_key.rs` — opt-in home-gateway model transport for workers and its private client key.
 
 ## MCP, storage and delivery gates
 
@@ -133,6 +134,7 @@
 - `hub-web/src/markdown-renderer.ts`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-attachment.ts` — Markdown, diagrams and attachment rendering.
 - `hub-web/src/composer-uploads.ts`, `cas-cli/src/hub/composer_upload.rs` — upload identity and progress.
 - `hub-web/src/pairing-dialog.ts`, `hub-web/src/write-grant.ts`, `hub-web/src/accounts-panel.ts` — pairing, grants and accounts.
+- `hub-web/src/account-meters.ts`, `cas-cli/src/hub/gateway_accounts.rs` — account capacity readings and the read-only gateway account inventory.
 - `hub-web/e2e/journeys/`, `hub-web/preview/` — browser journeys, protocol doubles and real-hub fixtures.
 - `slack-bridge/src/router-main.ts`, `slack-bridge/src/daemon-main.ts` — Slack router and user-daemon entrypoints.
 

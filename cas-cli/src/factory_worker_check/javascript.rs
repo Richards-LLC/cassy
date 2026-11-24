@@ -2147,7 +2147,9 @@ fn execute_selection(
                 suite.get("specs").and_then(Value::as_array).is_some_and(|specs| !specs.is_empty())
                     || suite.get("suites").and_then(Value::as_array).is_some_and(|suites| suites.iter().any(ran_a_test))
             }
-            if !ran_a_test(&report) { bail!(ZeroTests::new(format!("{runner} executed zero tests"))); }
+            if !ran_a_test(&report) && found_no_tests(runner, success, &report) {
+                bail!(ZeroTests::new(format!("{runner} executed zero tests")));
+            }
             let inherited = if success { BTreeSet::new() } else {
                 let (inherited, note) = web_attribution::attribute(cas_root, repo, head, &package,
                     &executable, &config, &report, &environment, high)
@@ -2493,6 +2495,21 @@ fn listed_tests(repo: &Path, root: &Path, suites: &Value, ancestry: &[String], t
     }
 }
 
+/// Playwright exits 1 and reports "No tests found" when a selection matches none.
+fn playwright_found_no_tests(report: &Value) -> bool {
+    report.get("errors").and_then(Value::as_array).is_some_and(|errors| errors.iter()
+        .any(|error| error.get("message").and_then(Value::as_str).is_some_and(|message| message.contains("No tests found"))))
+}
+
+/// A run that executed nothing is a zero-test selection only when the runner
+/// reported no failure: it passed, Vitest/Jest found no test file, or
+/// Playwright found no test. Otherwise it is a failing run (GH #2172).
+fn found_no_tests(runner: &str, success: bool, report: &Value) -> bool {
+    success || if runner == "playwright" { playwright_found_no_tests(report) } else {
+        report.get("testResults").and_then(Value::as_array).is_some_and(Vec::is_empty)
+    }
+}
+
 fn verify_repeats(
     runner: &str,
     repo: &Path,
@@ -2503,7 +2520,7 @@ fn verify_repeats(
     let mut count = 0;
     for iteration in 0..if runner == "playwright" || tests.is_empty() { 1 } else { 5 } {
         let (success, report) = run(iteration)?;
-        count = validate_report_with_inherited(
+        count = match validate_report_with_inherited(
             runner,
             repo,
             &report,
@@ -2514,7 +2531,12 @@ fn verify_repeats(
             // source tables and every iteration must produce exactly them.
             (runner == "vitest").then_some(expected),
             &[],
-        )?;
+        ) {
+            Err(error) if error.downcast_ref::<ZeroTests>().is_some() && !found_no_tests(runner, success, &report) => {
+                bail!("{runner} stability failed at iteration {}; no retry", iteration + 1)
+            }
+            result => result?,
+        };
         if !success {
             bail!(
                 "{runner} stability failed at iteration {}; no retry",
@@ -2593,6 +2615,9 @@ fn validate_report_with_inherited(
                 );
             }
             results.insert(identity, count);
+        }
+        if results.is_empty() && playwright_found_no_tests(report) {
+            bail!(ZeroTests::new(format!("{runner} executed zero tests")));
         }
         if report
             .get("errors")

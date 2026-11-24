@@ -1188,7 +1188,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (selectedMachineId === machine.id && selectedSession === session) render();
     },
     onMessageRejected: async (session, clientRef, detail, rejection) => {
-      if (supervisorCommandSession(machine.id, session).reject(clientRef, detail)) return;
+      if (supervisorCommandSession(machine.id, session).reject(clientRef, detail, rejection?.retryable === true)) return;
       const key = sessionKey(machine.id, session);
       // cas-0653: the hub could not reach the session's daemon, so the
       // message never arrived there. It waits in the thread and goes out once

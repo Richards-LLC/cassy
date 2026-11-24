@@ -419,7 +419,7 @@ export class SupervisorCommandSession {
       : `Session ended (${reason}); /${receipt.command} completion was not confirmed.`;
     this.stopPoll(receipt.client_ref);
   }
-  reject(ref: string, detail: string): boolean {
+  reject(ref: string, detail: string, retryable = false): boolean {
     const receipt = this.receipts.get(ref); if (!receipt) return false;
     if (this.cancelling.delete(ref)) {
       // A failed Cancel does not settle the command. Keep reading its actual
@@ -427,6 +427,10 @@ export class SupervisorCommandSession {
       receipt.detail = detail; this.poll(ref); this.options.changed(); return true;
     }
     if (receipt.phase === "observed" || receipt.phase === "refused" || receipt.phase === "cancelled") return true;
+    // cas-6b21: a status read that met a reconnecting daemon link says nothing
+    // about a command the daemon already holds (a Codex reload restarts the
+    // supervisor meanwhile). Keep its own status and keep reading.
+    if (retryable && this.acknowledged.has(ref) && (receipt.phase === "queued" || receipt.phase === "submitted")) return true;
     if (!this.acknowledged.has(ref) && detail.startsWith(COMMAND_ERROR_PREFIX)) {
       this.refuse(receipt, detail.slice(COMMAND_ERROR_PREFIX.length).trim());
       this.stopPoll(ref); this.options.changed(); return true;

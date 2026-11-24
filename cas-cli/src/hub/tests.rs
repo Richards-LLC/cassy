@@ -6587,12 +6587,19 @@ fn supervisor_mcp_versions_stay_bound_to_the_live_session_cas_8125() {
         model.versions.lock().unwrap().insert(root.clone(), CachedVersions {
             read_at: std::time::Instant::now(),
             snapshot: Some(Snapshot { installed: "9.99.2".into(), servers }),
+            fronts: super::mcp_fronts_stamp(&root),
         });
         let row = model.project(&[SessionInfo { is_running: live, ..session.clone() }]).remove(0);
         let wire = serde_json::to_value(row).unwrap();
         assert_eq!(wire.get("mcp_version").and_then(|value| value.as_str()), expected, "{name}/{role:?}/{owner}/{live}");
         if expected.is_some() {
             assert_eq!(wire["installed_version"], "9.99.2");
+            // cas-8c4f: a reload's new MCP front makes the cached pre-reload version stale at once.
+            std::fs::create_dir_all(root.join("mcp-fronts")).unwrap();
+            std::fs::write(root.join("mcp-fronts").join(format!("{}.json", std::process::id())), "{}").unwrap();
+            let row = model.project(std::slice::from_ref(&session)).remove(0);
+            assert_ne!(row.mcp_version.as_deref(), expected, "the cached pre-reload version must not outlive a new front");
+            std::fs::remove_dir_all(root.join("mcp-fronts")).unwrap();
         }
     }
 }

@@ -295,6 +295,14 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await captureReload(page, "codex-mismatch", viewport.width);
         expect(hub.sends).toHaveLength(0);
       });
+      await journey.stage("Typed /mcp on Codex asks for the same restart confirmation", async () => {
+        const input = composer(page);
+        await input.fill("/mcp");
+        await input.press("Enter");
+        await expect(page.locator('[data-command-confirm="mcp"]')).toBeVisible();
+        expect(mutations()).toHaveLength(1);
+        expect(hub.sends).toHaveLength(0);
+      });
     });
     test("HUB-J27 dismiss reload refusal and resolve a later observed receipt", journeyPart, async ({ page, journey }) => {
       const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const })) };

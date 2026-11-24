@@ -622,6 +622,14 @@ const MCP_VERSION_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 struct CachedVersions {
     read_at: std::time::Instant,
     snapshot: Option<crate::factory_binary_skew::Snapshot>,
+    /// The MCP front reports' directory stamp when read. A reload starts a new
+    /// front, so a changed stamp means this snapshot predates it (cas-8c4f).
+    fronts: Option<std::time::SystemTime>,
+}
+
+/// When any MCP front last reported; it changes whenever a new MCP process serves.
+fn mcp_fronts_stamp(cas_root: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(cas_root.join("mcp-fronts")).and_then(|meta| meta.modified()).ok()
 }
 
 /// How long a session's last activity is reused before it is read again.
@@ -846,8 +854,10 @@ impl LocalSessionReadModel {
 
     fn mcp_versions(&self, cas_root: &std::path::Path) -> Option<crate::factory_binary_skew::Snapshot> {
         let mut cache = self.versions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fronts = mcp_fronts_stamp(cas_root);
         if let Some(cached) = cache.get(cas_root)
             && cached.read_at.elapsed() < MCP_VERSION_TTL
+            && cached.fronts == fronts
         {
             return cached.snapshot.clone();
         }
@@ -856,7 +866,7 @@ impl LocalSessionReadModel {
             cas_root, installed.as_deref().unwrap_or("unknown"), chrono::Utc::now(),
         ).ok();
         cache.insert(cas_root.to_path_buf(), CachedVersions {
-            read_at: std::time::Instant::now(), snapshot: snapshot.clone(),
+            read_at: std::time::Instant::now(), snapshot: snapshot.clone(), fronts,
         });
         snapshot
     }

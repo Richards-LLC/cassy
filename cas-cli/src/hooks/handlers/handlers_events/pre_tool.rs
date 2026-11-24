@@ -13633,22 +13633,26 @@ if [ "$1 $2" = 'api graphql' ]; then
   exit
 fi
 [ "$1 $2" = 'pr view' ] || exit 1
-number=$3
+selector=$3
 repository=acme/project
-branch=factory/proof
-head=$CAS_TEST_PR_HEAD
-case "$number" in
-  2546) ;;
-  2547) branch=factory/other;;
-  2548) head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;;
-  2549) number=2546; branch=factory/renamed;;
-  *) exit 1;;
-esac
 while [ "$1" != '--json' ]; do
   [ "$#" -gt 1 ] || exit 1
   if [ "$1" = '--repo' ]; then repository=$2; shift; fi
   shift
 done
+case "$repository" in
+  */*/*) host=${repository%%/*}; repository=${repository#*/};;
+  *) host=github.com;;
+esac
+head=$CAS_TEST_PR_HEAD
+case "$repository:$selector" in
+  acme/project:2546|other/project:2546) number=2546; branch=factory/proof;;
+  acme/project:2547) number=2547; branch=factory/other;;
+  acme/project:2548) number=2548; branch=factory/proof; head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;;
+  acme/project:fork:factory/renamed) number=2546; branch=factory/renamed;;
+  acme/project:factory/renamed) number=2549; branch=factory/renamed; head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;;
+  *) exit 1;;
+esac
 IFS=,
 separator=''
 printf '{'
@@ -13656,7 +13660,7 @@ for field in $2; do
   printf '%s"%s":' "$separator" "$field"
   case "$field" in
     number) printf '%s' "$number";;
-    url) printf '"https://github.com/%s/pull/%s"' "$repository" "$number";;
+    url) printf '"https://%s/%s/pull/%s"' "$host" "$repository" "$number";;
     headRefName) printf '"%s"' "$branch";;
     headRefOid) printf '"%s"' "$head";;
     statusCheckRollup) printf '[]';;
@@ -13750,18 +13754,24 @@ printf '}'
         let api = concat!("gh api -X PUT ", "repos/acme/project/pulls/2546/", "merge");
         let graphql = concat!("gh api graphql -f query='mutation { mergePull", "Request(input: {pullRequestId: \"PR_fixture\"}) { clientMutationId } }'");
         let graphql_variables = concat!("gh api graphql -f query='mutation($pr: ID!) { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }' -F pr=PR_fixture");
+        let graphql_input = concat!("gh api graphql -f query='mutation($input: MergePullRequestInput!) { mergePull", "Request(input: $input) { clientMutationId } }' -F 'input[pullRequestId]=PR_fixture'");
+        let graphql_json = concat!("gh api graphql --input - <<< '{\"query\":\"mutation($input: MergePullRequestInput!) { mergePull", "Request(input: $input) { clientMutationId } }\",\"variables\":{\"input\":{\"pullRequestId\":\"PR_fixture\"}}}'");
+        let owner_branch = concat!("gh pr ", "merge fork:factory/renamed --squash");
+        let enterprise_url = concat!("gh pr ", "merge https://github.example.com/acme/project/pull/2546 --squash");
+        let enterprise_rest = concat!("curl -X PUT https://github.example.com/api/v3/repos/acme/project/pulls/2546/", "merge");
         let first = dispatch();
         run("worker", &command, Some("PR_VERIFIER_PENDING"));
         run("supervisor", api, Some("PR_VERIFIER_PENDING"));
         verdict(&first, VerificationStatus::Rejected);
         std::fs::write(&config, "[qa]\nindependent_pass = true\n").unwrap();
         run("supervisor", &command, Some("PR_VERIFIER_REJECTED"));
+        let input_denial = denial_for("supervisor", graphql_input);
+        let json_denial = denial_for("supervisor", graphql_json);
         authorize(&first);
         run("worker", &command, Some("PR_VERIFIER_REJECTED"));
         run("worker", graphql, Some("PR_VERIFIER_REJECTED"));
         run("worker", &merge(2547), None);
         run("worker", &merge(2548), None);
-        run("worker", &merge(2549), Some("PR_VERIFIER_REJECTED"));
         run("worker", &format!("{command} --repo other/project"), None);
         run("supervisor", &command, None);
         let overrides = events.list_by_type(EventType::GateOverridden, 10).unwrap();
@@ -13771,6 +13781,9 @@ printf '}'
         assert_eq!(audit["detail"], format!("{}: {reason}", first.id));
 
         let variables_denial = denial_for("worker", graphql_variables);
+        let owner_denial = denial_for("worker", owner_branch);
+        let enterprise_denial = denial_for("worker", enterprise_url);
+        let enterprise_rest_denial = denial_for("worker", enterprise_rest);
         cas_store::request_changes_for_parked_delivery(&cas_root, &task.id, &supervisor.id, "repair fixture").unwrap();
         let reopened = open_task_store(&cas_root).unwrap().get(&task.id).unwrap();
         assert!(reopened.deliverables.parked_branch.is_none());
@@ -13779,6 +13792,11 @@ printf '}'
         let repair_denial = denial_for("worker", &command);
         let rejected = |denial: Option<String>| denial.is_some_and(|text| text.contains("PR_VERIFIER_REJECTED"));
         assert_eq!((rejected(repair_denial), rejected(variables_denial)), (true, true), "same-source repair and GraphQL field-variable holds");
+        assert_eq!(
+            (rejected(input_denial), rejected(json_denial), rejected(owner_denial), enterprise_denial.is_none(), enterprise_rest_denial.is_none()),
+            (true, true, true, true, true),
+            "GraphQL input/JSON, owner-qualified branch, enterprise URL and enterprise REST",
+        );
 
         let next = dispatch();
         assert_ne!(next.id, first.id);

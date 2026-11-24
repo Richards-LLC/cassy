@@ -25,6 +25,21 @@ pub(super) fn merge_refusal(
         }
     }
 }
+
+fn dispatch_rows(conn: &Connection) -> rusqlite::Result<rusqlite::Statement<'_>> {
+    conn.prepare(
+        "SELECT d.id, d.task_id, json_extract(task.deliverables, '$.delivery_pr_number'),
+                r.source_branch, r.repo_selector, r.target_branch
+         FROM verification_dispatches d
+         JOIN tasks task ON task.id=d.task_id
+         LEFT JOIN worker_delivery_transactions t
+            ON t.id=d.delivery_transaction_id AND t.receipt_id=d.receipt_id AND t.task_id=d.task_id
+         LEFT JOIN worker_completion_receipts r ON r.id=t.receipt_id AND r.task_id=d.task_id
+         WHERE r.commit_sha=?1 OR (d.delivery_transaction_id IS NULL AND d.repository_proof IS NOT NULL)
+         ORDER BY d.requested_at DESC, d.id DESC",
+    )
+}
+
 // gate-audit[audited_override]: bypass H-24 A registered supervisor may override a rejected dispatch only after the reason is recorded.
 fn check_pr(
     cas_root: &Path,
@@ -41,17 +56,7 @@ fn check_pr(
         cas_root.join("cas.db"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
-    let mut statement = conn.prepare(
-        "SELECT d.id, d.task_id, json_extract(task.deliverables, '$.delivery_pr_number'),
-                r.source_branch, r.repo_selector, r.target_branch
-         FROM verification_dispatches d
-         JOIN tasks task ON task.id=d.task_id
-         LEFT JOIN worker_delivery_transactions t
-            ON t.id=d.delivery_transaction_id AND t.receipt_id=d.receipt_id AND t.task_id=d.task_id
-         LEFT JOIN worker_completion_receipts r ON r.id=t.receipt_id AND r.task_id=d.task_id
-         WHERE r.commit_sha=?1 OR (d.delivery_transaction_id IS NULL AND d.repository_proof IS NOT NULL)
-         ORDER BY d.requested_at DESC, d.id DESC",
-    )?;
+    let mut statement = dispatch_rows(&conn)?;
     let mut rows = statement.query([head])?;
     let mut decided = HashSet::new();
     while let Some(row) = rows.next()? {
@@ -130,6 +135,36 @@ fn check_pr(
         return Ok(Some(format!("{code}: verifier verdict {state} for {task_id} at {head} (dispatch {dispatch_id}). {hint}")));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unmapped_head_reads_no_dispatch_rows_cas_eb2e() {
+        let repo = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(repo.path()).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let conn = Connection::open(root.join("cas.db")).unwrap();
+        for index in 0..12 {
+            let task_id = format!("cas-unrelated-{index}");
+            tasks.add(&cas_types::Task::new(task_id.clone(), "Unrelated review".into())).unwrap();
+            conn.execute(
+                "INSERT INTO verification_dispatches (id, task_id, requester_agent_id, owner_agent_id,
+                    requested_at, deadline_at, repository_proof) VALUES (?1, ?1, 'fixture', 'fixture',
+                    '2026-11-24T00:00:00Z', '2026-11-24T00:10:00Z', ?2)",
+                params![task_id, serde_json::json!({"repository_root": repo.path(), "head_commit": "a".repeat(40)}).to_string()],
+            ).unwrap();
+        }
+        let mut statement = dispatch_rows(&conn).unwrap();
+        let mut rows = statement.query(["b".repeat(40)]).unwrap();
+        let mut count = 0;
+        while rows.next().unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 0);
+    }
 }
 
 fn receipt_repo(cas_root: &Path, target: &WorkTarget) -> Option<String> {

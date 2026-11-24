@@ -123,7 +123,10 @@ export class SlashCommands {
     this.open = true; this.escaped = false; this.sync(); this.positionDropdown();
     this.panel.querySelector<HTMLButtonElement>("button")?.focus();
   }
-  close(): void { this.hide(); this.options.session.cancel(); }
+  close(): void {
+    if (this.options.session.intent?.phase === "sending") return;
+    this.hide(); this.options.session.cancel();
+  }
   private hide(): void {
     this.open = false; this.escaped = true; this.panel.hidden = true; this.anchor?.setAttribute("aria-expanded", "false");
   }
@@ -435,7 +438,7 @@ export class SupervisorCommandSession {
   }
   private async request(command: SupervisorCommand, confirmed: boolean, intent?: CommandIntent): Promise<void> {
     await this.options.control();
-    if (intent && this.intent !== intent) return;
+    if (intent && this.intent !== intent) throw new Error("The supervisor selection or session changed before the command was sent.");
     const changed = this.options.unavailable(); if (changed) throw new Error(changed);
     const ref = `cmd-${crypto.randomUUID()}`;
     this.receipts.set(ref, { client_ref: ref, command, phase: "submitted", detail: "Command requested; harness execution is not confirmed yet.", output: "", interactive: false });

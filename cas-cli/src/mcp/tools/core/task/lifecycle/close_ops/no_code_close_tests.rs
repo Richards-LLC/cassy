@@ -1998,6 +1998,14 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         }
         f.put(&spike);
         claim(&f, id);
+        if case == "demo-feature" {
+            // An audit-style ledger that declares no QA matrix passes the G-52 preflight.
+            let dir = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(
+                &f.cas_dir(), &f.task(id),
+            ).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("LEDGER.md"), "# Report notes\n").unwrap();
+        }
         let published = "a".repeat(64);
         cas_store::SqliteArtifactStore::open(&f.cas_dir()).unwrap().record_local(&cas_store::NewArtifact {
             id: "art-2372-report".into(), task_id: id.into(), name: "report.md".into(),

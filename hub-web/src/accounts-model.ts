@@ -34,26 +34,3 @@ export function accountTime(instant: string): string {
   return new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZoneName: "shortGeneric" }).format(date);
 }
 
-export function accountCapacity(windows: readonly AccountWindow[], observed?: string | null, now = Date.now()): string[] {
-  if (!windows.length) return ["Usage unknown"];
-  return windows.map(window => {
-    const reset = window.resets_at ? new Date(window.resets_at).getTime() : undefined;
-    const known = window.used_percent !== null && Number.isFinite(window.used_percent) && window.used_percent >= 0 && window.used_percent <= 100 && (reset === undefined || (Number.isFinite(reset) && reset > now));
-    const amount = known ? `${Math.round(100 - window.used_percent!)}% left` : "usage unknown";
-    // cas-eae3: a reset already past is a stale fact; only a coming one is shown.
-    const resetCopy = reset !== undefined && Number.isFinite(reset) && reset > now ? ` · resets ${accountTime(window.resets_at!)}` : "";
-    return `${window.name} ${amount}${resetCopy}${observed ? ` · as of ${accountTime(observed)}` : ""}`;
-  });
-}
-
-/** One usage window as a bar: the share left, or unknown, and its reset. */
-export interface AccountMeter { name: string; left: number | null; reset: string | null }
-
-export function accountMeters(windows: readonly AccountWindow[], now = Date.now()): AccountMeter[] {
-  return windows.map(window => {
-    const reset = window.resets_at ? new Date(window.resets_at).getTime() : undefined;
-    const valid = reset === undefined || Number.isFinite(reset);
-    const known = window.used_percent !== null && Number.isFinite(window.used_percent) && window.used_percent >= 0 && window.used_percent <= 100 && valid && (reset === undefined || reset > now);
-    return { name: window.name, left: known ? Math.round(100 - window.used_percent!) : null, reset: reset !== undefined && valid && reset > now ? accountTime(window.resets_at!) : null };
-  });
-}

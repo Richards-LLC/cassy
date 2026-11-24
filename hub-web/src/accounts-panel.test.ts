@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { beforeAll, afterEach, expect, it, vi } from "vitest";
 import { AccountsSheet, type AccountsHost } from "./accounts-panel";
-import { accountCapacity, accountMeters, accountTime, type AccountRow, type AccountOperation, type AccountsCatalog, type GatewayInventory } from "./accounts-model";
+import { readings } from "./account-meters";
+import { accountTime, type AccountRow, type AccountOperation, type AccountsCatalog, type GatewayInventory } from "./accounts-model";
 const row: AccountRow = { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: false, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } };
 beforeAll(() => {
   HTMLDialogElement.prototype.showModal = function() { this.setAttribute("open", ""); };
@@ -138,11 +139,11 @@ it("groups by provider in headroom order, says where each lives, and cleans up s
 
 it("formats reset and observation times locally in 12-hour form and clears expired capacity", () => {
   const now = new Date("2026-10-28T16:00:00Z").getTime();
-  const fresh = accountCapacity([{ name: "weekly", used_percent: 38, resets_at: "2026-10-29T16:20:00Z" }], "2026-10-28T13:00:00Z", now)[0];
-  expect(fresh).toContain("weekly"); expect(fresh).toContain("62%"); expect(fresh).toContain(accountTime("2026-10-28T13:00:00Z")); expect(fresh).toMatch(/AM|PM/);
-  expect(accountMeters([{ name: "weekly", used_percent: 38, resets_at: "2026-10-27T16:00:00Z" }], now)[0]).toMatchObject({ left: null, reset: null });
-  // cas-eae3: a reset already past is a stale fact, not a time to show.
-  expect(accountCapacity([{ name: "weekly", used_percent: null, resets_at: "2026-10-27T16:00:00Z" }], null, now)).toEqual(["weekly usage unknown"]);
+  // The production renderer's readings: a coming reset keeps its number and 12-hour time.
+  const week = readings([{ name: "weekly", used_percent: 38, resets_at: "2026-10-29T16:20:00Z" }], "2026-10-28T15:30:00Z", now)[1]!;
+  expect(week).toMatchObject({ slot: "week", kind: "live", left: 62, reset: accountTime("2026-10-29T16:20:00Z") });
+  // cas-eae3: a reset already past is a stale fact, not a number or a time to show.
+  expect(readings([{ name: "weekly", used_percent: 38, resets_at: "2026-10-27T16:00:00Z" }], "2026-10-26T16:00:00Z", now)[1]).toEqual({ slot: "week", kind: "reset" });
   const zone = process.env.TZ;
   try { process.env.TZ = "America/New_York"; expect(accountTime("2026-10-29T17:10:00Z")).toMatch(/1:10\sPM ET$/); }
   finally { if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone; }

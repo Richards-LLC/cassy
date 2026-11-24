@@ -126,9 +126,10 @@ struct CheckReceipt {
     test: Option<TestReceipt>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 enum RedFirstFailure {
-    Test,
+    Rust { package: String, harness: Option<String>, names: BTreeSet<String> },
+    JavaScript { runner: String, tests: BTreeSet<stability::Identity> },
     Compile,
 }
 
@@ -307,16 +308,24 @@ fn passing_summary_count(log: &str) -> Result<u64> {
     Ok(count)
 }
 
-fn rust_red_first_failure(targeted: bool, widened: bool, status: Option<i32>, log: &Path) -> Option<RedFirstFailure> {
-    let (failure, pattern) = match (targeted, widened, status) {
-        (true, false, Some(100)) => (RedFirstFailure::Test,
-            r"(?m)^ *Summary +\[[^\r\n]*\] +[1-9][0-9]* tests? run: [0-9]+ passed, [1-9][0-9]* failed(?:,|$)"),
-        (false, _, Some(101)) => (RedFirstFailure::Compile, r"(?m)^error: could not compile `[^`]+`"),
-        _ => return None,
-    };
+fn rust_red_first_failure(test: Option<&TargetedTest>, status: Option<i32>, log: &Path) -> Option<RedFirstFailure> {
     let log = std::fs::read_to_string(log).ok()?;
     let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").ok()?;
-    regex::Regex::new(pattern).ok()?.is_match(&ansi.replace_all(&log, "")).then_some(failure)
+    let log = ansi.replace_all(&log, "");
+    if test.is_none() && status == Some(101) {
+        return regex::Regex::new(r"(?m)^error: could not compile `[^`]+`").ok()?
+            .is_match(&log).then_some(RedFirstFailure::Compile);
+    }
+    let test = test.filter(|_| status == Some(100))?;
+    if !regex::Regex::new(r"(?m)^ *Summary +\[[^\r\n]*\] +[1-9][0-9]* tests? run: [0-9]+ passed, [1-9][0-9]* failed(?:,|$)").ok()?.is_match(&log) {
+        return None;
+    }
+    let (package, _) = package_selector(&test.package)?;
+    let binary = test.harness.as_ref().map_or_else(|| package.to_string(), |harness| format!("{package}::{harness}"));
+    let names = regex::Regex::new(r"(?m)^ *FAIL +\[[^\]\r\n]*\] +\( *[0-9]+/ *[0-9]+\) +(\S+) +(\S+)[ \t]*$").ok()?
+        .captures_iter(&log).filter(|row| row[1] == binary && stability::rust::filter_matches(&test.filter, &row[2]))
+        .map(|row| row[2].to_string()).collect::<BTreeSet<_>>();
+    (!names.is_empty()).then(|| RedFirstFailure::Rust { package: test.package.clone(), harness: test.harness.clone(), names })
 }
 
 /// cas-289b: a selected-test log's nextest PASS and Summary lines.
@@ -1204,17 +1213,21 @@ fn receipt_path(cas_root: &Path, repo: &Path, head: &str) -> PathBuf {
 
 impl RedFirstReceipt {
     fn path(&self, cas_root: &Path) -> PathBuf {
-        let kind = match self.failure { RedFirstFailure::Test => "test", RedFirstFailure::Compile => "compile" };
-        let task = hex::encode(Sha256::digest(self.task.as_bytes()));
+        let key = hex::encode(Sha256::digest(serde_json::to_vec(&(&self.task, &self.failure)).expect("red failure encodes")));
         receipt_path(cas_root, &self.repo, &self.head)
-            .with_file_name(format!("{}-red-{kind}-{task}.json", self.head))
+            .with_file_name(format!("{}-red-{key}.json", self.head))
     }
 }
 
-fn record_red_first_failure(cas_root: &Path, repo: &Path, head: &str, failure: RedFirstFailure, evidence: String) -> Result<()> {
-    let Some(task) = crate::factory_capacity_wait::bound_task(cas_root, repo) else { return Ok(()) };
-    if clean_head(repo).ok().as_deref() != Some(head) { return Ok(()) }
-    let record = RedFirstReceipt { head: head.into(), repo: repo.into(), task, failure, evidence };
+fn red_first_task(cas_root: &Path, repo: &Path) -> Option<cas_types::Task> {
+    let id = crate::factory_capacity_wait::bound_task(cas_root, repo)?;
+    let task = crate::store::open_task_store(cas_root).ok()?.get(&id).ok()?;
+    (task.execution_note.as_deref() == Some("test-first")).then_some(task)
+}
+
+fn record_red_first_failure(cas_root: &Path, repo: &Path, head: &str, task: &str, failure: RedFirstFailure, evidence: String) -> Result<bool> {
+    if clean_head(repo).ok().as_deref() != Some(head) { return Ok(false) }
+    let record = RedFirstReceipt { head: head.into(), repo: repo.into(), task: task.into(), failure, evidence };
     let path = record.path(cas_root);
     let directory = path.parent().context("receipt directory")?;
     std::fs::create_dir_all(directory)?;
@@ -1222,15 +1235,14 @@ fn record_red_first_failure(cas_root: &Path, repo: &Path, head: &str, failure: R
     serde_json::to_writer(temporary.as_file_mut(), &record)?;
     temporary.persist(&path)?;
     println!("red-first: FAIL {head} receipt={}", path.display());
-    Ok(())
+    Ok(true)
 }
 
-pub(crate) fn has_red_first_evidence(
-    cas_root: &Path, repo: &Path, task: &str, start_base: Option<&str>, head: &str,
-    ranges: &[(String, String)],
-) -> bool {
-    let Ok(repo) = repo.canonicalize() else { return false };
-    let path = receipt_path(cas_root, &repo, head);
+impl PassingTests<'_> {
+pub(crate) fn has_red_first_evidence(&self, task: &str, start_base: Option<&str>,
+    ranges: &[(String, String)], delivered: &[stability::Identity]) -> bool {
+    let Ok(repo) = self.repo.canonicalize() else { return false };
+    let path = receipt_path(self.cas_root, &repo, self.head);
     let Some(Ok(entries)) = path.parent().map(std::fs::read_dir) else { return false };
     let mut checkpoints = BTreeSet::new();
     for entry in entries.flatten().filter(|entry| {
@@ -1239,17 +1251,29 @@ pub(crate) fn has_red_first_evidence(
     }) {
         let Some(record) = std::fs::read(entry.path()).ok()
             .and_then(|bytes| serde_json::from_slice::<RedFirstReceipt>(&bytes).ok()) else { continue };
-        if record.repo != repo || record.task != task || record.head == head || !valid_git_oid(&record.head)
-            || record.evidence.is_empty() || entry.path() != record.path(cas_root) { continue; }
-        if start_base == Some(record.head.as_str()) && receipt_head_is_ancestor(&repo, &record.head, head) {
+        if record.repo != repo || record.task != task || record.head == self.head || !valid_git_oid(&record.head)
+            || record.evidence.is_empty() || entry.path() != record.path(self.cas_root) { continue; }
+        let at_base = start_base == Some(record.head.as_str()) && receipt_head_is_ancestor(&repo, &record.head, self.head);
+        if matches!(record.failure, RedFirstFailure::Compile) && at_base {
             return true;
         }
-        if record.failure == RedFirstFailure::Test { checkpoints.insert(record.head); }
+        let matched = self.records().iter().any(|(_, package, test)| {
+            let Some(proof) = test.stability.as_ref().filter(|proof| stability::valid(proof)) else { return false; };
+            proof.tests.iter().filter(|identity| delivered.contains(identity)).any(|identity| match &record.failure {
+                RedFirstFailure::Rust { package: failed_package, harness, names } => proof.runner == "nextest"
+                    && package.as_ref() == Some(failed_package) && &test.harness == harness && names.contains(&identity.name),
+                RedFirstFailure::JavaScript { runner, tests } => &proof.runner == runner && tests.iter().any(|failed| identity.selects(failed)),
+                RedFirstFailure::Compile => false,
+            })
+        });
+        if matched && at_base { return true; }
+        if matched { checkpoints.insert(record.head); }
     }
     !checkpoints.is_empty() && ranges.iter().any(|(base, tip)| {
         git_output(&repo, &["rev-list", "--first-parent", &format!("{base}..{tip}")])
             .is_some_and(|commits| commits.lines().any(|commit| checkpoints.contains(commit)))
     })
+}
 }
 
 fn check_receipt_path(cas_root: &Path, repo: &Path, head: &str, no_default_features: bool) -> PathBuf {
@@ -2869,7 +2893,11 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
     #[cfg(unix)]
     discard_shared_fingerprints(&target_dir)?;
     let count_file = slots.join(format!("count-{lane_key}"));
-    let selected_log = {
+    let red_task = if !crate_run && widened_proof.is_none() {
+        red_first_task(&cas_root, &repo).filter(|task| test.is_some() || task.deliverables.factory_branch_start
+            .as_ref().is_some_and(|start| start.base_sha == head))
+    } else { None };
+    let selected_log = if test.is_some() || red_task.is_some() {
         // Each attempt keeps its own untouched Cargo output. Keep it beside
         // redirected raw guard evidence, or with receipts for foreground runs.
         let directory = receipt.parent().context("receipt directory")?.join("logs");
@@ -2879,12 +2907,12 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
             .and_then(|log| log.parent().map(Path::to_path_buf))
             .unwrap_or(directory);
         std::fs::create_dir_all(&directory)?;
-        let (_, path) = tempfile::Builder::new()
+        let file = tempfile::Builder::new()
             .prefix(if test.is_some() { "selected-tests-" } else { "compile-check-" }).suffix(".log")
-            .tempfile_in(directory)?.keep()?;
-        println!("{}: {}", if test.is_some() { "Selected test log" } else { "Compile check log" }, path.display());
-        path
-    };
+            .tempfile_in(directory)?;
+        if test.is_some() { println!("Selected test log: {}", file.path().display()); }
+        Some(file)
+    } else { None };
     if let Some(reason) = &host_path_opt_out {
         println!("Worker test PATH: host opt-out: {reason}");
     }
@@ -2919,14 +2947,18 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
         command
             .env("VERIFIED_TEST_REPO_ROOT", &repo)
             .env("VERIFIED_TEST_COUNT_FILE", &count_file)
-            .env("VERIFIED_TEST_LOG", &selected_log)
+            .env("VERIFIED_TEST_LOG", selected_log.as_ref().expect("targeted test log").path())
             .env("CARGO", cargo);
         command.env("CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS", "120");
         command
     } else {
-        let mut command = Command::new("bash");
-        command.args(["-c", r#""$@" 2>&1 | tee "$VERIFIED_TEST_LOG"; exit "${PIPESTATUS[0]}""#, "worker-compile"])
-            .arg(cargo).arg("check").env("VERIFIED_TEST_LOG", &selected_log);
+        let mut command = if let Some(log) = &selected_log {
+            let mut capture = Command::new("bash");
+            capture.args(["-c", r#""$@" 2>&1 | tee "$VERIFIED_TEST_LOG"; exit "${PIPESTATUS[0]}""#, "worker-compile"])
+                .arg(cargo).env("VERIFIED_TEST_LOG", log.path());
+            capture
+        } else { Command::new(cargo) };
+        command.arg("check");
         // cas-edeb: a nested check must not reuse an outer test's lease runner.
         if let Some(variable) = crate::factory_target_cache::owner::host_runner_env() {
             command.env_remove(variable);
@@ -3035,12 +3067,19 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
     drop(worker_signals);
     drop(slot);
     if !status.success() {
-        if test.is_some() {
-            stability::rust::restore_passing(&cas_root, &repo, &head, &owned_tests, prior_stability, &selected_log)?;
-        }
-        if let Some(failure) = rust_red_first_failure(test.is_some(), widened_proof.is_some(), status.code(), &selected_log) {
-            record_red_first_failure(&cas_root, &repo, &head, failure,
-                format!("{}; log={}", worker_check_command(args), selected_log.display()))?;
+        if let Some(log) = selected_log {
+            if test.is_some() {
+                stability::rust::restore_passing(&cas_root, &repo, &head, &owned_tests, prior_stability, log.path())?;
+            }
+            let recorded = if let Some(task) = red_task
+                && let Some(failure) = rust_red_first_failure(test.as_ref(), status.code(), log.path())
+            {
+                record_red_first_failure(&cas_root, &repo, &head, &task.id, failure,
+                    format!("{}; log={}", worker_check_command(args), log.path().display()))?
+            } else { false };
+            if test.is_some() || recorded {
+                log.keep()?;
+            }
         }
         if test.is_some() && !crate_run && status.code() == Some(ZERO_SELECTION_STATUS) {
             bail!(ZeroSelection(crate::gates::tag("G-61", format!("test: ZERO {head}: the selection ran no test"))));
@@ -3077,7 +3116,7 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
                     inactive: Vec::new(),
                 }),
                 widened: widened_proof,
-                selected_log: Some(selected_log),
+                selected_log: Some(selected_log.expect("targeted test log").keep()?.1),
                 host_path_opt_out,
                 supervisor_recorded: None,
             })

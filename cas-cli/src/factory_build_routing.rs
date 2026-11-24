@@ -325,27 +325,51 @@ pub(crate) fn routed_from(task: &cas_types::Task) -> Option<String> {
     }).map(|plan| plan.source_machine_id)
 }
 
+/// A spawn request that conflicts with the recipe the requester routed.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RecipeMismatch {
+    pub task_id: String,
+    pub field: &'static str,
+    pub routed: String,
+    pub requested: String,
+    recipe: Recipe,
+}
+
+impl RecipeMismatch {
+    pub(crate) const CODE: &'static str = "routed_recipe_mismatch";
+}
+
+impl std::fmt::Display for RecipeMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Routed recipe mismatch for {}: the requester asked for {}={}, this spawn has {}={}. \
+             Nothing was queued. Spawn with the routed recipe ({}) or refuse back to the requester; \
+             never substitute.",
+            self.task_id, self.field, self.routed, self.field, self.requested, self.recipe.render(),
+        )
+    }
+}
+
 /// Receiver side: a task routed here from another machine carries the
 /// requester's recipe. Fill what the spawn request omits; refuse what differs.
-pub(crate) fn apply_route_recipe(task: &cas_types::Task, request: &mut Recipe) -> Result<(), String> {
+pub(crate) fn apply_route_recipe(task: &cas_types::Task, request: &mut Recipe) -> Result<(), RecipeMismatch> {
     let local = cas_types::Agent::get_or_generate_machine_id();
     let Some(plan) = task.notes.lines().rev().find_map(|line| {
         serde_json::from_str::<RoutePlan>(line.strip_prefix(ROUTE_MARKER)?).ok()
     }).filter(|plan| plan.source_machine_id != local) else { return Ok(()) };
     let routed = plan.recipe;
-    for (name, wanted, asked) in [
+    for (field, wanted, asked) in [
         ("cli", &routed.cli, &mut request.cli),
         ("model", &routed.model, &mut request.model),
         ("effort", &routed.effort, &mut request.effort),
         ("lane", &routed.lane, &mut request.lane),
     ] {
         match (wanted, asked.as_ref()) {
-            (Some(wanted), Some(asked)) if wanted != asked => return Err(format!(
-                "Routed recipe mismatch for {}: the requester asked for {name}={wanted}, this spawn has \
-                 {name}={asked}. Nothing was queued. Spawn with the routed recipe ({}) or refuse back to \
-                 the requester; never substitute.",
-                task.id, routed.render(),
-            )),
+            (Some(wanted), Some(asked)) if wanted != asked => return Err(RecipeMismatch {
+                task_id: task.id.clone(), field, routed: wanted.clone(), requested: asked.clone(),
+                recipe: routed.clone(),
+            }),
             (Some(wanted), None) => *asked = Some(wanted.clone()),
             _ => {}
         }
@@ -734,7 +758,10 @@ mod tests {
         assert_eq!(omitted, sonnet_high());
         let mut wrong = Recipe { model: Some("claude-opus-4-8".into()), ..Default::default() };
         let refusal = apply_route_recipe(&task, &mut wrong).unwrap_err();
-        assert!(refusal.contains("model") && refusal.contains("claude-sonnet-5-5"), "{refusal}");
+        assert_eq!(
+            (refusal.field, refusal.routed.as_str(), refusal.requested.as_str()),
+            ("model", "claude-sonnet-5-5", "claude-opus-4-8"),
+        );
         let mut local = Recipe::default();
         apply_route_recipe(&routed(&cas_types::Agent::get_or_generate_machine_id()), &mut local).unwrap();
         assert!(local.is_empty());

@@ -2953,7 +2953,13 @@ impl CasService {
             }
             let mut recipe = crate::factory_build_routing::Recipe::from_request(&req);
             crate::factory_build_routing::apply_route_recipe(&task, &mut recipe)
-                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+                .map_err(|mismatch| {
+                    let mut error = Self::error(ErrorCode::INVALID_PARAMS, mismatch.to_string());
+                    error.data = Some(serde_json::json!({"code": crate::factory_build_routing::RecipeMismatch::CODE,
+                        "task_id": mismatch.task_id, "field": mismatch.field,
+                        "routed": mismatch.routed, "requested": mismatch.requested}));
+                    error
+                })?;
             (req.cli, req.model, req.effort, req.lane) = (recipe.cli, recipe.model, recipe.effort, recipe.lane);
             preassigned_task = Some(task.clone());
             if task.is_terminal() {

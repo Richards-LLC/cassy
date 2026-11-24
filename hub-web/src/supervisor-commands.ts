@@ -44,7 +44,7 @@ export class SlashCommands {
   private readonly panel: HTMLElement;
   private open = false;
   private escaped = false;
-  private confirming = false;
+  private confirming?: typeof commands[number];
   private pending = false;
   private anchor?: HTMLElement;
   private readonly events = new AbortController();
@@ -101,15 +101,29 @@ export class SlashCommands {
   show(anchor?: HTMLElement): void {
     if (this.confirming) return;
     if (anchor && this.anchor === anchor && !this.panel.hidden) { this.close(); return; }
-    this.anchor = anchor;
-    if (anchor) {
-      document.body.append(this.panel); this.panel.classList.add("supervisor-command-dropdown");
-      anchor.setAttribute("aria-controls", this.panel.id); anchor.setAttribute("aria-expanded", "true");
-    } else this.mountAtComposer();
+    if (anchor) this.mountAtAnchor(anchor); else this.mountAtComposer();
     this.open = true; this.escaped = false; this.sync(); this.positionDropdown();
     this.panel.querySelector<HTMLButtonElement>("button")?.focus();
   }
-  close(): void { this.confirming = false; this.open = false; this.escaped = true; this.panel.hidden = true; this.anchor?.setAttribute("aria-expanded", "false"); }
+  close(): void { this.confirming = undefined; this.open = false; this.escaped = true; this.panel.hidden = true; this.anchor?.setAttribute("aria-expanded", "false"); }
+  preserveConfirmation(): ((replacement: SlashCommands) => void) | undefined {
+    const command = this.confirming;
+    if (!command) return;
+    const anchorId = this.anchor?.id;
+    const active = document.activeElement;
+    const focus = this.panel.contains(active) ? active?.matches("[data-command-confirm]") ? "confirm" : "cancel" : undefined;
+    return replacement => {
+      const anchor = anchorId && document.getElementById(anchorId);
+      if (anchor) replacement.mountAtAnchor(anchor);
+      replacement.renderConfirmation(command, focus);
+      replacement.positionDropdown();
+    };
+  }
+  private mountAtAnchor(anchor: HTMLElement): void {
+    this.anchor = anchor;
+    document.body.append(this.panel); this.panel.classList.add("supervisor-command-dropdown");
+    anchor.setAttribute("aria-controls", this.panel.id); anchor.setAttribute("aria-expanded", "true");
+  }
   private mountAtComposer(): void {
     this.anchor?.setAttribute("aria-expanded", "false"); this.anchor = undefined;
     this.panel.classList.remove("supervisor-command-dropdown"); this.panel.removeAttribute("style");
@@ -156,7 +170,6 @@ export class SlashCommands {
   }
   /** Claim only exact supported command tokens; other text uses the normal send. */
   submit(): boolean {
-    if (this.confirming) return true;
     // The normal composer trims chat text; /mcp must stay semantic even
     // when pasted with surrounding whitespace, rather than open Claude's menu.
     const trimmed = this.input.value.trim();
@@ -165,7 +178,7 @@ export class SlashCommands {
     const command = commands.find(item => `/${item.id}` === token || (token.startsWith("/") && COMMAND_ALIASES[token.slice(1)] === item.id));
     if (!command) return false;
     this.escaped = false; this.open = true; this.sync();
-    if (this.pending || this.options.unavailable()) return true;
+    if (this.confirming || this.pending || this.options.unavailable()) return true;
     const supported = commandsForHarness(this.options.harness()).find(item => item.id === command.id);
     if (this.input.value.trimEnd() === token && supported) this.choose(supported);
     return true;
@@ -178,12 +191,15 @@ export class SlashCommands {
     const unavailable = this.options.unavailable();
     if (unavailable) { this.panel.replaceChildren(); this.notice(unavailable); return; }
     if (!command.confirm) { void this.run(command.id, false); return; }
-    this.confirming = true;
+    this.renderConfirmation(command, "cancel");
+  }
+  private renderConfirmation(command: typeof commands[number], focus?: "cancel" | "confirm"): void {
+    this.confirming = command;
     this.panel.hidden = false; this.panel.replaceChildren();
     const confirmation = document.createElement("div"); confirmation.setAttribute("role", "alertdialog");
     const subject = document.createElement("strong"); subject.textContent = this.options.label();
     subject.id = `${this.panel.id}-subject`; confirmation.setAttribute("aria-labelledby", subject.id);
-    const consequence = document.createElement("p"); consequence.textContent = command.confirm;
+    const consequence = document.createElement("p"); consequence.textContent = command.confirm ?? null;
     consequence.id = `${this.panel.id}-consequence`; confirmation.setAttribute("aria-describedby", consequence.id);
     // cas-c009: content-width actions, Cancel first and the command last.
     const actions = document.createElement("div"); actions.className = "supervisor-command-actions";
@@ -192,12 +208,11 @@ export class SlashCommands {
     const confirm = document.createElement("button"); confirm.type = "button"; confirm.className = "primary"; confirm.dataset.commandConfirm = command.id;
     confirm.textContent = command.label; confirm.onclick = () => { void this.run(command.id, true); };
     actions.append(cancel, confirm); confirmation.append(subject, consequence, actions); this.panel.append(confirmation);
-    // Every confirmed command can end or reset the session: a stray Enter cancels.
-    cancel.focus();
+    if (focus) (focus === "confirm" ? confirm : cancel).focus({ preventScroll: true });
   }
   private async run(command: SupervisorCommand, confirmed: boolean): Promise<void> {
     if (this.pending) return;
-    this.confirming = false;
+    this.confirming = undefined;
     this.pending = true;
     this.panel.querySelectorAll("button").forEach(button => { button.disabled = true; });
     const original = this.input.value;

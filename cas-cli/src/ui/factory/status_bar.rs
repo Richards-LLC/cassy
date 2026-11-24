@@ -580,6 +580,11 @@ impl StatusBar {
                 styles.text_warning.add_modifier(Modifier::BOLD),
             ));
         }
+        // cas-8c4f: the supervisor's own MCP build, durable until a reload.
+        if let Some(badge) = &app.supervisor_cassy_badge {
+            right_spans.push(Span::raw(" │ "));
+            right_spans.push(Span::styled(badge.clone(), styles.text_muted));
+        }
         right_spans.push(Span::raw(" │ "));
         right_spans.push(Span::styled(
             format!("Cassy v{}", env!("CARGO_PKG_VERSION")),

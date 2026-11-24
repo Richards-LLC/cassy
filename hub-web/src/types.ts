@@ -80,6 +80,8 @@ export interface HubSession {
   machine_online?: boolean;
   /** This supervisor's observed MCP binary, never the hub's running version. */
   mcp_version?: string;
+  /** When that MCP process started: the moment its build loaded (cas-8c4f). */
+  mcp_loaded_at?: string;
   /** The Cassy binary installed on this supervisor's machine. */
   installed_version?: string;
 }

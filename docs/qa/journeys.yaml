@@ -178,6 +178,11 @@ bug_families:
     tasks: [cas-99e7]
     invariants: [HUB-J27-NATIVE-IDLE-COMMANDS]
     journeys: [HUB-J27]
+  reload-cassy-claude-codex-badge:
+    title: Reload Cassy waits for a quiet moment, confirms Codex's supervisor restart, proves the installed build and leaves a durable loaded-build badge
+    tasks: [cas-8c4f]
+    invariants: [HUB-J27-RELOAD-PROOF]
+    journeys: [HUB-J27]
   card-reload-and-command-follow-through:
     title: Reload Cassy is visible on skewed supervisor cards; header commands open beside their button and stale busy receipts resolve or dismiss
     tasks: [cas-fd9ff]
@@ -3029,6 +3034,10 @@ invariants:
     statement: Older Claude MCP cards expose Reload Cassy directly and the existing conversation-header menu always retains it; ordinary cards add no action line or extra Tab stop; card and typed mcp share the existing command and truthful receipt. Header commands open beside their button. A completed command shows its outcome as a self-clearing toast with no card; refused status stays until dismissed; submitted dismissal does not cancel or duplicate a mutation, and accepted retries clear earlier busy refusals.
     check: Run the reload and dismiss-reload cases in supervisor-commands.journey.ts at desktop and phone, assert card version stays old while queued and changes only with observed receipt/catalog evidence, no chat sends, anchored dropdown bounds, refusal dismissal and post-turn completion. Run ProjectNavigation and SupervisorCommandSession Vitest guards for unsupported harnesses and concurrent commands.
     bug: {task: cas-fd9ff}
+  HUB-J27-RELOAD-PROOF:
+    statement: Reload Cassy sends nothing when the live MCP already runs the installed build; otherwise it queues until the native turn ends and shows the waiting animation. Claude reconnects natively; Codex restarts its supervisor only after confirmation, with workers kept. Success needs a replacement live MCP whose version equals cas --version; a mismatch is a failure with a next step. Brief store contention never becomes a failure. The open conversation header and factory status bar show the loaded build and Eastern load time until the next reload.
+    check: Run reload_cassy_requires_a_replacement_live_registry_pid_and_version; run the HUB-J27 Claude reload and Codex confirm cases in supervisor-commands.journey.ts at desktop and phone, asserting the waiting animation while queued or submitted, one confirmed Codex frame, the mismatch receipt and the header badge after the observed catalog.
+    bug: {task: cas-8c4f}
   HUB-J27-DISMISS-CANCEL:
     statement: Dismiss cancels the caller's queued Finish or interactive receipt daemon-side without PTY input. A closed native chooser releases its stale flag before a later command, while genuinely submitted commands and native modals still prevent unsafe input. Refusals identify the blocking command and its recovery.
     check: Run queued_finish_can_be_cancelled_without_typing_then_exit_is_accepted_cas_f1a2 and native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser; run the HUB-J27 queued Finish dismissal before Exit at desktop and 390 px, assert one caller-owned cancel frame, no chat sends, and no dismissal before the daemon receipt.

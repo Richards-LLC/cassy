@@ -128,7 +128,8 @@ async fn delivery_identity_follows_retargets_and_adoption_cas_faa9() {
         name: &'static str,
         created_on: &'static str,
         epic_owns_train_a: bool,
-        // 6456's row predates the recorded prior-target list.
+        // 6456's row predates the recorded prior-target list; it then goes
+        // through an explicit rebind_branch before close.
         legacy_row: bool,
         // GH #2307: the successor target is deleted before close.
         delete_successor: bool,
@@ -174,6 +175,17 @@ async fn delivery_identity_follows_retargets_and_adoption_cas_faa9() {
                 [&id],
             ).unwrap();
             assert!(tasks.get(&id).unwrap().deliverables.prior_work_targets.is_empty());
+            // Then the supervisor approves a recovery lane: the start that
+            // alone names train A is replaced, so the writer must keep it.
+            let recovery = format!("factory/test-agent-{id}");
+            git(&repo, &["checkout", "-qb", &recovery]);
+            git(&repo, &["push", "-q", "origin", &recovery]);
+            let rebound = fx.as_supervisor(serde_json::json!({
+                "action": "rebind_branch", "id": id, "branch": recovery,
+                "reason": "Approve the recovery lane",
+            })).await;
+            let start = tasks.get(&id).unwrap().deliverables.factory_branch_start.unwrap();
+            assert_eq!(start.branch, recovery, "{}: {rebound}", row.name);
         }
         if row.delete_successor {
             git(&repo, &["push", "-q", "origin", "--delete", "epic/train-b"]);

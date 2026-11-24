@@ -12,7 +12,17 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// The only dashboard paths Cassy may request. Every request is a GET.
-const READ_PATHS: &[&str] = &["/v0/management/auth-files"];
+const READ_PATHS: &[&str] = &["/v0/management/auth-files", INSPECTION_RUNS];
+/// The hub's latest codex-inspection runs: its timer reads each account's usage
+/// through the provider's zero-cost usage endpoint. Cassy never starts a run.
+const INSPECTION_RUNS: &str = "/v0/management/codex-inspection/runs?limit=5";
+const INSPECTION_RUN: &str = "/v0/management/codex-inspection/runs/";
+
+/// Allowlisted reads only: the fixed paths, or one inspection run by its numeric id.
+fn is_read_path(path: &str) -> bool {
+    READ_PATHS.contains(&path)
+        || path.strip_prefix(INSPECTION_RUN).is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DashboardError {
@@ -29,7 +39,7 @@ pub(crate) struct Dashboard {
 impl Dashboard {
     /// The single request method: GET of an allowlisted read path.
     pub(crate) fn get(&self, path: &str) -> Result<serde_json::Value, DashboardError> {
-        if !READ_PATHS.contains(&path) {
+        if !is_read_path(path) {
             return Err(DashboardError::NotReadOnly);
         }
         let agent = ureq::AgentBuilder::new()
@@ -154,19 +164,56 @@ pub(crate) struct HubQuota {
 pub(crate) type UsageSource = &'static str;
 
 pub(crate) fn shared_quota() -> SharedQuota {
-    let settings = cas_mux::gateway::user_settings();
+    shared_quota_with(&cas_mux::gateway::user_settings())
+}
+
+fn shared_quota_with(settings: &cas_types::factory_gateway::FactoryGatewayConfig) -> SharedQuota {
     let Some(dashboard) = settings.dashboard.as_deref().filter(|url| !url.trim().is_empty()) else {
         return SharedQuota::Off;
     };
-    match dashboard_client(dashboard, settings.dashboard_key_file.as_deref()).and_then(|client| {
-        client.get(READ_PATHS[0]).map_err(|error| match error {
-            DashboardError::NotReadOnly => "refused a non-read dashboard path".to_string(),
-            DashboardError::Failed(reason) => reason,
-        })
-    }) {
-        Ok(files) => SharedQuota::Read(quotas(&files)),
-        Err(reason) => SharedQuota::Unreachable(home_relative(&reason)),
+    let client = match dashboard_client(dashboard, settings.dashboard_key_file.as_deref()) {
+        Ok(client) => client,
+        Err(reason) => return SharedQuota::Unreachable(home_relative(&reason)),
+    };
+    match client.get(READ_PATHS[0]) {
+        // The inspection is a freshness top-up: without it, traffic signals still count.
+        Ok(files) => SharedQuota::Read(quotas(&files, latest_inspection(&client).as_ref())),
+        Err(DashboardError::NotReadOnly) => SharedQuota::Unreachable("refused a non-read dashboard path".into()),
+        Err(DashboardError::Failed(reason)) => SharedQuota::Unreachable(home_relative(&reason)),
     }
+}
+
+/// The newest completed codex-inspection run, with its per-account results.
+fn latest_inspection(client: &Dashboard) -> Option<serde_json::Value> {
+    let runs = client.get(INSPECTION_RUNS).ok()?;
+    let run = runs["items"].as_array()?.iter().find(|run| run["status"] == "completed")?;
+    client.get(&format!("{INSPECTION_RUN}{}", run["id"].as_u64()?)).ok()
+}
+
+/// An inspection run's quota windows per auth index, with when they were read.
+fn inspection_windows(run: &serde_json::Value) -> HashMap<String, (Vec<UsageWindow>, DateTime<Utc>)> {
+    let finished = run["finishedAtMs"].as_i64().or_else(|| run["run"]["finishedAtMs"].as_i64());
+    let mut out = HashMap::new();
+    for result in run["results"].as_array().into_iter().flatten() {
+        let Some(index) = result["authIndex"].as_str().filter(|index| !index.is_empty()) else { continue };
+        let Some(read) = result["createdAtMs"].as_i64().or(finished).and_then(DateTime::from_timestamp_millis) else { continue };
+        let windows: Vec<UsageWindow> = result["quotaWindows"].as_array().into_iter().flatten().filter_map(|window| {
+            let name = match window["limitWindowSeconds"].as_i64()? {
+                18_000 => "5h",
+                604_800 => "weekly",
+                _ => return None,
+            };
+            Some(UsageWindow {
+                name: name.into(),
+                used_percent: window["usedPercent"].as_f64(),
+                resets_at: window["resetAtMs"].as_i64().and_then(DateTime::from_timestamp_millis),
+            })
+        }).collect();
+        if !windows.is_empty() {
+            out.insert(index.to_string(), (windows, read));
+        }
+    }
+    out
 }
 
 impl SharedQuota {
@@ -217,13 +264,15 @@ impl SharedQuota {
     }
 }
 
-/// Auth-file `quota.signals` → usage windows, per provider's header family.
-fn quotas(files: &serde_json::Value) -> Vec<HubQuota> {
+/// Auth-file `quota.signals` → usage windows, per provider's header family,
+/// replaced by the hub's inspection read of the same account when that is newer.
+fn quotas(files: &serde_json::Value, inspection: Option<&serde_json::Value>) -> Vec<HubQuota> {
+    let inspected = inspection.map(inspection_windows).unwrap_or_default();
     let mut out = Vec::new();
     for file in files["files"].as_array().into_iter().flatten() {
         let (Some(provider), Some(email)) = (file["provider"].as_str(), file["email"].as_str()) else { continue };
         let quota = &file["quota"];
-        let Some(observed_at) = quota["observed_at"].as_str().and_then(|at| DateTime::parse_from_rfc3339(at).ok()) else { continue };
+        let traffic_at = quota["observed_at"].as_str().and_then(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc));
         let signal = |key: &str| -> Option<f64> {
             let value = &quota["signals"][key];
             value.as_f64().or_else(|| value.as_str()?.trim().parse().ok())
@@ -250,11 +299,15 @@ fn quotas(files: &serde_json::Value) -> Vec<HubQuota> {
                 .collect(),
             _ => continue,
         };
-        if windows.is_empty() {
-            continue;
-        }
+        let traffic = traffic_at.filter(|_| !windows.is_empty()).map(|at| (windows, at));
+        let inspection = file["auth_index"].as_str().and_then(|index| inspected.get(index)).cloned();
+        let newest = match (traffic, inspection) {
+            (Some(traffic), Some(inspection)) => Some(if inspection.1 > traffic.1 { inspection } else { traffic }),
+            (traffic, inspection) => traffic.or(inspection),
+        };
+        let Some((windows, observed_at)) = newest else { continue };
         let account_id = file["id_token"]["chatgpt_account_id"].as_str().map(str::trim).filter(|id| !id.is_empty()).map(str::to_string);
-        out.push(HubQuota { provider: provider.into(), email: email.trim().to_lowercase(), account_id, windows, observed_at: observed_at.with_timezone(&Utc) });
+        out.push(HubQuota { provider: provider.into(), email: email.trim().to_lowercase(), account_id, windows, observed_at });
     }
     out
 }
@@ -365,7 +418,7 @@ mod tests {
             {"provider": "codex", "email": "daniel@example.com", "id_token": {"chatgpt_account_id": "acct-hub"}, "quota": {"observed_at": "2026-11-23T18:12:55-05:00", "signals": {
                 "X-Codex-Primary-Window-Minutes": "10080", "X-Codex-Primary-Used-Percent": "86", "X-Codex-Primary-Reset-At": "1795702350",
                 "X-Codex-Secondary-Window-Minutes": "0", "X-Codex-Secondary-Used-Percent": "0"}}},
-        ]})));
+        ]}), None));
         // Codex rollouts, oldest first: only the newest one's session_meta names the login.
         let machine = |codex_rollouts: &[&str]| {
             let home = tempfile::tempdir().unwrap();
@@ -456,6 +509,63 @@ mod tests {
         assert_eq!((inventory.status, inventory.inventory), ("off", "ok"));
         assert_eq!(inventory.accounts.len(), 1);
         assert!(cas_mux::gateway::readiness(&settings).is_err(), "no endpoint: this machine's workers stay direct");
+    }
+
+    /// cas-966b: with no Codex traffic for 9 h, the hub's own inspection read
+    /// (its timer, zero-cost usage endpoint) refreshes the login through the
+    /// real quota source; Cassy only GETs the runs and never starts one.
+    #[test]
+    fn a_newer_inspection_run_refreshes_a_login_with_no_traffic() {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+        let now = Utc::now();
+        let stale = (now - chrono::Duration::hours(9)).to_rfc3339();
+        let fresh_ms = (now - chrono::Duration::minutes(4)).timestamp_millis();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dashboard = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut request = [0u8; 2048];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let line = String::from_utf8_lossy(&request[..read]).lines().next().unwrap_or_default().to_string();
+                log.lock().unwrap().push(line.clone());
+                let body = if line.starts_with("GET /v0/management/auth-files ") {
+                    serde_json::json!({"files": [{"provider": "codex", "email": "pip@example.com", "auth_index": "fb45", "id_token": {"chatgpt_account_id": "acct-1"},
+                        "quota": {"observed_at": stale, "signals": {"X-Codex-Primary-Window-Minutes": "10080", "X-Codex-Primary-Used-Percent": "88"}}}]})
+                } else if line.starts_with("GET /v0/management/codex-inspection/runs?limit=5 ") {
+                    serde_json::json!({"items": [{"id": 7, "status": "running"}, {"id": 6, "status": "completed"}]})
+                } else if line.starts_with("GET /v0/management/codex-inspection/runs/6 ") {
+                    serde_json::json!({"finishedAtMs": fresh_ms, "results": [{"authIndex": "fb45", "quotaWindows": [
+                        {"limitWindowSeconds": 604800, "usedPercent": 90.0, "resetAtMs": 1795702350000i64},
+                        {"limitWindowSeconds": 18000, "usedPercent": 12.0}]}]})
+                } else {
+                    serde_json::json!({"error": "unexpected"})
+                }.to_string();
+                let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+            }
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let key = temp.path().join("admin.key");
+        std::fs::write(&key, "admin-key\n").unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let settings = cas_types::factory_gateway::FactoryGatewayConfig {
+            dashboard: Some(dashboard.clone()),
+            dashboard_key_file: Some(key.display().to_string()),
+            ..Default::default()
+        };
+        let SharedQuota::Read(quotas) = shared_quota_with(&settings) else { panic!("hub not read") };
+        let login = &quotas[0];
+        assert_eq!(login.observed_at.timestamp_millis(), fresh_ms, "the newer inspection read wins over 9 h old traffic");
+        let window = |name: &str| login.windows.iter().find(|window| window.name == name).and_then(|window| window.used_percent);
+        assert_eq!((window("weekly"), window("5h")), (Some(90.0), Some(12.0)));
+        assert!(seen.lock().unwrap().iter().all(|line| line.starts_with("GET ")), "{:?}", seen.lock().unwrap());
+        // Starting a run is the hub's timer's job: the client refuses that path outright.
+        let client = Dashboard { endpoint: dashboard, key: "k".into() };
+        for path in ["/v0/management/codex-inspection/run", "/v0/management/codex-inspection/runs/6/cancel"] {
+            assert_eq!(client.get(path).unwrap_err(), DashboardError::NotReadOnly, "{path}");
+        }
     }
 
     /// Team plans are counted, never listed; labels are masked.

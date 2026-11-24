@@ -3419,7 +3419,7 @@ process.exit(ok ? 0 : 1);
         let proof = execute_tests(cas_root.path(), repo.path(), &head, "jest", None, &tests, None, &[]).unwrap();
         assert_eq!((proof.consecutive_passes, &proof.tests), (5, &tests));
         // The prescribed rerun names that config, and running it as printed passes the same way.
-        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), &tests);
+        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), "HEAD", &tests);
         assert_eq!(prescribed.len(), 1);
         assert!(prescribed[0].contains(&format!("-- jest --config {config} {spec}`")), "{prescribed:?}");
         let args: Vec<String> = ["jest", "--config", config, spec].map(String::from).into();
@@ -3525,13 +3525,13 @@ process.exit(listed.length ? 0 : 1);
         let mut tests: Vec<Identity> = journeys.iter().map(|journey| id(journey, "journey")).collect();
         tests.push(id(unit, "catalog"));
         let listings = || std::fs::read_to_string(repo.path().join("hub-web/.listings")).unwrap_or_default().lines().count();
-        let prescribed = super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), &tests);
+        let prescribed = super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), "HEAD", &tests);
         assert_eq!(prescribed, [
             format!("`cas factory worker-check --cas-root /cas -- playwright {}`", journeys.join(" ")),
             format!("`cas factory worker-check --cas-root /cas -- vitest {unit}`"),
         ]);
         let uncached = listings();
-        let cached = with_listing_cache(|| super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), &tests));
+        let cached = with_listing_cache(|| super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), "HEAD", &tests));
         assert_eq!(cached, prescribed, "the cache changes no answer");
         assert_eq!(listings() - uncached, 2, "one listing per config, not per file ({uncached} without the cache)");
     }
@@ -3598,7 +3598,7 @@ process.exit(listed.length ? 0 : 1);
         assert!(super::super::stability::missing(&passing(), &tests).is_empty());
         // The prescribed command names that config, and runs as printed.
         let config = "playwright.hermetic.config.js";
-        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), &tests);
+        let prescribed = super::super::stability::rerun_commands(cas_root.path(), repo.path(), "HEAD", &tests);
         assert_eq!(prescribed.len(), 1);
         assert!(prescribed[0].contains(&format!("-- playwright --config {config} {spec}`")), "{prescribed:?}");
         let args: Vec<String> = ["playwright", "--config", config, spec].map(String::from).into();
@@ -3646,10 +3646,7 @@ process.exit(listed.length ? 0 : 1);
         assert_eq!(runner_hint(repo.path(), "bin/a.test.ts"), Some("vitest"));
         assert_eq!(runner_hint(repo.path(), "bare/a.test.ts"), None);
 
-        let commands = super::super::stability::rerun_commands(
-            Path::new("/cas"),
-            repo.path(),
-            &[id("bare/a.test.ts", "a")],
+        let commands = super::super::stability::rerun_commands(Path::new("/cas"), repo.path(), "HEAD", &[id("bare/a.test.ts", "a")],
         );
         let argv: Vec<_> = commands
             .concat()

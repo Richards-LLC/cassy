@@ -252,7 +252,7 @@ pub(crate) fn requirements(repo: &Path, head: &str, target: &str, paths: &[Strin
 
 /// The command that proves these changed tests, one per runner (cas-1468).
 /// A file whose runner is unknown gets each valid form as its own command.
-pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -> Vec<String> {
+pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, head: &str, tests: &[Identity]) -> Vec<String> {
     let command = |runner: &str, files: &str| format!(
         "`cas factory worker-check --cas-root {} -- {runner} {files}`", cas_root.display());
     // Files group by runner and by the config that lists them: Jest (GH #2058),
@@ -262,10 +262,11 @@ pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -
     let mut rust = false;
     // cas-fcb1: each changed Rust test's own crate, harness and exact name.
     let mut named: BTreeMap<(String, Option<String>), BTreeSet<&str>> = BTreeMap::new();
+    let owners = rust::owners(repo, head, tests).unwrap_or_default();
     for test in tests {
         if test.path.ends_with(".rs") {
-            match rust_selection(repo, &test.path) {
-                Some(selection) => { named.entry(selection).or_default().insert(test.name.as_str()); }
+            match owners.get(test) {
+                Some(selection) => { named.entry(selection.clone()).or_default().insert(test.name.as_str()); }
                 None => rust = true,
             }
         } else if let Some(runner) = super::javascript::runner_hint(repo, &test.path) {
@@ -303,28 +304,6 @@ pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -
             command("nextest run -p <crate> --lib -E", "'test(<name>)'")));
     }
     commands
-}
-
-/// The crate that owns a Rust test file and its integration-test harness
-/// (`tests/<name>.rs` or `tests/<name>/main.rs`); `None` harness is `--lib`.
-fn rust_selection(repo: &Path, path: &str) -> Option<(String, Option<String>)> {
-    let file = repo.join(path);
-    let mut directory = file.clone();
-    while directory.pop() && directory.starts_with(repo) {
-        let Some(name) = std::fs::read_to_string(directory.join("Cargo.toml")).ok()
-            .and_then(|body| toml::from_str::<toml::Value>(&body).ok())
-            .and_then(|manifest| manifest.get("package")?.get("name")?.as_str().map(str::to_owned))
-        else { continue };
-        let parts: Vec<String> = file.strip_prefix(&directory).ok()?.components()
-            .map(|part| part.as_os_str().to_string_lossy().into_owned()).collect();
-        let harness = match parts.as_slice() {
-            [tests, file] if tests == "tests" => file.strip_suffix(".rs").map(str::to_owned),
-            [tests, harness, main] if tests == "tests" && main == "main.rs" => Some(harness.clone()),
-            _ => None,
-        };
-        return Some((name, harness));
-    }
-    None
 }
 
 /// A failed rerun may not leave an earlier overlapping five-pass proof usable.

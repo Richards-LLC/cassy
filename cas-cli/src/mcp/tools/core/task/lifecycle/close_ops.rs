@@ -49561,6 +49561,9 @@ mod no_code_close_tests;
 #[cfg(test)]
 #[path = "close_ops/blast_radius_park_tests.rs"]
 mod blast_radius_park_tests;
+#[cfg(test)]
+#[path = "close_ops/g61_family_close_tests.rs"]
+mod g61_family_close_tests;
 
 #[cfg(test)]
 #[path = "close_ops/merge_only_delivery_tests.rs"]

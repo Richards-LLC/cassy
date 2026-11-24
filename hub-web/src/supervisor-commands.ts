@@ -195,9 +195,9 @@ export class SlashCommands {
     const returnTo = this.anchor ?? this.input;
     try {
       await this.options.run(command, confirmed);
-      // An autocomplete choice consumes its prefix as well as an exact token.
+      // An autocomplete choice consumes its prefix, an exact token or an alias.
       // Header commands and text edited while the request waits keep their draft.
-      if (!this.anchor && this.input.value === original && original.startsWith("/") && `/${command}`.startsWith(original.trimEnd())) {
+      if (!this.anchor && this.input.value === original && original.trim().startsWith("/") && commandMatches(command, original.trim().slice(1))) {
         this.input.value = ""; this.input.dispatchEvent(new Event("input", { bubbles: true }));
       }
       this.close(); returnTo.focus();

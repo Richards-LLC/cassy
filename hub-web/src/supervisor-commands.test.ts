@@ -21,12 +21,14 @@ describe("supervisor slash commands", () => {
       if (harness === "claude") {
         await Promise.resolve();
         expect(run).toHaveBeenCalledWith("mcp", false);
+        await vi.waitFor(() => expect(input.value).toBe(""));
       } else if (harness === "codex") {
         // cas-8c4f: a Codex reload restarts the supervisor, so it runs only after confirmation.
         expect(run).not.toHaveBeenCalled();
         document.querySelector<HTMLButtonElement>('[data-command-confirm="mcp"]')!.click();
         await Promise.resolve();
         expect(run).toHaveBeenCalledWith("mcp", true);
+        await vi.waitFor(() => expect(input.value).toBe(""));
       } else {
         expect(run).not.toHaveBeenCalled();
         if (harness) expect(document.querySelector('[role="status"]')?.textContent).toContain(harness);

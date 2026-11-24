@@ -261,6 +261,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const request = mutations()[1].body as { client_ref: string; command: string };
         expect(request.command).toBe("mcp");
         expect(hub.sends).toHaveLength(0);
+        // A second Enter must not reload again: the alias leaves the composer.
+        await expect(input).toHaveValue("");
         const receipt = commandReceipts(page);
         await expect(receipt).toHaveAttribute("data-phase", "submitted");
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 3303, version 9.99.2 (previous PID 2202).", output: "", interactive: false } } });

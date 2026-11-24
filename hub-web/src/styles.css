@@ -2894,8 +2894,6 @@ button.chip:disabled { cursor: default; }
 .launch-cli-option.is-disabled { color: var(--text-mid); cursor: not-allowed; }
 .launch-account-out { flex-wrap: wrap; row-gap: var(--space-2); cursor: default; color: var(--text-mid); }
 .launch-account-out:hover { background: var(--panel); }
-.launch-account-label { display: flex; align-items: center; gap: var(--space-3); min-width: 0; flex: 1 1 100%; }
-.launch-account-label input { flex: none; width: 18px; height: 18px; margin: 0; }
 .launch-account-state { color: var(--text-mid); font-size: var(--fs-xs); }
 .launch-login { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; padding-inline-start: calc(18px + var(--space-3)); }
 .launch-login code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-xs); }

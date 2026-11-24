@@ -22,7 +22,6 @@ export class AccountUsageChecks {
   constructor(private request: CheckAccountUsage, private root: () => HTMLElement | undefined, private completed: () => void) {}
   reset(): void { this.controller.abort(); this.controller = new AbortController(); this.states.clear(); }
   private key(machine: string, account: string): string { return JSON.stringify([machine, account]); }
-  hasResult(machine: string, account: string): boolean { return Boolean(this.states.get(this.key(machine, account))?.result); }
   /** The latest explicit check for this account; callers draw its windows as meters. */
   result(machine: string, account: string): CheckedAccountUsage | undefined { return this.states.get(this.key(machine, account))?.result; }
   /**

@@ -1,3 +1,0 @@
-### Fixed — Environment-gated changed tests in stability proof
-
-- **Changed tests registered as `(env ? it : it.skip)`, `skipIf` or `runIf` no longer block park when their environment is off** — The capped JavaScript stability run records such a case as inactive when every repeat skips it, lists it on its own `stability: INACTIVE` line and in the receipt note, and never counts it as passing. Before this fix, an opt-in live eval skipped by design failed stability on all 5 runs. A run in which every changed test is inactive is still refused with the environment to set, and an active gated test that fails still fails.

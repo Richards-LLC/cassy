@@ -2824,6 +2824,26 @@ bug_families:
     found: '2026-11-23'
     tasks: [cas-d24f]
     journeys: [FACTORY-CLOSE]
+  reexec-held-by-stacked-reconcile-reads:
+    title: Factory reexec refuses behind reconcile reads that stacked while the external lane was held
+    found: '2026-11-24'
+    tasks: [cas-ef58]
+    journeys: [FACTORY-SUPERVISE]
+  same-version-build-identity:
+    title: A version string alone identifies a build, so a rebuild at the same version reads as already running
+    found: '2026-11-23'
+    tasks: [cas-724e]
+    journeys: [HUB-J27]
+  show-work-journey-flake:
+    title: The HUB-J25 show-work journey case fails intermittently on the release path (element not found after work rows arrive), so both of its cases are removed until a race-free rewrite
+    found: '2026-11-24'
+    tasks: [cas-929df]
+    journeys: [HUB-J25]
+  status-read-error-as-command-outcome:
+    title: A failed status read during a reconnect is shown as the held command's own outcome
+    found: '2026-11-24'
+    tasks: [cas-6b21]
+    journeys: [HUB-J27]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

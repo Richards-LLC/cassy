@@ -2083,8 +2083,6 @@ pub fn invalidate_verification_dispatch_for_repository_drift(
     Ok(invalidated)
 }
 
-/// Retire the latest dispatch of a no-code report whose recorded proof no
-/// longer matches the report, so the next close or merge mints a new review.
 pub fn invalidate_verification_dispatch_for_proof_drift(
     cas_dir: &Path,
     dispatch_id: &str,

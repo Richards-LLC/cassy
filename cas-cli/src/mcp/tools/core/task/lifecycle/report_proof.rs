@@ -1,5 +1,3 @@
-//! A no-code report's review proof and the one gate every route to Closed or
-//! to a merge asks before any exemption.
 use cas_types::{Task, TaskType, VerificationDispatchState, VerificationProvenance, VerificationStatus};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -64,8 +62,6 @@ fn verification_on(root: &Path) -> bool {
         && verification_policy(supervisor_harness_from_env(), worker_harness_from_env()).task_required()
 }
 
-/// `stored` is the task as saved, `effective` the task this request would
-/// save. A refusal is the G-68 text; callers tag and return it.
 pub(crate) fn require_report_verdict(root: &Path, stored: &Task, effective: &Task) -> Result<ReportGate, String> {
     if !verification_on(root) {
         return Ok(ReportGate::Exempt);

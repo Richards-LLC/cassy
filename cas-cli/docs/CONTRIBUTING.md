@@ -1539,23 +1539,30 @@ not yet parked, an expired task-only dispatch requests a fresh pending review
 on the next close, even if ordinary verification configuration changed. It
 never grants approval. A no-code report can supply a corrected portable
 `external_ref` inline on that close; its reference and fresh dispatch are saved
-together. For a no-code spike, or a no-code task with a demo statement, every
-dispatch created by an ordinary close, a release-parent close or a pre-merge
-candidate review records what it reviews (`reviewed_proof`, migration m302): the
-proof reference and the id and SHA-256 of each committed artifact
-(`artifacts::proof::committed_task_artifacts`). The store writes it in the
-dispatch insert, and the automatic verifier is handed that recorded inventory,
-never a later listing; an artifact it can no longer fetch with the recorded
-digest stops the launch. Light depth does not exempt these tasks at close or
-before a merge, and `task update status=closed` refuses them (G-68). An ordinary close of such a task accepts only the latest typed
-dispatch, resolved, with an Approved verdict whose record equals the current
-reference and artifacts; the verdict is read once and an unreadable one refuses
-the close (G-68). A missing or different record, a Skipped verdict or a legacy
-row without a dispatch is diagnostic only: the close requests a new review, or
-G-70 refuses a landed factory delivery. Unpublished rows and a peer report's
-import, in progress or complete, never change the inventory, a revoked artifact
-leaves it, task notes other than validated publication records are never read
-for it, and mechanical no-code chores are exempt. Active cycles remain immutable, and receipt-bound delivery or epic
+together. A no-code spike, or a no-code task with a demo statement, is a
+covered report. `task/lifecycle/report_proof.rs` holds its typed proof
+(`ReportProof`: the proof reference and the sorted id and SHA-256 of each
+committed artifact) and the one gate, `require_report_verdict`, which close,
+`task update status=closed`, pre-merge preparation and release close call
+before any exemption. Coverage is sticky: the stored task, the edited task or a
+latest dispatch carrying `reviewed_proof` (migration m302) each make it
+covered. The gate returns Bound only for the latest dispatch, resolved, with an
+Approved non-legacy verdict whose recorded proof equals the current one; it
+holds on an active dispatch with an equal proof, retires a dispatch whose
+recorded proof differs (`invalidate_verification_dispatch_for_proof_drift`) and
+asks for a new review otherwise. Every read error and every inventory warning
+refuses with G-68. A covered close ignores published-delivery recovery, the
+shipped-timeout waiver, `supervisor_override`, rapid-response sampling, the
+mechanical tier, the release verdict and light depth, and recomputes the proof
+under the terminal-close lock. The automatic verifier is handed the recorded
+reference and artifacts; a recorded artifact that is revoked, missing from the
+committed list or has another digest stops the launch with
+`verifier_dispatch_proof_drift`, retires the dispatch and names the retry that
+mints a new one, while a fetch error retries the same dispatch. Approval carry
+never revives a retired report dispatch. Negative-result, evidence-only and
+decision closes, the operator recovery decision, the web human close and
+turning verification off stay outside the gate, epics are not covered, and
+mechanical no-code chores are exempt. Active cycles remain immutable, and receipt-bound delivery or epic
 timeout recovery still requires the existing supervisor path. Measured Tier 0,
 light-depth and other existing policy exemptions remain explicit in close output;
 identity availability is reported separately from the exemption actually applied.

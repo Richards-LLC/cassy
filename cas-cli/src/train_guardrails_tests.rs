@@ -155,9 +155,9 @@ fn production_cut_proposal_requires_pass_for_the_frozen_candidate() {
     let _env = TestEnvGuard::temp_home();
     let (dir, _origin) = repo_with_origin();
     let repo = dir.path();
-    let cas_dir = train(repo, &[("cas-a", TaskStatus::Closed)]);
+    let cas_dir = train(repo, &[("cas-a", TaskStatus::AwaitingMerge)]);
     std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id='candidate-fixture'\n[release]\nauto_cut_max_per_day=0\n").unwrap();
-    merge_child(repo, &cas_dir, "cas-a", &[]);
+    merge_child(repo, &cas_dir, "cas-a", &["index.html"]);
     let stale = run(repo, &["rev-parse", TRAIN]);
     run(repo, &["commit", "--allow-empty", "-qm", "refresh candidate"]);
     let candidate = run(repo, &["rev-parse", TRAIN]);
@@ -167,16 +167,24 @@ fn production_cut_proposal_requires_pass_for_the_frozen_candidate() {
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut task = tasks.get("cas-a").unwrap();
     task.origin_project = Some("candidate-fixture".into());
-    task.deliverables.factory_branch_anchor = Some(run(repo, &["rev-parse", "factory/cas-a"]));
+    let anchor = run(repo, &["rev-parse", "factory/cas-a"]);
+    task.deliverables.factory_branch_anchor = Some(anchor.clone());
     tasks.update(&task).unwrap();
+    cas_store::defer_qa_batch_evidence(&cas_dir, &task.id, &anchor).unwrap();
     let mut epic = tasks.get(EPIC).unwrap();
-    epic.origin_project = task.origin_project;
+    epic.origin_project = task.origin_project.clone();
     tasks.update(&epic).unwrap();
     let recorder = open_agent_store(&cas_dir).unwrap().get("sup-id").unwrap();
     let artifacts = cas_store::SqliteArtifactStore::open(&cas_dir).unwrap();
-    let approve = |head: &str| {
+    std::fs::write(repo.join("capture.png"), include_bytes!("../../vendor/ghostty/images/icons/icon_16.png")).unwrap();
+    let receive = |head: &str, build: &str, passed: bool| {
         let ledger = repo.join("LEDGER.md");
-        std::fs::write(&ledger, format!("schema: 2\nbuild: {head}\ncovers: cas-a\ncells=1; PASS=1; FAIL=0; NOT EXERCISED=0\nlabels: fixture=1\n{}\n| M01 | delivery | written | present | PASS | fixture | cas-a.txt | - |\n", crate::qa_ledger::HEADER)).unwrap();
+        let (count, row) = if passed {
+            ("PASS=1; NOT EXERCISED=0", "| M01 | browser | page visible | visible: page | PASS | real-build | capture.png | - |")
+        } else {
+            ("PASS=0; NOT EXERCISED=1", "| M01 | browser | page visible | not run | NOT EXERCISED: browser unavailable | real-build | - | - |")
+        };
+        std::fs::write(&ledger, format!("schema: 2\nbuild: {build}\ncovers: cas-a\ncells=1; FAIL=0; {count}\nlabels: real-build=1\n{}\n{row}\n", crate::qa_ledger::HEADER)).unwrap();
         let context = crate::artifacts::PublishContext {
             store: &artifacts,
             roots: crate::artifacts::paths::PublishRoots::new(&cas_dir, &repo.join("artifacts"), EPIC),
@@ -186,16 +194,21 @@ fn production_cut_proposal_requires_pass_for_the_frozen_candidate() {
         let receipt = crate::qa_batch::prepare_receipt(
             &cas_dir, &recorder, "external-reviewer", &["cas-a".into()], head, &artifact.id,
             &ledger, cas_store::QA_BATCH_RECEIPT_SCHEMA,
-        ).unwrap();
-        cas_store::record_qa_batch_receipt(&cas_dir, &receipt).unwrap();
+        )?;
+        cas_store::record_qa_batch_receipt(&cas_dir, &receipt).map_err(|error| error.to_string())
     };
-    let propose = || notify_train_cuts(&cas_dir, &BTreeSet::new(), Utc::now()).unwrap();
+    let propose = || notify_train_cuts(&cas_dir, &BTreeSet::new(), Utc::now() + chrono::Duration::hours(3)).unwrap();
 
     assert_eq!(propose(), 0);
-    approve(&stale);
+    receive(&stale, &stale, true).unwrap();
     assert_eq!(propose(), 0);
-    approve(&candidate);
+    assert!(receive(&candidate, &stale, true).unwrap_err().contains("PRODUCTION_BATCH_QA_BUILD_MISMATCH"));
+    assert!(receive(&candidate, &candidate, false).unwrap_err().contains("PRODUCTION_BATCH_QA_BROWSER_PASS_REQUIRED"));
+    receive(&candidate, &candidate, true).unwrap();
     assert_eq!(propose(), 1);
+    run(repo, &["checkout", "-q", "main"]);
+    run(repo, &["merge", "--ff-only", TRAIN]);
+    assert!(crate::qa_batch::satisfying_deferred_receipt(&cas_dir, &task, repo, "main", &anchor).unwrap().is_some());
 }
 
 /// GH #1635: no notice asks for a cut without a green verdict at the tip.

@@ -407,6 +407,119 @@ fn issue_delivery(f: &Fixture, id: &str, target: &str) -> (PathBuf, String) {
     (checkout, lane)
 }
 
+async fn park_for_repeat_review_gh2373(f: &Fixture, id: &str, target: &str, train: Option<&Task>) {
+    let (checkout, lane) = issue_delivery(f, id, target);
+    if let Some(train) = train {
+        open_task_store(&f.cas_dir()).unwrap().add_dependency(&Dependency::new(
+            id.into(), train.id.clone(), DependencyType::ParentChild,
+        )).unwrap();
+    }
+    std::fs::write(checkout.join("feature.rs"), "pub fn feature() {}\n").unwrap();
+    git(&checkout, &["add", "feature.rs"]);
+    git(&checkout, &["commit", "-qm", &format!("feat({id}): implement transition")]);
+    git(&checkout, &["push", "-q", "origin", &lane]);
+    let response = call(&f.worker, serde_json::json!({
+        "action":"close", "id":id, "reason":"Transition implemented",
+    })).await;
+    assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{response}");
+}
+
+async fn reject_repeat_review_gh2373(f: &Fixture, id: &str, finding: &str) {
+    let owner = "nocode-supervisor-session";
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &f.cas_dir(), id, owner, owner, &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10), false,
+    ).unwrap();
+    let response = f.supervisor.verification(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"add", "task_id":id, "dispatch_id":dispatch.id, "status":"rejected", "summary":finding,
+    })).unwrap())).await.unwrap();
+    assert_ne!(response.is_error, Some(true), "{response:?}");
+    let verdict = cas_store::get_verification_for_dispatch(&f.cas_dir(), &dispatch.id).unwrap().unwrap();
+    assert_eq!(verdict.status, cas_types::VerificationStatus::Rejected);
+}
+
+#[tokio::test]
+async fn repeat_rejection_requires_whole_flow_review_gh2373() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-2373";
+    env.set("CAS_AGENT_ROLE", "worker");
+    park_for_repeat_review_gh2373(&f, id, "main", None).await;
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    reject_repeat_review_gh2373(&f, id, "The abort transition is unreachable").await;
+    reject_repeat_review_gh2373(&f, id, "A stale queue can claim the successor").await;
+    let request = serde_json::json!({"action":"request_changes", "id":id, "reason":"Correct the mismatches"});
+    let assignment = serde_json::json!({"action":"update", "id":id, "assignee":"replacement"});
+    for attempt in [&request, &assignment] {
+        let refusal = f.supervisor.task(Parameters(serde_json::from_value((*attempt).clone()).unwrap()))
+            .await.unwrap_err();
+        assert!(crate::gates::codes_in(&refusal.message).contains(&"G-170"), "{refusal:?}");
+    }
+    let parked = f.task(id);
+    assert_eq!(parked.status, TaskStatus::AwaitingMerge);
+    assert_eq!(parked.assignee.as_deref(), Some(WORKER));
+
+    call(&f.supervisor, serde_json::json!({"action":"notes", "id":id, "note_type":"decision",
+        "notes":"whole-flow review: art-missing"})).await;
+    let refusal = f.supervisor.task(Parameters(serde_json::from_value(request.clone()).unwrap()))
+        .await.unwrap_err();
+    assert!(crate::gates::codes_in(&refusal.message).contains(&"G-170"), "{refusal:?}");
+
+    let path = f.artifact(id);
+    std::fs::write(&path, "| Actor | Operation | Mismatch |\n| --- | --- | --- |\n| Owner | Abort | Unreachable |\n| Queue | Claim | Stale generation admitted |\n").unwrap();
+    f.supervisor.artifact(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"publish", "task_id":id, "path":path,
+    })).unwrap())).await.unwrap();
+    let artifacts = cas_store::SqliteArtifactStore::open(&f.cas_dir()).unwrap().list_for_task(id).unwrap();
+    let [review] = artifacts.as_slice() else { panic!("expected one review artifact: {artifacts:?}"); };
+    call(&f.supervisor, serde_json::json!({"action":"notes", "id":id, "note_type":"decision",
+        "notes":format!("whole-flow review: {}", review.id)})).await;
+    call(&f.supervisor, request).await;
+    assert_eq!(f.task(id).status, TaskStatus::Open);
+    open_agent_store(&f.cas_dir()).unwrap().register(&Agent::new_with_role(
+        "replacement-session".into(), "replacement".into(), AgentRole::Worker,
+    )).unwrap();
+    call(&f.supervisor, assignment).await;
+    let returned = f.task(id);
+    assert_eq!(returned.assignee.as_deref(), Some("replacement"));
+    assert!(returned.notes.matches(&review.id).count() >= 2);
+}
+
+#[tokio::test]
+async fn repeat_rejection_detaches_release_train_unless_kept_gh2373() {
+    let mut env = TestEnvGuard::temp_home();
+    for keep in [false, true] {
+        let target = "epic/release-train";
+        let f = fixture(&mut env, target);
+        let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+        config.set("factory.release_train", "true").unwrap();
+        config.save(&f.cas_dir()).unwrap();
+        let store = open_task_store(&f.cas_dir()).unwrap();
+        let mut train = Task::new("cas-2374-train".into(), "Release train".into());
+        train.task_type = TaskType::Epic;
+        train.labels.push("release-train".into());
+        train.branch = Some(target.into());
+        train.deliverables.work_target = assigned("unused", TaskType::Task, "main").deliverables.work_target;
+        f.put(&train);
+        let id = "cas-2374";
+        env.set("CAS_AGENT_ROLE", "worker");
+        park_for_repeat_review_gh2373(&f, id, target, Some(&train)).await;
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        reject_repeat_review_gh2373(&f, id, "The abort transition is unreachable").await;
+        assert_eq!(store.get_parent_epic(id).unwrap().unwrap().id, train.id);
+        if keep {
+            call(&f.supervisor, serde_json::json!({"action":"notes", "id":id, "note_type":"decision",
+                "notes":format!("keep release train: {}: Required correction for this cut", train.id)})).await;
+        }
+        reject_repeat_review_gh2373(&f, id, "A stale queue can claim the successor").await;
+        assert_eq!(store.get_parent_epic(id).unwrap().map(|parent| parent.id), keep.then(|| train.id.clone()));
+        assert_eq!(f.task(id).deliverables.work_target.unwrap().target_branch, if keep { target } else { "main" });
+        let queue = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
+        assert_eq!(queue.peek_all(50).unwrap().iter().filter(|row|
+            row.summary.as_deref() == Some("repeat-review-train-detached") && row.target == "supervisor").count(), usize::from(!keep));
+    }
+}
+
 /// Ordinary parks must make all close-reason proof portable before handing
 /// the delivery to a verifier on another machine (cas-dae1).
 #[tokio::test(flavor = "multi_thread")]

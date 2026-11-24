@@ -454,7 +454,7 @@ async fn c4491f_late_relay_read_is_ignored_and_its_rerun_reports() {
 /// GH #2327: a slow external lane let the worker-task-queue reconcile read
 /// time out and resubmit every 30 s; each resubmit stacked as durable work
 /// (452 after 3.8 h) and held every reexec. Resubmits now replace the one
-/// waiting, and reexec flushes.
+/// waiting rerun, and reexec flushes.
 #[tokio::test]
 async fn gh2327_reconcile_resubmits_on_a_held_external_lane_do_not_hold_reexec() {
     use super::relay_jobs::RelayOutput;
@@ -475,7 +475,7 @@ async fn gh2327_reconcile_resubmits_on_a_held_external_lane_do_not_hold_reexec()
     }
     let waiting = daemon.queue_jobs.job_lanes().unwrap().lane_stats().into_iter()
         .map(|stats| stats.queued).sum::<usize>();
-    assert!(waiting <= 1, "resubmits stacked behind the held lane: {waiting} waiting");
+    assert!(waiting <= 2, "resubmits stacked behind the held lane: {waiting} waiting (queued head plus one rerun)");
     daemon.queue_jobs.flush_for_reexec(&cas_dir, Duration::from_millis(500)).await
         .expect("reexec must not wait on reconcile reads");
     release.send(()).unwrap();

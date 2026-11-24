@@ -3558,6 +3558,8 @@ for line in sys.stdin:
                 os._exit(0)
             if name == "violet_post":
                 mode = args.get("text", "posted")
+                if mode == "drop":
+                    os._exit(0)
                 state = mode if mode in ("outcome_unknown", "not_posted") else ("not_posted" if mode == "not_posted_detail" else "posted")
                 with open(state_path, "w") as handle:
                     json.dump({"request_id": request_id, "state": state, "mismatch": mode == "mismatch", "diagnostic": mode == "not_posted_detail"}, handle)
@@ -3774,7 +3776,10 @@ for line in sys.stdin:
     /// that did reach Violet before the drop is reconciled, never resent.
     #[tokio::test]
     async fn violet_post_on_a_closed_transport_is_resent_once_cas_71bf() {
-        for (before, text) in [("idle_close", "posted"), ("open", "transport")] {
+        // GH #1968: when the one resend also meets a closed transport the
+        // intent is still unconsumed, so the answer says to resend the same ID.
+        for (before, text, sent, state) in [("idle_close", "posted", 1, "posted"), ("open", "transport", 1, "posted"),
+            ("open", "drop", 2, "not_posted")] {
             let dir = tempfile::tempdir().unwrap();
             let engine = ProxyEngine::from_configs(HashMap::from([(
                 "violet".into(), fake_upstream_mode(dir.path(), true),
@@ -3787,12 +3792,15 @@ for line in sys.stdin:
                 "channel": "C123", "kind": "message", "text": text, "request_id": request_id,
             }).as_object().unwrap().clone())).await.unwrap();
             let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
-            assert_eq!((body["state"].as_str(), body["request_id"].as_str()), (Some("posted"), Some(request_id)), "{before}: {body}");
+            assert_eq!((body["state"].as_str(), body["request_id"].as_str()), (Some(state), Some(request_id)), "{text}: {body}");
+            if state == "not_posted" {
+                assert_eq!((body["reason"].as_str(), body["error"]["retryable"].as_bool()), (Some("request_not_found"), Some(true)), "{body}");
+            }
             let posts: Vec<Value> = std::fs::read_to_string(dir.path().join("calls.log.requests")).unwrap().lines()
                 .map(|line| serde_json::from_str::<Value>(line).unwrap())
                 .filter(|call| call["name"] == "violet_post").collect();
-            assert_eq!(posts.len(), 1, "{before}: Violet received exactly one post: {posts:?}");
-            assert_eq!(posts[0]["request_id"], request_id);
+            assert_eq!(posts.len(), sent, "{text}: {posts:?}");
+            assert!(posts.iter().all(|post| post["request_id"] == request_id), "{posts:?}");
             engine.shutdown().await;
         }
     }

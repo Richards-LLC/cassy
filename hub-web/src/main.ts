@@ -2673,7 +2673,7 @@ function syncCassyBadge(): void {
   let badge = host.querySelector<HTMLElement>(":scope > #conversation-cassy");
   if (!text || !parts) { if (badge) { badge.remove(); scheduleConversationLayout(); } return; }
   if (badge?.dataset.badge === text) return;
-  if (!badge) { badge = document.createElement("span"); badge.id = "conversation-cassy"; badge.className = "supervisor-version loaded conversation-cassy"; badge.dataset.testid = "conversation-cassy"; host.append(badge); }
+  if (!badge) { badge = document.createElement("span"); badge.id = "conversation-cassy"; badge.className = "supervisor-version loaded"; badge.dataset.testid = "conversation-cassy"; host.append(badge); }
   badge.dataset.badge = text; badge.title = text;
   const spoken = (words: string) => { const span = document.createElement("span"); span.className = "sr-only"; span.textContent = words; return span; };
   badge.replaceChildren(spoken("cassy "), `${parts.version} · `, spoken("loaded "), parts.time, spoken(" ET"));

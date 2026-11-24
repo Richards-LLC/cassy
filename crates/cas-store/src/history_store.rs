@@ -324,7 +324,8 @@ CREATE TABLE IF NOT EXISTS history_epochs (
     ended_at TEXT,
     pid INTEGER,
     exe_deleted INTEGER NOT NULL DEFAULT 0,
-    recorded_at TEXT NOT NULL
+    recorded_at TEXT NOT NULL,
+    build TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_history_epochs_started_at
@@ -348,7 +349,8 @@ pub const HISTORY_EPOCHS_SCHEMA_STATEMENTS: &[&str] = &[
         ended_at TEXT,
         pid INTEGER,
         exe_deleted INTEGER NOT NULL DEFAULT 0,
-        recorded_at TEXT NOT NULL
+        recorded_at TEXT NOT NULL,
+        build TEXT
     )",
     "CREATE INDEX IF NOT EXISTS idx_history_epochs_started_at
         ON history_epochs(started_at)",
@@ -790,6 +792,10 @@ pub struct HistoryEpoch {
     /// was replaced or removed under the running process.
     pub exe_deleted: bool,
     pub recorded_at: String,
+    /// The process's compile-time build hash (`CAS_GIT_HASH`), which tells two
+    /// builds of one `version` apart (cas-724e). `None` for rows written before
+    /// the column existed.
+    pub build: Option<String>,
 }
 
 impl HistoryEpoch {
@@ -1582,6 +1588,13 @@ impl HistoryStore for SqliteHistoryStore {
             }
         }
         conn.execute_batch(HISTORY_EPOCHS_SCHEMA)?;
+        // Same idempotent-ALTER reasoning as above; m301 does it too.
+        let has_build = conn
+            .prepare("SELECT 1 FROM pragma_table_info('history_epochs') WHERE name = 'build'")?
+            .exists([])?;
+        if !has_build {
+            conn.execute_batch("ALTER TABLE history_epochs ADD COLUMN build TEXT")?;
+        }
         Ok(())
     }
 
@@ -3057,7 +3070,8 @@ impl HistoryStore for SqliteHistoryStore {
                             END,
                             version = COALESCE(?4, version),
                             ended_at = MAX(COALESCE(?5, ''), COALESCE(ended_at, '')),
-                            exe_deleted = MAX(exe_deleted, ?6)
+                            exe_deleted = MAX(exe_deleted, ?6),
+                            build = COALESCE(?7, build)
                       WHERE id = ?1",
                     params![
                         id,
@@ -3066,6 +3080,7 @@ impl HistoryStore for SqliteHistoryStore {
                         epoch.version,
                         epoch.ended_at,
                         i64::from(epoch.exe_deleted),
+                        epoch.build,
                     ],
                 )?;
                 // MAX() of two empty strings writes '' where NULL is meant.
@@ -3079,8 +3094,8 @@ impl HistoryStore for SqliteHistoryStore {
                 tx.execute(
                     "INSERT INTO history_epochs (
                          epoch_kind, binary_path, binary_mtime, version,
-                         started_at, ended_at, pid, exe_deleted, recorded_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                         started_at, ended_at, pid, exe_deleted, recorded_at, build
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         epoch.epoch_kind,
                         epoch.binary_path,
@@ -3091,6 +3106,7 @@ impl HistoryStore for SqliteHistoryStore {
                         epoch.pid,
                         i64::from(epoch.exe_deleted),
                         now,
+                        epoch.build,
                     ],
                 )?;
                 tx.last_insert_rowid()
@@ -3120,7 +3136,7 @@ impl HistoryStore for SqliteHistoryStore {
             "SELECT id, epoch_kind, binary_path,
                     CASE WHEN exe_deleted != 0 THEN NULL ELSE binary_mtime END,
                     version, started_at,
-                    ended_at, pid, exe_deleted, recorded_at
+                    ended_at, pid, exe_deleted, recorded_at, build
                FROM history_epochs
               WHERE (?1 IS NULL OR datetime(started_at) >= datetime(?1))
               ORDER BY datetime(started_at) ASC, id ASC
@@ -3139,6 +3155,7 @@ impl HistoryStore for SqliteHistoryStore {
                     pid: row.get(7)?,
                     exe_deleted: row.get::<_, i64>(8)? != 0,
                     recorded_at: row.get(9)?,
+                    build: row.get(10)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -3151,7 +3168,7 @@ impl HistoryStore for SqliteHistoryStore {
             "SELECT id, epoch_kind, binary_path,
                     CASE WHEN exe_deleted != 0 THEN NULL ELSE binary_mtime END,
                     version, started_at,
-                    ended_at, pid, exe_deleted, recorded_at
+                    ended_at, pid, exe_deleted, recorded_at, build
                FROM history_epochs
               WHERE epoch_kind = ?1
                 AND datetime(COALESCE(ended_at, started_at)) >= datetime(?2)
@@ -3173,6 +3190,7 @@ impl HistoryStore for SqliteHistoryStore {
                         pid: row.get(7)?,
                         exe_deleted: row.get::<_, i64>(8)? != 0,
                         recorded_at: row.get(9)?,
+                        build: row.get(10)?,
                     })
                 },
             )?
@@ -4364,6 +4382,7 @@ mod tests {
             pid: Some(pid),
             exe_deleted: false,
             recorded_at: started.into(),
+            build: None,
         }
     }
 

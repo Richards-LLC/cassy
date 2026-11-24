@@ -32,6 +32,23 @@ export function teamFinding(states: readonly string[], decisions: number): strin
   return decisions ? `${staffing} ${decisions}\u00a0${decisions === 1 ? "needs" : "need"}\u00a0you.` : staffing;
 }
 
+/** A worker's reported route in words; no report says so rather than guessing. */
+export function routeLabel(route: FleetAgent["route"]): string {
+  if (!route) return "Route not reported";
+  if (route.kind === "gateway") return "Home gateway";
+  if (route.kind === "fallback") return `Direct · gateway fallback${route.reason ? `: ${route.reason}` : ""}`;
+  return "Direct";
+}
+
+/** The session's routes from worker reports, once any worker used the gateway. The supervisor never routes. */
+export function routeSummary(agents: readonly (FleetAgent | undefined)[]): string | undefined {
+  const count = (kind: string) => agents.filter(agent => agent?.route?.kind === kind).length;
+  const gateway = count("gateway"), fallback = count("fallback");
+  if (!gateway && !fallback) return undefined;
+  const parts = [gateway && `${gateway} via home gateway`, fallback && `${fallback} fell back to direct`, count("direct") && `${count("direct")} direct`].filter(Boolean);
+  return `Workers: ${parts.join(", ")}. The supervisor runs direct.`;
+}
+
 /** Display clock only; this component has no connection or polling authority. */
 export function updateTeamElapsed(root: HTMLElement, now = Date.now()): void {
   for (const node of root.querySelectorAll<HTMLElement>("[data-task-start]")) {
@@ -62,7 +79,7 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
   // Heartbeats and raw activity are not rendered. They cannot remount lanes,
   // restart their animation, or replace a control under the pointer.
   const signature = JSON.stringify([snapshot.actions, snapshot.stale, snapshot.unavailable, release,
-    workers.map(worker => [worker.name, worker.work, workerState(worker, snapshot.tasks), lanes.find(lane => lane.worker === worker)?.reason, worker.agent?.harness, worker.agent?.model, worker.agent?.task_started_at, worker.agent?.recent_trail])]);
+    workers.map(worker => [worker.name, worker.work, workerState(worker, snapshot.tasks), lanes.find(lane => lane.worker === worker)?.reason, worker.agent?.harness, worker.agent?.model, worker.agent?.task_started_at, worker.agent?.recent_trail, worker.agent?.route])]);
   if (root.dataset.signature === signature) { updateTeamElapsed(root); return; }
   root.dataset.signature = signature;
   const text = (tag: string, value: string, className?: string): HTMLElement => {
@@ -80,6 +97,8 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
   const notice = text("p", snapshot.stale ?? "Live staffing from this supervisor’s session", "team-freshness");
   notice.setAttribute("role", "status");
   const head = document.createElement("div"); head.className = "team-head"; head.append(heading, notice);
+  const routes = routeSummary(workers.map(worker => worker.agent));
+  if (routes) head.append(text("p", routes, "team-routes"));
   root.replaceChildren(head);
   if (snapshot.unavailable) { root.append(text("p", snapshot.unavailable, "team-empty")); return; }
   root.append(releaseHeader(document, release));
@@ -103,9 +122,12 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
     if (reason) lane.dataset.urgency = priority === 2 ? "critical" : "waiting";
     const identity = document.createElement("div"); identity.className = "team-identity";
     const model = text("span", [worker.agent?.harness ?? "Harness not reported", worker.agent?.model ?? "Model not reported"].join(" · "), "team-model");
+    model.dataset.testid = "team-model";
     model.dataset.modelReported = String(Boolean(worker.agent?.model)); if (worker.agent?.model) model.dataset.model = worker.agent.model;
-    identity.append(text("h3", worker.name), model);
-    const badge = text("span", state, `team-state status-chip status-chip--${statusClass(state)}`); badge.setAttribute("aria-label", `${worker.name}: ${state}`);
+    const route = text("span", routeLabel(worker.agent?.route), "team-route");
+    route.dataset.route = worker.agent?.route?.kind ?? "unreported";
+    identity.append(text("h3", worker.name), model, route);
+    const badge = text("span", state, `team-state status-chip status-chip--${statusClass(state)}`); badge.setAttribute("aria-label", `${worker.name}: ${state}`); badge.dataset.testid = "team-state";
     if (priorStates.has(worker.name) && priorStates.get(worker.name) !== state) badge.classList.add("team-state--changed");
     const work = text("p", worker.work, "team-task");
     const elapsed = text("p", "Task time not reported", "team-elapsed");

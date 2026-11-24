@@ -17,9 +17,11 @@ Before the close reason, read `task action=show id=<task-id>` and apply installe
 
 ## Phase 1: Completeness
 
+Run every phase and step below on every review, even after one finds a blocking defect: a completeness failure never ends the review early. One verdict carries every finding from every phase, so the worker fixes them in one round; any blocking finding still rejects.
+
 ### Step 1: Check the close reason against the acceptance criteria
 
-Give each acceptance-criteria item one verdict: **VERIFIED** (proof pasted in the close reason or notes, or reproduced by you), **NOT VERIFIED** (not checked; say why), or **INCONCLUSIVE** (checked, evidence ambiguous). "Looks good" is not proof. NOT VERIFIED is acceptable only where the close names an owner by design (full-suite execution follows the gate's ownership rule; targeted tests have capped worker receipts). Reject an item skipped, stubbed, deferred, partly done, INCONCLUSIVE or unowned, and a vague "done enough" close.
+Give each acceptance-criteria item one verdict: **VERIFIED** (proof pasted in the close reason or notes, or reproduced by you), **NOT VERIFIED** (not checked; say why), or **INCONCLUSIVE** (checked, evidence ambiguous). "Looks good" is not proof. NOT VERIFIED is acceptable only where the close names an owner by design (full-suite execution follows the gate's ownership rule; targeted tests have capped worker receipts). A lane impact plan's `own` expression belongs to lane CI: accept receipts for its `Worker proof` commands and leave its `lane CI only` parts to lane CI, never demanding a receipt for a literal regex or `or` expression. Reject an item skipped, stubbed, deferred, partly done, INCONCLUSIVE or unowned, and a vague "done enough" close.
 
 ### Step 2: Compare the delivery with the plan
 
@@ -46,7 +48,7 @@ Apply **Code review procedure** in `skills/cas-qa-craft/references/verifier-evid
 
 Apply **Ruling fit** and **Fake seams** in that reference to every delivery; report `RULING-FIT` and `FAKE-SEAM`. A known contradiction or impossible fake is `NOT VERIFIED` and blocking even with passing tests and no separate runtime reproduction; approve only when both are VERIFIED or NOT APPLICABLE, and escalate unresolved evidence as the reference directs.
 
-## Phase 2: Quality (only when Phase 1 passes)
+## Phase 2: Quality (also when Phase 1 fails)
 
 Tests assert behavior or stable machine identifiers such as error codes and rule IDs. Never require human-readable wording, word lists, canonical sentences or phrase presence; changing prose alone must not fail a test. Exact caller payloads and machine protocol bytes remain data-integrity checks. Fixed safety text needs a named consumer that requires those bytes; a writing preference is insufficient. Do not record wording preferences as findings or reusable rule candidates. Require a reproduced behavior failure or a stable identifier mismatch.
 
@@ -64,7 +66,7 @@ Report `SIMPLICITY: VERIFIED|NOT VERIFIED: <finding>`. Overbuilt work is rejecte
 
 Follow `verifier-evidence-gate.md` → Verdict recording for the issue template and categories. Record exactly one `verification action=add task_id=<id> status=<approved|rejected|error> confidence=<0.0-1.0> files="file1,file2" summary="<verdict, Blocking, Improvements (non-blocking)>" issues='<JSON issues>'`.
 
-- After the overall verdict line, `summary` lists the `PLAN-FIT:` line with its mapping, the `SIMPLICITY:` line, then one `VERIFIED|NOT VERIFIED|INCONCLUSIVE: <criterion>` line per acceptance-criteria item.
+- After the overall verdict line, `summary` lists the `PLAN-FIT:`, `RULING-FIT:`, `FAKE-SEAM:` and `SIMPLICITY:` lines, then one `VERIFIED|NOT VERIFIED|INCONCLUSIVE: <criterion>` line per acceptance-criteria item. `issues` lists every blocking finding from every phase; never hold one back for a later round.
 - **Reject plan misses**: `PLAN-FIT: NOT VERIFIED` is blocking even when every card criterion is VERIFIED; a known miss cannot become a `supervisor_call` or a follow-up.
 - Every finding carries `triage` with `severity` (`money`, `data_loss`, `broken`, `awkward`, `cosmetic`), `reach` (`main`, `secondary`, `theoretical`), `journey` and `repro`. Main means a project-declared main journey with a runtime reproduction. Code-read-only findings are theoretical; backlog them rather than holding a correct delivery. Money/data loss on a declared main journey is the theoretical exception. Honor the inherited operator focus.
 - **Reject findings rated high or above** (including critical) when reproduced on a reachable journey, or any reproduced silent failure of this task's own behaviour under a realistic condition, regardless of its rating. Set `status=rejected`, start the summary with `REJECTED`, and record the finding with `"severity":"blocking"`, naming the condition, evidence and failed outcome; happy-path tests or a follow-up do not override this.

@@ -231,6 +231,8 @@ impl DaemonInitPhase {
         // Step 1: Loading configuration
         self.send_progress("Loading configuration", 1, 6, false)?;
         let cas_dir = find_cas_root()?;
+        // The worker route is fixed for this session now, not read live at each spawn.
+        cas_mux::gateway::pin_at_start(&cas_dir);
         self.send_progress("Loading configuration", 1, 6, true)?;
 
         // Step 2: Setting up worktree manager

@@ -1,0 +1,34 @@
+{
+  "review_date": "2026-11-24",
+  "review_context": "Synthetic read-only policy evaluation, not an authenticated dispatch. qa.mode=per_task. The task evidence directory contains no LEDGER.md. The task, close reason and files below are the complete tool responses for this fixture; no plan, rule, journey or faked output seam applies. The cited test run is the worker's capped receipt. Source line numbers start at one. Do not invent test runs or contact production services.",
+  "task": {
+    "id": "fixture-all-findings",
+    "acceptance_criteria": "1) refund(account, amount) adds amount back to account['credits']. 2) refund appends a {'kind': 'refund', 'amount': amount} entry to account['ledger'].",
+    "demo_statement": "Refund 2 credits to a 1-credit account: the balance reads 3 and the ledger lists the refund.",
+    "execution_note": "none"
+  },
+  "close_reason": "PASS abc1234: refund implemented; tests/test_refund.py 1 passed.",
+  "delivery": {
+    "src/refund.py": "def _format_amount(amount):\n    return f'{amount:.2f}'\n\n\ndef refund(account, amount):\n    account['credits'] += amount\n    return account\n",
+    "tests/test_refund.py": "from src.refund import refund\n\n\ndef test_refund_restores_credits():\n    account = {'credits': 1, 'ledger': []}\n    assert refund(account, 2)['credits'] == 3\n"
+  },
+  "expected": {
+    "status": "rejected",
+    "blocking": [
+      {
+        "gate": "Step 0A QA evidence",
+        "finding": "no LEDGER.md for the demo_statement"
+      },
+      {
+        "gate": "acceptance criterion 2",
+        "file": "src/refund.py",
+        "line": 5
+      },
+      {
+        "gate": "SIMPLICITY",
+        "file": "src/refund.py",
+        "line": 1
+      }
+    ]
+  }
+}

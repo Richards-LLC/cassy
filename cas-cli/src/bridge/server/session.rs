@@ -316,6 +316,9 @@ fn session_agents(
                 effort: identity.effort,
                 task_started_at,
                 recent_trail,
+                route: (agent.role == AgentRole::Worker).then(|| {
+                    super::types::WorkerRouteJson::from_transport(agent.metadata.get("worker_transport").map(String::as_str))
+                }),
                 generation: crate::ops::fleet::worker_generation(root, &session.name, &agent.name)
                     .ok()
                     .flatten(),
@@ -798,6 +801,7 @@ mod focused_epic_tests {
         // subprocess, then read the durable row through the status producer.
         home.set("CAS_FACTORY_WORKER_CLI", "codex");
         home.set("CAS_FACTORY_WORKER_MODEL", "gpt-6.1");
+        home.set(cas_mux::gateway::TRANSPORT_ENV, "direct (gateway fallback: hub unreachable (ConnectionFailed))");
         crate::mcp::daemon::apply_factory_worker_metadata(&mut worker, None);
         crate::store::open_agent_store(&root)
             .unwrap()
@@ -830,6 +834,12 @@ mod focused_epic_tests {
         assert_eq!(projected["current_task"], task.id);
         assert_eq!(projected["harness"], "codex");
         assert_eq!(projected["model"], "gpt-6.1");
+        assert_eq!(projected["route"], serde_json::json!({"kind": "fallback", "reason": "hub unreachable (ConnectionFailed)"}));
+        // A routed worker reports the route, never the hub address.
+        assert_eq!(
+            serde_json::to_value(super::super::types::WorkerRouteJson::from_transport(Some("gateway http://100.64.0.7:8317"))).unwrap(),
+            serde_json::json!({"kind": "gateway"})
+        );
         assert_eq!(projected["task_started_at"], started.to_rfc3339());
         assert_eq!(
             projected["recent_trail"],

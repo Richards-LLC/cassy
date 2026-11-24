@@ -15,6 +15,8 @@ REGISTRY_FILTER = 'test(gates::registry_tests)'
 # using the scan's own inventory (cas-cli/gate_audit.rs), finds an audited
 # change. No probe answer means run it.
 SELECTOR_FILTER = 'test(=gates::registry_tests::delivery_touches_audited_site)'
+# run-verified-tests.sh's status for a selection that ran zero tests.
+ZERO_SELECTION = 4
 
 
 def git(repo, *args):
@@ -31,7 +33,10 @@ def verified(script, cargo, args, count, *, selected=False, extra=None):
     result = subprocess.run(['bash', '-c', script, 'worker-verified-tests', *args],
                             env=env, close_fds=False)
     if result.returncode:
-        raise SystemExit(result.returncode)
+        # Exit 4 marks a requested selection that ran no test, which the capped
+        # runner answers with a crate run (cas-fcb1). A fixed guard that runs
+        # no test is a failed guard, never that fallback.
+        raise SystemExit(1 if result.returncode == ZERO_SELECTION and not selected else result.returncode)
 
 
 def main():

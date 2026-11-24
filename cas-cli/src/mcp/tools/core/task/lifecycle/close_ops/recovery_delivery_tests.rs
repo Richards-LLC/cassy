@@ -561,8 +561,8 @@ case "$*" in
   *'/actions/runs/91/jobs'*) printf '%s' '{{"jobs":[{{"name":"Scoped Validation — impact own tests","conclusion":"failure"}}]}}' ;;
   *'/branches/'*) cat '{root}/branch.json' ;;
   *'/actions/runs'*) cat '{root}/runs.json' ;;
+  'api graphql '*'pr0: pullRequests'*) printf '%s' '{{"data":{{"repository":{{"pr0":{{"nodes":[]}}}}}}}}' ;;
   'api graphql '*) printf '%s' '{{"data":{{"repository":{{"pullRequests":{{"nodes":[]}}}}}}}}' ;;
-  'pr list '*) printf '[]' ;;
   'run view 91 '*) printf 'test log_only::decoy ... FAILED\nLane impact: caused by this delivery: log_only::decoy\n' ;;
   *) printf 'Unexpected gh request: %s\n' "$*" >&2; exit 97 ;;
 esac
@@ -2305,6 +2305,120 @@ async fn cas_5dc0_merged_redelivery_cannot_create_a_postmerge_dispatch() {
         cas_store::QualityPayload::Intervention { intervention: cas_store::InterventionKind::OverrideClose, .. })), "{ledger:?}");
 }
 
+/// GH #2270 setup: `surface`'s delivery parks inside epic `cas-ep2270` with
+/// no reusable verdict (its earlier verifier errored). The operator records
+/// one decision for that epic and one for another epic.
+async fn parked_in_decided_epic(
+    env: &mut TestEnvGuard,
+    surface: &str,
+) -> (Recovery, CasCore, crate::recovery_decision::RecoveryDecision, crate::recovery_decision::RecoveryDecision) {
+    let f = fixture_with_surface(env, surface, false);
+    let cas_dir = f.dir.path().join(".cas");
+    let mut config = crate::config::Config::load(&cas_dir).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&cas_dir).unwrap();
+    let mut parked = close(&f).await;
+    let tasks = open_task_store(&cas_dir).unwrap();
+    // The recorded lane start makes the delivered tier measurable.
+    parked.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: parked.deliverables.work_target.clone().unwrap(),
+        assignee: WORKER.into(), branch: BRANCH.into(),
+        base_sha: git(f.dir.path(), &["merge-base", "main", &f.final_tip]),
+    });
+    tasks.update(&parked).unwrap();
+    for epic in ["cas-ep2270", "cas-epother"] {
+        let mut task = Task::new(epic.into(), format!("{epic} train"));
+        task.task_type = TaskType::Epic;
+        tasks.add(&task).unwrap();
+    }
+    tasks.add_dependency(&cas_types::Dependency::new(
+        TASK.into(), "cas-ep2270".into(), cas_types::DependencyType::ParentChild,
+    )).unwrap();
+    let now = chrono::Utc::now();
+    let decision = crate::recovery_decision::record(&cas_dir, tasks.as_ref(), "cas-ep2270", "close contained history", now).unwrap();
+    let foreign = crate::recovery_decision::record(&cas_dir, tasks.as_ref(), "cas-epother", "other train", now).unwrap();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let supervisor = CasCore::with_daemon(cas_dir, None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    let mut errored = cas_types::Verification::new("ver-errored".into(), TASK.into());
+    errored.status = VerificationStatus::Error;
+    supervisor.open_verification_store().unwrap().add(&errored).unwrap();
+    (f, supervisor, decision, foreign)
+}
+
+async fn decision_close(supervisor: &CasCore, id: &str, receipt: &str, reason: String, override_: bool) -> String {
+    text(supervisor.cas_task_close_with_dispositions(
+        Parameters(TaskCloseRequest {
+            no_delivery: None,
+            id: TASK.into(),
+            reason: Some(reason),
+            commit_receipt: Some(receipt.into()),
+            supervisor_override: override_.then_some(true),
+            stranded_branch_override: None,
+            search_manifest: None,
+        }),
+        None, None, None, None, None, None, Some(id.into()),
+    ).await.unwrap())
+}
+
+/// GH #2270: a contained delivery landed by git, and a later target commit
+/// superseded one of its paths. The operator's one recorded decision for the
+/// epic authorizes the close; each close cites that decision and its
+/// containment commit, with no supervisor_override. A missing, foreign or
+/// overridden decision, an unintegrated delivery and an unreviewed drop
+/// still refuse.
+#[tokio::test]
+async fn operator_decision_recovers_contained_delivery_with_reviewed_drop_gh2270() {
+    let mut env = TestEnvGuard::temp_home();
+    let (f, supervisor, decision, foreign) = parked_in_decided_epic(&mut env, "footer.css").await;
+    let repo = f.dir.path();
+    let cas_dir = repo.join(".cas");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let closed_now = || tasks.get(TASK).unwrap().status == TaskStatus::Closed;
+    // A target commit cited before the delivery itself lands authorizes nothing.
+    let base = git(repo, &["rev-parse", "main"]);
+    let unintegrated = decision_close(&supervisor, &decision.id, &base, format!("reviewed-drop: {base} -- early"), false).await;
+    assert!(!closed_now(), "{unintegrated}");
+    // The merge fact lands, but a target-side resolution replaces its footer.
+    git(repo, &["merge", "--no-ff", "-s", "ours", BRANCH, "-m", "land delivery by git"]);
+    std::fs::write(repo.join("footer.css"), ".footer { gap: 12px; }\n").unwrap();
+    git(repo, &["add", "footer.css"]);
+    git(repo, &["commit", "-qm", "supersede footer spacing"]);
+    let replacement = git(repo, &["rev-parse", "HEAD"]);
+    let drop = format!("reviewed-drop: {replacement} -- later footer spacing supersedes it");
+    for (id, override_) in [("ord-missing", false), (foreign.id.as_str(), false), (decision.id.as_str(), true)] {
+        let refused = decision_close(&supervisor, id, &f.final_tip, drop.clone(), override_).await;
+        assert!(crate::gates::codes_in(&refused).contains(&"G-164"), "{id} {override_}: {refused}");
+        assert!(!closed_now());
+    }
+    let unreviewed = decision_close(&supervisor, &decision.id, &f.final_tip, "Reviewed the integrated historical delivery".into(), false).await;
+    assert!(crate::gates::codes_in(&unreviewed).contains(&"G-56"), "{unreviewed}");
+    // The refusal carries a copyable reason naming the superseding commit.
+    assert!(unreviewed.contains(&format!("reviewed-drop: {replacement} --")), "{unreviewed}");
+    assert!(!closed_now());
+    let closed = decision_close(&supervisor, &decision.id, &f.final_tip, drop, false).await;
+    let task = tasks.get(TASK).unwrap();
+    assert_eq!(task.status, TaskStatus::Closed, "{closed}");
+    for cited in [&decision.id, &replacement, &f.final_tip] {
+        assert!(task.notes.contains(cited.as_str()), "{cited}: {}", task.notes);
+    }
+    assert!(cas_store::get_latest_verification_dispatch(&cas_dir, TASK).unwrap().is_none(),
+        "recovery opens no post-merge review");
+}
+
+/// GH #2270: a Tier 2 (guard) delivery keeps its independent QA even when
+/// contained and covered by the operator's decision for its epic.
+#[tokio::test]
+async fn operator_decision_keeps_tier_two_independent_qa_gh2270() {
+    let mut env = TestEnvGuard::temp_home();
+    let (f, supervisor, decision, _) = parked_in_decided_epic(&mut env, "cas-cli/src/hooks/guard.rs").await;
+    git(f.dir.path(), &["merge", "-q", "--no-ff", BRANCH, "-m", "land guard delivery by git"]);
+    let refused = decision_close(&supervisor, &decision.id, &f.final_tip, "contained guard delivery".into(), false).await;
+    assert!(crate::gates::codes_in(&refused).contains(&"G-64"), "{refused}");
+    let task = open_task_store(&f.dir.path().join(".cas")).unwrap().get(TASK).unwrap();
+    assert_ne!(task.status, TaskStatus::Closed);
+}
+
 /// Point the fixture task's recorded start at `base` on the worker lane,
 /// with no parked or anchored delivery yet.
 fn start_on_lane(tasks: &dyn cas_store::TaskStore, base: &str) -> Task {
@@ -2715,6 +2829,10 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
     git(&f.worker_path, &["reset", "--hard", &f.final_tip]);
     let merged = git(repo, &["rev-parse", "main"]);
     git(repo, &["update-ref", "refs/remotes/origin/main", &merged]);
+    let origin = repo.join(".git/contained-origin.git");
+    git(repo, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(repo, &["push", "-q", "origin", "main", BRANCH]);
     let mut task = tasks.get(TASK).unwrap();
     task.status = TaskStatus::AwaitingMerge;
     task.deliverables.factory_branch_anchor = Some(f.final_tip.clone());
@@ -2800,11 +2918,11 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
         assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
         // Missing integration refuses without discarding the original Error.
         git(repo, &["reset", "--hard", &task.deliverables.factory_branch_start.as_ref().unwrap().base_sha]);
-        git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+        git(repo, &["push", "-q", "--force", "origin", "main"]);
         let _ = supervisor.cas_task_close(replay()).await;
         assert_ne!(tasks.get(TASK).unwrap().status, TaskStatus::Closed);
         git(repo, &["reset", "--hard", &merged]);
-        git(repo, &["update-ref", "refs/remotes/origin/main", &merged]);
+        git(repo, &["push", "-q", "--force", "origin", "main"]);
         let output = text(supervisor.cas_task_close(replay()).await.unwrap());
         assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{history}: {output}");
         let latest = verifications.get_latest_for_task(TASK).unwrap().unwrap();
@@ -2829,11 +2947,11 @@ async fn contained_pr_accepts_authenticated_supervisor_review_cas_b73e() {
     })).unwrap());
     // A source that is merely parked cannot take this post-integration path.
     git(repo, &["update-ref", "refs/heads/main", &task.deliverables.factory_branch_start.as_ref().unwrap().base_sha]);
-    git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+    git(repo, &["push", "-q", "--force", "origin", "main"]);
     assert!(supervisor.cas_verification_add(review()).await.is_err());
     assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
     git(repo, &["reset", "--hard", &merged]);
-    git(repo, &["update-ref", "refs/remotes/origin/main", &merged]);
+    git(repo, &["push", "-q", "--force", "origin", "main"]);
     // A prior verdict is substantive review history, not a missing review.
     let verifications = supervisor.open_verification_store().unwrap();
     let mut prior = cas_types::Verification::new("ver-prior-review".into(), TASK.into());
@@ -3365,4 +3483,27 @@ async fn parked_close_survives_worker_shutdown_cas_d893() {
             assert!(!notices.iter().any(|n| serde_json::from_str::<serde_json::Value>(&n.payload).unwrap()["context"]["code"] == "close_continuation_failed"));
         }
     }
+}
+
+/// GH #2310: the train belongs to a supervisor on another machine. G-113 refuses
+/// this supervisor's close, so the reconcile pass neither attempts it nor sends
+/// the post-merge recovery notice that quoted that refusal.
+#[tokio::test]
+async fn reconcile_leaves_a_peer_owned_trains_delivery_to_its_owner_gh2310() {
+    let mut env = TestEnvGuard::temp_home();
+    let (f, _supervisor, tasks) = parked_for(&mut env, "develop").await;
+    let repo = f.dir.path();
+    let root = repo.join(".cas");
+    let mut train = Task::new("cas-train-2310".into(), "Peer-owned train".into());
+    train.task_type = cas_types::TaskType::Epic;
+    train.epic_verification_owner = Some("peer-supervisor-id".into());
+    tasks.add(&train).unwrap();
+    tasks.add_dependency(&cas_types::Dependency::new(
+        TASK.into(), train.id.clone(), cas_types::DependencyType::ParentChild,
+    )).unwrap();
+    merge_into(repo, "develop", BRANCH, "Merge pull request #43 from factory/recovered-worker");
+    crate::factory_delivery_wake::reconcile_contained(&root, "reconcile-fixture").await.unwrap();
+    assert!(cas_store::get_latest_verification_dispatch(&root, TASK).unwrap().is_none());
+    assert!(tasks.get(TASK).unwrap().deliverables.green_merge_commit.is_none());
+    assert!(crate::store::open_supervisor_queue_store(&root).unwrap().peek("supervisor-session", 10).unwrap().is_empty());
 }

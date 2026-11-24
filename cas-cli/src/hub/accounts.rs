@@ -11,6 +11,15 @@ use std::path::Path;
 #[derive(Serialize)]
 pub(super) struct Catalog {
     pub accounts: Vec<Row>,
+    /// Where capacity comes from: `off` (each machine's own read), `hub` (one
+    /// shared number per login) or `unreachable` (configured, unreadable).
+    pub quota_source: QuotaSource,
+}
+#[derive(Serialize)]
+pub(super) struct QuotaSource {
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 #[derive(Serialize)]
 pub(super) struct Row {
@@ -26,15 +35,26 @@ pub(super) struct Row {
     duplicate_of: Option<String>,
     is_default: bool,
     recommendation: Option<String>,
+    /// Why automatic selection skipped this login (threshold, duplicate, unknown usage), if it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exclusion: Option<String>,
     windows: Vec<UsageWindow>,
     usage_observed_at: Option<DateTime<Utc>>,
+    /// `hub`, `local` or `hub_unreachable`; absent when no hub is configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage_source: Option<&'static str>,
     /// None means supported; a string explains the refusal.
     capabilities: BTreeMap<&'static str, Option<&'static str>>,
 }
 const OPERATIONS: [&str; 5] = ["remove", "disable", "enable", "rename", "set_default"];
 
 pub(super) fn catalog(home: &Path) -> Result<Catalog> {
-    let accounts = crate::account_registry::collect(home)?;
+    catalog_with(home, &super::server::gateway_accounts::shared_quota())
+}
+
+pub(super) fn catalog_with(home: &Path, quota: &super::server::gateway_accounts::SharedQuota) -> Result<Catalog> {
+    let mut accounts = crate::account_registry::collect(home)?;
+    let sources = quota.apply(&mut accounts);
     let config = crate::config::Config::load(&home.join(".cas"))?;
     let defaults = config.hub.as_ref().and_then(|h| h.launch_profiles.as_ref());
     let policy = crate::account_selection::load_policy(None);
@@ -64,7 +84,10 @@ pub(super) fn catalog(home: &Path) -> Result<Catalog> {
                 .as_ref()
                 .filter(|r| r.account.name == account.name)
                 .map(|r| r.reason.clone());
-            rows.push(project(account, &accounts, default, recommendation, home));
+            let mut row = project(account, &accounts, default, recommendation, home);
+            row.usage_source = sources.get(&account.folder).copied();
+            row.exclusion = selection.excluded.iter().find(|(excluded, _)| excluded.name == account.name).map(|(_, reason)| reason.clone());
+            rows.push(row);
         }
     }
     rows.push(Row {
@@ -78,8 +101,10 @@ pub(super) fn catalog(home: &Path) -> Result<Catalog> {
         duplicate_of: None,
         is_default: true,
         recommendation: None,
+        exclusion: None,
         windows: Vec::new(),
         usage_observed_at: None,
+        usage_source: None,
         capabilities: OPERATIONS
             .into_iter()
             .map(|op| {
@@ -90,7 +115,8 @@ pub(super) fn catalog(home: &Path) -> Result<Catalog> {
             })
             .collect(),
     });
-    Ok(Catalog { accounts: rows })
+    let (state, reason) = quota.state();
+    Ok(Catalog { accounts: rows, quota_source: QuotaSource { state, reason: reason.map(str::to_string) } })
 }
 
 fn project(
@@ -133,8 +159,10 @@ fn project(
             .map(|a| format!("{}:{}", a.provider.name(), a.name)),
         is_default: account.name == default,
         recommendation,
+        exclusion: None,
         windows: account.windows.clone(),
         usage_observed_at: account.usage_observed_at,
+        usage_source: None,
         capabilities,
     }
 }

@@ -226,10 +226,14 @@ pub(crate) struct DeliveryRequest {
     /// an [`IdleLivenessRequest`] on the blocking lane
     /// ([`Self::take_idle_liveness`]); a synchronous read observes them here.
     idle_workers: Vec<String>,
+    /// cas-fcd5b: the same idle workers, kept for the recycle read after
+    /// `idle_workers` moves to its liveness job.
+    recycle_candidates: Vec<String>,
     /// Delivery evidence for revalidating a `SupervisorStalled` event.
     stall: Option<StallEvidenceRequest>,
-    /// The session whose metadata a `SupervisorStalled` event is revalidated
-    /// against (cas-3b16: read here, not on the loop).
+    /// The factory session: a `SupervisorStalled` event is revalidated against
+    /// its metadata (cas-3b16: read here, not on the loop), and the recycle read
+    /// scopes its spawn-queue lookup to it.
     session: Option<String>,
     merge_events: Vec<DirectorEvent>,
     merge_probes: super::merge_alert::ProbeCache,
@@ -267,6 +271,9 @@ impl IdleLivenessRequest {
 pub(crate) struct DeliveryInputs {
     pub(super) qa_progress: Option<crate::qa_walk_progress::Report>,
     pub(super) answered_blocked_workers: std::collections::HashSet<String>,
+    /// cas-fcd5b (GH #1693): idle workers whose spawn or recycle is still in
+    /// flight in the durable spawn queue, read off the loop.
+    pub(super) recycling_workers: std::collections::HashSet<String>,
     pub(super) data: anyhow::Result<DirectorData>,
     pub(super) blocks_deps: Vec<cas_types::Dependency>,
     /// Liveness of each idle worker, observed off the loop.
@@ -292,6 +299,7 @@ impl DeliveryInputs {
         Self {
             qa_progress: None,
             answered_blocked_workers: Default::default(),
+            recycling_workers: Default::default(),
             data: Err(anyhow::anyhow!("test: the fresh read failed")),
             blocks_deps: Vec::new(),
             idle_liveness: HashMap::new(),
@@ -424,6 +432,12 @@ impl DeliveryRequest {
                 .filter(|agent| crate::mcp::tools::core::task::block_hold::worker_has_answered_blocker(
                     &self.cas_dir, &agent.id, &self.supervisor,
                 )).map(|agent| agent.name.clone()).collect()).unwrap_or_default(),
+            recycling_workers: (!self.recycle_candidates.is_empty())
+                .then(|| crate::store::open_spawn_queue_store(&self.cas_dir).ok()).flatten()
+                .map(|spawns| self.recycle_candidates.iter()
+                    .filter(|worker| spawns.has_pending_spawn(worker, self.session.as_deref()).unwrap_or(false))
+                    .cloned().collect())
+                .unwrap_or_default(),
             data,
             blocks_deps,
             idle_liveness,
@@ -746,7 +760,7 @@ impl FactoryApp {
     /// Capture what the delivery stage's fresh read needs to revalidate
     /// `events`.
     pub(crate) fn delivery_request(&self, events: &[DirectorEvent]) -> DeliveryRequest {
-        let idle_workers = events
+        let idle_workers: Vec<String> = events
             .iter()
             .filter_map(|event| match event {
                 DirectorEvent::WorkerIdle { worker, .. } => Some(worker.clone()),
@@ -759,7 +773,7 @@ impl FactoryApp {
             .then(|| self.stall_evidence_request())
             .flatten();
         let qa_needed = events.iter().any(|event| matches!(event, DirectorEvent::QaWalkAttention { .. }));
-        let session = (stall.is_some() || qa_needed).then(|| self.factory_session.clone()).flatten();
+        let session = self.factory_session.clone();
         DeliveryRequest {
             qa_needed,
             blocked_tasks: events.iter().filter_map(|event| match event {
@@ -770,6 +784,7 @@ impl FactoryApp {
             cas_dir: self.cas_dir.clone(),
             worktree_root: self.worktree_manager.as_ref().map(|m| m.worktree_root()),
             project_id: self.project_scope(),
+            recycle_candidates: idle_workers.clone(),
             idle_workers,
             stall,
             session,

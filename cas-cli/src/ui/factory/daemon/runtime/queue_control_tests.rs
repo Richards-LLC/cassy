@@ -1193,3 +1193,51 @@ fn cas_7b6b_wake_inputs_prefer_active_registration_over_newer_stale_namesake() {
         "GH #160: use the Active Claude session rather than a newer Stale Codex namesake"
     );
 }
+
+/// GH #1731 §1: an inject that fails while its worker is between recycle
+/// shutdown and relaunch abandoned the brief, although a successor was
+/// coming. Mail stays pending for the successor; with no successor queued
+/// the unknown target is still abandoned.
+#[tokio::test]
+async fn failed_inject_during_recycle_keeps_mail_for_the_successor_gh_1731() {
+    for successor_queued in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let id = queue.enqueue("supervisor", "worker-a", "task brief").unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        daemon.queue_jobs = super::super::prompt_queue_jobs::QueueJobs::start(root.clone(), None);
+        if successor_queued {
+            // The shape the recycle requeues while crash cleanup is pending.
+            daemon.pending_spawns.push_back(PendingSpawn::Recycle {
+                request_id: 1,
+                name: "worker-a".into(),
+                spec: Some(cas_mux::WorkerSpec::builtin_default()),
+                dead_worker_recovery: false,
+                stopped: true,
+            });
+        }
+        daemon.finish_direct_delivery(
+            super::super::inject_commands::DirectDelivery {
+                message_batch: Vec::new(),
+                message_senders: Vec::new(),
+                queued: queue.queued_prompt(id).unwrap().unwrap(),
+                pane_target: "worker-a".into(),
+                generation: 0,
+                wake_deferred: false,
+                prior_copy_unread: false,
+                nudge_only: false,
+                renudge_granted: false,
+                urgent_wake_probe_opened: false,
+                delivery_started_at_utc: chrono::Utc::now(),
+            },
+            Err(anyhow::anyhow!("pane 'worker-a' not found")),
+        );
+        assert!(daemon.queue_jobs.drain_for_shutdown(&root, Duration::from_secs(5)));
+        assert!(super::super::store_worker::global().wait_idle(Duration::from_secs(5)));
+        let row = queue.queued_prompt(id).unwrap().unwrap();
+        assert_eq!(row.processed_at.is_none(), successor_queued, "successor queued: {successor_queued}");
+        let notices = queue.peek_all(10).unwrap().into_iter().filter(|row| row.id != id).count();
+        assert_eq!(notices > 0, !successor_queued, "undelivered notice only without a successor");
+    }
+}

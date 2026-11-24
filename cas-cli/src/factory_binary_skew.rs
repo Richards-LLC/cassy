@@ -21,6 +21,8 @@ pub(crate) struct ServerVersion {
     pub session: Option<String>,
     pub pid: u32,
     pub version: Option<String>,
+    /// The live process's build hash (cas-724e); `None` before it was recorded.
+    pub build: Option<String>,
     pub older: bool,
 }
 
@@ -122,6 +124,11 @@ fn process_identity(_pid: u32) -> Option<(DateTime<Utc>, u32)> {
     None
 }
 
+/// When a live process started: for an MCP backend, when its build loaded.
+pub(crate) fn process_started_at(pid: u32) -> Option<DateTime<Utc>> {
+    process_identity(pid).map(|(started, _)| started)
+}
+
 fn epoch_live_parent(pid: u32, started_at: &str) -> Option<u32> {
     let (process_start, parent_pid) = process_identity(pid)?;
     let epoch_start = DateTime::parse_from_rfc3339(started_at).ok()?;
@@ -148,7 +155,7 @@ pub(crate) fn snapshot_with_installed(
         .list_recent_daemon_epochs(&since, 4096)
         .map_err(|e| format!("binary epochs: {e}"))?;
     let local_machine = Agent::get_or_generate_machine_id();
-    let mut by_agent_pid = BTreeMap::<u32, Vec<(u32, Option<String>)>>::new();
+    let mut by_agent_pid = BTreeMap::<u32, Vec<(u32, Option<String>, Option<String>)>>::new();
     let mut seen_server_pid = BTreeSet::new();
     for epoch in epochs {
         if epoch.epoch_kind != EPOCH_KIND_DAEMON_START {
@@ -179,14 +186,15 @@ pub(crate) fn snapshot_with_installed(
         if !seen_server_pid.insert(pid) {
             continue;
         }
+        // The build is always the serving process's own epoch, front or not.
         by_agent_pid
             .entry(pid)
             .or_default()
-            .push((pid, version.clone()));
+            .push((pid, version.clone(), epoch.build.clone()));
         by_agent_pid
             .entry(parent_pid)
             .or_default()
-            .push((pid, version));
+            .push((pid, version, epoch.build));
     }
     let mut seen = BTreeSet::new();
     let mut servers = Vec::new();
@@ -207,11 +215,12 @@ pub(crate) fn snapshot_with_installed(
                 session: agent.factory_session,
                 pid,
                 version: None,
+                build: None,
                 older: false,
             });
             continue;
         }
-        for (server_pid, version) in matches {
+        for (server_pid, version, build) in matches {
             let older = version
                 .as_deref()
                 .and_then(version_triplet)
@@ -223,6 +232,7 @@ pub(crate) fn snapshot_with_installed(
                 session: agent.factory_session.clone(),
                 pid: server_pid,
                 version,
+                build,
                 older,
             });
         }
@@ -235,8 +245,29 @@ pub(crate) fn snapshot_with_installed(
 }
 
 pub(crate) fn installed_version() -> Option<String> {
+    #[cfg(test)]
+    if let Some(version) = INSTALLED_VERSION_FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return Some(version);
+    }
     installed_version_of(std::ffi::OsStr::new("cas"))
 }
+
+/// The installed build hash, from `cas --version` ("cas 4.52.0 (f28538f
+/// 2026-11-24)"). Two builds of one version differ here (cas-724e).
+pub(crate) fn installed_build() -> Option<String> {
+    #[cfg(test)]
+    if INSTALLED_VERSION_FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        return INSTALLED_BUILD_FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    }
+    installed_identity_of(std::ffi::OsStr::new("cas")).and_then(|(_, build)| build)
+}
+
+/// Lib tests may not change process PATH; a fixture names the installed build here.
+#[cfg(test)]
+pub(crate) static INSTALLED_VERSION_FOR_TEST: Mutex<Option<String>> = Mutex::new(None);
+/// With [`INSTALLED_VERSION_FOR_TEST`] set, the installed build hash.
+#[cfg(test)]
+pub(crate) static INSTALLED_BUILD_FOR_TEST: Mutex<Option<String>> = Mutex::new(None);
 
 /// The version a restart of this long-lived process (hub or factory daemon)
 /// would run. A service launches it by an absolute (pinned) path, which an
@@ -254,7 +285,13 @@ pub(crate) fn relaunch_version() -> Option<String> {
 /// The version `program --version` reports, cached for ten seconds per
 /// program and PATH (cas-d786).
 pub(crate) fn installed_version_of(program: &std::ffi::OsStr) -> Option<String> {
-    type Cache = BTreeMap<(std::ffi::OsString, String), (Instant, Option<String>)>;
+    installed_identity_of(program).map(|(version, _)| version)
+}
+
+/// `program --version`'s version and the build hash after it in parentheses.
+fn installed_identity_of(program: &std::ffi::OsStr) -> Option<(String, Option<String>)> {
+    type Identity = Option<(String, Option<String>)>;
+    type Cache = BTreeMap<(std::ffi::OsString, String), (Instant, Identity)>;
     static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
     let key = (
         program.to_owned(),
@@ -262,28 +299,33 @@ pub(crate) fn installed_version_of(program: &std::ffi::OsStr) -> Option<String> 
     );
     let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
     if let Ok(guard) = cache.lock()
-        && let Some((checked_at, version)) = guard.get(&key)
+        && let Some((checked_at, identity)) = guard.get(&key)
         && checked_at.elapsed() < Duration::from_secs(10)
     {
-        return version.clone();
+        return identity.clone();
     }
-    let version = crate::bounded_process::run_command(
+    let identity = crate::bounded_process::run_command(
         Command::new(program).arg("--version"),
         crate::bounded_process::Deadline::after(Duration::from_millis(500)),
         Duration::from_millis(500),
     )
     .ok()
     .filter(|output| output.status.success())
-    .and_then(|output| {
-        String::from_utf8_lossy(&output.stdout)
-            .split_whitespace()
-            .find(|word| version_triplet(word).is_some())
-            .map(|word| word.trim_start_matches('v').to_string())
-    });
+    .and_then(|output| version_identity(&String::from_utf8_lossy(&output.stdout)));
     if let Ok(mut guard) = cache.lock() {
-        guard.insert(key, (Instant::now(), version.clone()));
+        guard.insert(key, (Instant::now(), identity.clone()));
     }
-    version
+    identity
+}
+
+fn version_identity(output: &str) -> Option<(String, Option<String>)> {
+    let mut words = output.split_whitespace();
+    let version = words.find(|word| version_triplet(word).is_some())?;
+    let build = words.next()
+        .and_then(|word| word.strip_prefix('('))
+        .map(|word| word.trim_end_matches(')').to_string())
+        .filter(|build| !build.is_empty());
+    Some((version.trim_start_matches('v').to_string(), build))
 }
 
 pub(crate) fn snapshot(cas_root: &Path) -> Result<Snapshot, String> {
@@ -456,6 +498,18 @@ mod tests {
         (dir, root, worker, child)
     }
 
+    /// cas-724e: the installed identity is the version and the build hash
+    /// `cas --version` prints after it, so two builds of 4.52.0 differ.
+    #[test]
+    fn installed_identity_reads_the_build_hash_after_the_version() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("cas");
+        std::fs::write(&program, "#!/bin/sh\nprintf 'cas 4.52.0 (f28538f-dirty 2026-11-24)\\n'\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(installed_identity_of(program.as_os_str()), Some(("4.52.0".into(), Some("f28538f-dirty".into()))));
+    }
+
     #[test]
     fn confirmed_front_reports_backend_version_and_rejects_reused_pid_cas_81c4() {
         let (_dir, root, mut worker, child) = fixture();
@@ -595,6 +649,7 @@ mod tests {
                     session: Some("session-a".into()),
                     pid: 11,
                     version: Some("9.99.1".into()),
+                    build: None,
                     older: true,
                 },
                 ServerVersion {
@@ -603,6 +658,7 @@ mod tests {
                     session: Some("session-b".into()),
                     pid: 22,
                     version: Some("9.99.1".into()),
+                    build: None,
                     older: true,
                 },
                 ServerVersion {
@@ -611,6 +667,7 @@ mod tests {
                     session: Some("session-b".into()),
                     pid: 23,
                     version: Some("9.99.2".into()),
+                    build: None,
                     older: false,
                 },
             ],

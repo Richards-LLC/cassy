@@ -9,6 +9,9 @@ pub(crate) struct Test {
     pub harness: Option<String>,
     source: String,
     parameterized: bool,
+    /// GH #2320: the operating systems its `cfg(target_os)` gates (on the
+    /// function, its modules or its file) let it build on; `None` is any OS.
+    pub platforms: Option<BTreeSet<String>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +36,51 @@ fn attributes<'a>(node: Node<'_>, source: &'a str) -> Vec<(usize, &'a str)> {
     attributes
 }
 
+/// The operating systems a `#[cfg(..)]` or `#![cfg(..)]` attribute allows, when
+/// it decides `target_os`; `None` when it does not (or cannot be read), so an
+/// unrecognised gate never excuses a test from its host.
+fn cfg_platforms(attribute: &str) -> Option<BTreeSet<String>> {
+    let compact = attribute.chars().filter(|ch| !ch.is_whitespace()).collect::<String>();
+    let predicate = compact.strip_prefix("#[cfg(").or_else(|| compact.strip_prefix("#![cfg("))?.strip_suffix(")]")?;
+    predicate_platforms(predicate)
+}
+
+fn predicate_platforms(predicate: &str) -> Option<BTreeSet<String>> {
+    if let Some(os) = predicate.strip_prefix("target_os=") {
+        return Some(BTreeSet::from([os.strip_prefix('"')?.strip_suffix('"')?.to_owned()]));
+    }
+    let (operator, inner) = predicate.split_once('(')?;
+    let inner = inner.strip_suffix(')')?;
+    let mut parts = Vec::new();
+    let (mut depth, mut quoted, mut start) = (0usize, false, 0);
+    for (index, ch) in inner.char_indices() {
+        match ch {
+            '"' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => depth = depth.checked_sub(1)?,
+            ',' if !quoted && depth == 0 => {
+                parts.push(&inner[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&inner[start..]);
+    let parts = parts.into_iter().filter(|part| !part.is_empty()).map(predicate_platforms);
+    match operator {
+        "any" => parts.collect::<Option<Vec<_>>>().map(|sets| sets.into_iter().flatten().collect()),
+        "all" => parts.flatten().reduce(|left, right| left.intersection(&right).cloned().collect()),
+        _ => None,
+    }
+}
+
+fn narrow(platforms: Option<&BTreeSet<String>>, attributes: impl IntoIterator<Item = Option<BTreeSet<String>>>) -> Option<BTreeSet<String>> {
+    attributes.into_iter().flatten().fold(platforms.cloned(), |held, gate| Some(match held {
+        Some(held) => held.intersection(&gate).cloned().collect(),
+        None => gate,
+    }))
+}
+
 fn join(directory: &str, path: &str) -> Result<String> {
     normalize_repo_path(directory, path).context("STABILITY_SOURCE_PATH: module escapes repository")
 }
@@ -43,6 +91,8 @@ struct Inventory<'a> {
     tests: Vec<Test>,
     errors: Vec<(String, String)>,
     visited: BTreeSet<(String, String, String, Option<String>)>,
+    /// The `target_os` gate of the module being walked.
+    platforms: Option<BTreeSet<String>>,
 }
 
 impl Inventory<'_> {
@@ -61,6 +111,19 @@ impl Inventory<'_> {
     #[allow(clippy::too_many_arguments)]
     fn items(&mut self, node: Node<'_>, source: &str, path: &str, prefix: &str,
         directory: &str, package: &str, harness: Option<&str>) -> Result<()> {
+        let outer = self.platforms.clone();
+        let mut cursor = node.walk();
+        let inner = node.named_children(&mut cursor).filter(|child| child.kind() == "inner_attribute_item")
+            .map(|child| cfg_platforms(text(child, source))).collect::<Vec<_>>();
+        self.platforms = narrow(outer.as_ref(), inner);
+        let result = self.walk(node, source, path, prefix, directory, package, harness);
+        self.platforms = outer;
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk(&mut self, node: Node<'_>, source: &str, path: &str, prefix: &str,
+        directory: &str, package: &str, harness: Option<&str>) -> Result<()> {
         let mut cursor = node.walk();
         for node in node.named_children(&mut cursor) {
             let attrs = attributes(node, source);
@@ -75,7 +138,9 @@ impl Inventory<'_> {
                     let name = text(name, source);
                     let name = if prefix.is_empty() { name.into() } else { format!("{prefix}::{name}") };
                     let begin = attrs.iter().map(|(start, _)| *start).min().unwrap_or(node.start_byte());
+                    let platforms = narrow(self.platforms.as_ref(), attrs.iter().map(|(_, attr)| cfg_platforms(attr)));
                     self.tests.push(Test {
+                        platforms,
                         identity: Identity::exact(path, name), package: package.into(),
                         harness: harness.map(str::to_owned), source: source[begin..node.end_byte()].into(),
                         parameterized: attrs.iter().any(|(_, attr)| !attr.contains("test]") && attribute.is_match(attr)
@@ -85,6 +150,9 @@ impl Inventory<'_> {
                 "mod_item" => {
                     let name = text(node.child_by_field_name("name").context("module name missing")?, source);
                     let child_prefix = if prefix.is_empty() { name.into() } else { format!("{prefix}::{name}") };
+                    let outer = self.platforms.clone();
+                    self.platforms = narrow(outer.as_ref(), attrs.iter().map(|(_, attr)| cfg_platforms(attr)));
+                    let walked = (|| -> Result<()> {
                     if let Some(body) = node.child_by_field_name("body") {
                         self.items(body, source, path, &child_prefix, &join(directory, name)?, package, harness)?;
                     } else {
@@ -104,6 +172,10 @@ impl Inventory<'_> {
                             else { child.trim_end_matches(".rs").into() };
                         self.file(&child, &child_prefix, &child_directory, package, harness)?;
                     }
+                    Ok(())
+                    })();
+                    self.platforms = outer;
+                    walked?;
                 }
                 "macro_invocation" => {
                     let mut children = node.walk();
@@ -152,7 +224,7 @@ fn inventory(repo: &Path, head: &str, paths: &[String]) -> Result<(Vec<Test>, Ve
     let mut parser = Parser::new();
     parser.set_language(&tree_sitter_rust::LANGUAGE.into())?;
     let mut inventory = Inventory { parser, sources: sources.iter().map(|(path, body)| (path.as_str(), body.as_str())).collect(),
-        tests: Vec::new(), errors: Vec::new(), visited: BTreeSet::new() };
+        tests: Vec::new(), errors: Vec::new(), visited: BTreeSet::new(), platforms: None };
     let manifests = paths.iter().filter(|path| path.ends_with(".rs"))
         .filter_map(|path| tree.manifest_dir_for_source(path)).collect::<BTreeSet<_>>();
     for directory in manifests {
@@ -236,7 +308,7 @@ impl Discovery {
             let mut parser = Parser::new();
             parser.set_language(&tree_sitter_rust::LANGUAGE.into())?;
             let parsed = parser.parse(source, None).context("STABILITY_RUST_PARSE")?;
-            let mut standalone = Inventory { parser, sources: BTreeMap::new(), tests: Vec::new(), errors: Vec::new(), visited: BTreeSet::new() };
+            let mut standalone = Inventory { parser, sources: BTreeMap::new(), tests: Vec::new(), errors: Vec::new(), visited: BTreeSet::new(), platforms: None };
             standalone.items(parsed.root_node(), source, path, "", "", "", None)?;
             if let Some((_, error)) = standalone.errors.first() {
                 return Err(anyhow::anyhow!("{path}: {error}"));
@@ -262,6 +334,32 @@ impl Discovery {
         Ok(current.iter().filter(|test| paths.contains(&test.identity.path)
             && prior.get(&(&test.identity, &test.package, &test.harness)).copied() != Some(&test.source)).cloned().collect())
     }
+}
+
+/// GH #2320: the operating systems each of these tests builds on at `head`,
+/// for the tests a `cfg(target_os)` gate restricts. Ungated tests are absent.
+pub(crate) fn platform_gates(repo: &Path, head: &str, tests: &[Identity]) -> Result<BTreeMap<Identity, BTreeSet<String>>> {
+    let paths = tests.iter().filter(|test| test.path.ends_with(".rs")).map(|test| test.path.clone())
+        .collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+    if paths.is_empty() { return Ok(BTreeMap::new()); }
+    let (inventory, _) = inventory(repo, head, &paths)?;
+    Ok(inventory.into_iter().filter(|test| tests.contains(&test.identity))
+        .filter_map(|test| Some((test.identity, test.platforms?))).collect())
+}
+
+/// cas-fcb1: the package and harness that own each of these tests in the
+/// delivered Cargo inventory (`None` harness is `--lib`). An explicit harness
+/// owns its own file and the modules it imports, whatever their file names.
+pub(crate) fn owners(repo: &Path, head: &str, tests: &[Identity]) -> Result<BTreeMap<Identity, (String, Option<String>)>> {
+    let paths = tests.iter().filter(|test| test.path.ends_with(".rs")).map(|test| test.path.clone())
+        .collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+    if paths.is_empty() { return Ok(BTreeMap::new()); }
+    let (inventory, _) = inventory(repo, head, &paths)?;
+    let mut owners = BTreeMap::new();
+    for test in inventory.into_iter().filter(|test| tests.contains(&test.identity)) {
+        owners.entry(test.identity).or_insert((test.package, test.harness));
+    }
+    Ok(owners)
 }
 
 pub(crate) fn changed(repo: &Path, base: &str, head: &str, paths: &[String]) -> Result<Vec<Test>> {

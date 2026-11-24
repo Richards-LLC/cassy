@@ -13518,7 +13518,8 @@ async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
         let lane: serde_json::Value =
             serde_json::from_slice(&std::fs::read(home.path().join("lane.json")).unwrap()).unwrap();
         assert_eq!(lane["plan"]["base"], impact_base);
-        assert_eq!(lane["plan"]["attribution_base"], start.base_sha);
+        // GH #2299: a merged target advances attribution beyond the recorded start.
+        assert_eq!(lane["plan"]["attribution_base"], impact_base);
     }
 }
 

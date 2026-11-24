@@ -1045,6 +1045,71 @@ async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
     assert!(closed.notes.contains("Cassy close authority"), "{}", closed.notes);
 }
 
+/// GH #2401 item 4: park requires `AC-CHECKLIST.md` with a row per acceptance
+/// criterion and supervisor ruling, and refuses a narrowing no supervisor
+/// decision note approved, listing every failing row in one reply.
+#[tokio::test]
+async fn park_requires_an_ac_checklist_and_an_approved_narrowing_gh_2401() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let mut task = f.task();
+    task.acceptance_criteria = "1) The gear turns. 2) The gear turns both ways.".into();
+    open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(&f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)");
+    let ruling = call(&f.supervisor, serde_json::json!({
+        "action": "notes", "id": ID, "note_type": "decision", "notes": "keep the gear API unchanged",
+    })).await;
+    let started = call(&f.worker, serde_json::json!({"action": "start", "id": ID})).await;
+    assert!(started.contains("AC1, AC2, D1"), "{ruling}\n{started}");
+    let dir = &crate::config::resolved_factory_artifact_paths(&f.cas_dir(), None).task_dirs(ID)[0];
+    std::fs::create_dir_all(dir).unwrap();
+    let met = "| AC1 | MET | crates/widget/src/gear.rs:1 | test(gear) at tip |";
+    let ruled = "| D1 | MET | crates/widget/src/gear.rs:1 | test(gear) at tip |";
+    let narrowed = "| AC2 | NARROWED | one way only; reverse is a follow-up | |";
+    // A park from Blocked is judged like one from InProgress.
+    for (checklist, status, failing) in [
+        (None, TaskStatus::InProgress, &["AC1", "AC2", "D1"][..]),
+        (Some(vec![met]), TaskStatus::InProgress, &["AC2", "D1"]),
+        (Some(vec![met, ruled, "| AC2 | MET | turns both ways | |"]), TaskStatus::InProgress, &["AC2"]),
+        (Some(vec![met, ruled, narrowed]), TaskStatus::InProgress, &["AC2"]),
+        (Some(vec![met, ruled, narrowed]), TaskStatus::Blocked, &["AC2"]),
+        (Some(vec![met, ruled, "| AC2 | NARROWED | | |"]), TaskStatus::InProgress, &["AC2"]),
+    ] {
+        let path = dir.join("AC-CHECKLIST.md");
+        match &checklist {
+            Some(rows) => std::fs::write(&path, rows.join("\n")).unwrap(),
+            None => { let _ = std::fs::remove_file(&path); }
+        }
+        let mut task = f.task();
+        task.status = status;
+        open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
+        let refused = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
+        assert!(crate::gates::codes_in(&refused).contains(&"G-166"), "{checklist:?} {status:?}: {refused}");
+        let listed: Vec<_> = ["AC1", "AC2", "D1"].into_iter().filter(|id| refused.contains(&format!("- {id} ("))).collect();
+        assert_eq!(listed, failing, "{checklist:?} {status:?}: {refused}");
+        assert_eq!(f.task().status, status);
+    }
+    let mut task = f.task();
+    task.status = TaskStatus::InProgress;
+    open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
+    // A worker's own decision note never approves its narrowing: the same
+    // checklist that parks after the supervisor's note is refused before it.
+    std::fs::write(dir.join("AC-CHECKLIST.md"), [met, ruled, narrowed].join("\n")).unwrap();
+    call(&f.worker, serde_json::json!({
+        "action": "notes", "id": ID, "note_type": "decision", "notes": "AC2 narrowed to one way",
+    })).await;
+    let refused = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
+    assert!(crate::gates::codes_in(&refused).contains(&"G-166") && refused.contains("- AC2 ("), "{refused}");
+    // The supervisor's approval names the item, so it needs no row of its own.
+    call(&f.supervisor, serde_json::json!({
+        "action": "notes", "id": ID, "note_type": "decision", "notes": "AC2 narrowed to one way; reverse is a follow-up",
+    })).await;
+    let parked = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
+    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
+    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
     hex::encode(sha2::Sha256::digest(bytes))

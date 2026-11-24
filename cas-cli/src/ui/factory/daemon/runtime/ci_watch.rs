@@ -133,6 +133,17 @@ pub(crate) trait CiTransport {
         &self,
         branch: &str,
     ) -> Result<Vec<DeliveryPullRequest>, CiWatchError>;
+    /// The PRs of every branch, newest first, in one read where the transport
+    /// can (cas-a9eb): a poll asks once however many deliveries are parked.
+    fn delivery_pull_requests_batch(
+        &self,
+        branches: &[&str],
+    ) -> Result<BTreeMap<String, Vec<DeliveryPullRequest>>, CiWatchError> {
+        branches
+            .iter()
+            .map(|branch| Ok(((*branch).to_string(), self.delivery_pull_requests(branch)?)))
+            .collect()
+    }
     /// cas-0f05: every run for one commit, whatever its status.
     fn runs_for_sha(&self, _sha: &str) -> Result<Vec<CiRun>, CiWatchError> {
         Ok(Vec::new())
@@ -1044,6 +1055,9 @@ pub(crate) struct GhCiTransport {
     gh_binary: PathBuf,
     /// cas-c24e: one completed-runs read per poll; two collectors share it.
     completed: std::sync::OnceLock<Vec<CiRun>>,
+    /// cas-0bc1: the newest runs of every status, one read per poll; every
+    /// commit looks itself up here instead of asking GitHub by sha.
+    recent: std::sync::OnceLock<Vec<CiRun>>,
 }
 
 impl GhCiTransport {
@@ -1057,6 +1071,7 @@ impl GhCiTransport {
             cwd: project.to_path_buf(),
             gh_binary,
             completed: std::sync::OnceLock::new(),
+            recent: std::sync::OnceLock::new(),
         })
     }
 
@@ -1146,9 +1161,12 @@ impl GhCiTransport {
         struct Artifact { id: u64, name: String, size_in_bytes: u64, expired: bool }
         #[derive(Deserialize)]
         struct Artifacts { artifacts: Vec<Artifact> }
-        let response: Artifacts = self.gh_json(&[
-            "api".into(), format!("repos/{}/actions/runs/{run_id}/artifacts?per_page=100", self.repo),
-        ])?;
+        let response: Artifacts = serde_json::from_slice(&crate::gh_budget::shared_read(
+            &format!("run-artifacts {} {run_id}", self.repo),
+            RUN_EVIDENCE_TTL,
+            || self.gh_bytes(&["api".into(), format!("repos/{}/actions/runs/{run_id}/artifacts?per_page=100", self.repo)]),
+        )?)
+        .map_err(|e| CiWatchError::Malformed(format!("invalid GitHub Actions JSON: {e}")))?;
         let prefix = format!("lane-impact-{run_id}-");
         let mut names = Vec::new();
         for artifact in response.artifacts.into_iter().filter(|artifact| {
@@ -1234,6 +1252,86 @@ impl GhCiTransport {
     }
 }
 
+/// How long the run list of a commit the newest runs do not cover is reused
+/// while the newest runs show the same runs of it (cas-0bc1). A finished commit
+/// changes only by a rerun of an old run, which the newest runs cannot show; 30
+/// minutes bounds that miss at 2 requests an hour per commit.
+const OUTSIDE_LISTING_RUNS_TTL: Duration = Duration::from_secs(1800);
+
+/// The runs read in one request. A shorter answer holds every run of the repo.
+const RUNS_PAGE: usize = 100;
+
+/// Whether the newest runs hold every run of the commit. They hold every run
+/// newer than their oldest, so a commit is covered once its first run, the push
+/// or merge group that created it, is among them; a commit with no listed run,
+/// or only later ones (a schedule or a dispatch), may have older runs left out.
+fn listing_covers(recent: &[CiRun], listed: &[CiRun]) -> bool {
+    recent.len() < RUNS_PAGE
+        || listed
+            .iter()
+            .min_by_key(|run| run.id)
+            .is_some_and(|first| matches!(first.event.as_str(), "push" | "merge_group"))
+}
+
+/// The runs of one commit by id, attempt and status, so a new run, a rerun or
+/// a finished run changes it.
+fn runs_signature(runs: &[CiRun]) -> String {
+    let mut parts: Vec<String> =
+        runs.iter().map(|run| format!("{}:{}:{}", run.id, run.run_attempt, run.status)).collect();
+    parts.sort();
+    parts.join(",")
+}
+
+/// A commit whose runs changed since this daemon last looked has new checks,
+/// so its shared check-runs answer is dropped (cas-0bc1).
+fn note_runs_signature(repo: &str, sha: &str, signature: &str) {
+    static SEEN: std::sync::Mutex<Option<std::collections::HashMap<String, String>>> = std::sync::Mutex::new(None);
+    let mut seen = SEEN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = seen
+        .get_or_insert_with(Default::default)
+        .insert(format!("{repo} {sha}"), signature.to_string());
+    if previous.is_some_and(|previous| previous != signature) {
+        crate::gh_budget::invalidate(&crate::gh_budget::check_runs_key(repo, sha));
+    }
+}
+
+/// How long a failed run's jobs, log and artifact list are shared (cas-0bc1):
+/// they change only by a rerun, and a red run was re-read on every poll.
+const RUN_EVIDENCE_TTL: Duration = Duration::from_secs(600);
+
+impl GhCiTransport {
+    fn run_jobs(&self, run_id: u64) -> Result<JobsResponse, CiWatchError> {
+        let bytes = crate::gh_budget::shared_read(
+            &format!("run-jobs {} {run_id}", self.repo),
+            RUN_EVIDENCE_TTL,
+            || self.gh_bytes(&[
+                "api".to_string(),
+                "-X".to_string(),
+                "GET".to_string(),
+                format!("repos/{}/actions/runs/{run_id}/jobs", self.repo),
+            ]),
+        )?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| CiWatchError::Malformed(format!("invalid GitHub Actions JSON: {e}")))
+    }
+
+    fn recent_runs(&self) -> Result<Vec<CiRun>, CiWatchError> {
+        if let Some(runs) = self.recent.get() {
+            return Ok(runs.clone());
+        }
+        let response: RunsResponse = self.gh_json(&[
+            "api".to_string(),
+            "-X".to_string(),
+            "GET".to_string(),
+            format!("repos/{}/actions/runs", self.repo),
+            "-f".to_string(),
+            format!("per_page={RUNS_PAGE}"),
+        ])?;
+        let _ = self.recent.set(response.workflow_runs.clone());
+        Ok(response.workflow_runs)
+    }
+}
+
 impl CiTransport for GhCiTransport {
     fn completed_runs(&self) -> Result<Vec<CiRun>, CiWatchError> {
         if let Some(runs) = self.completed.get() {
@@ -1254,12 +1352,7 @@ impl CiTransport for GhCiTransport {
     }
 
     fn failing_job(&self, run_id: u64) -> Result<Option<String>, CiWatchError> {
-        let response: JobsResponse = self.gh_json(&[
-            "api".to_string(),
-            "-X".to_string(),
-            "GET".to_string(),
-            format!("repos/{}/actions/runs/{run_id}/jobs", self.repo),
-        ])?;
+        let response = self.run_jobs(run_id)?;
         Ok(response
             .jobs
             .into_iter()
@@ -1270,56 +1363,109 @@ impl CiTransport for GhCiTransport {
     fn branch_tip(&self, branch: &str) -> Result<Option<String>, CiWatchError> {
         // An unreadable tip (a deleted branch, a transient API error) keeps
         // the pre-cas-c188 behaviour rather than silencing a real red run.
-        Ok(self
-            .gh_json::<BranchResponse>(&[
+        Ok(crate::gh_budget::shared_read(
+            &format!("branch-tip {} {branch}", self.repo),
+            Duration::from_secs(60),
+            || self.gh_bytes(&[
                 "api".to_string(),
                 "-X".to_string(),
                 "GET".to_string(),
                 format!("repos/{}/branches/{branch}", self.repo),
-            ])
-            .ok()
-            .map(|response| response.commit.sha)
-            .filter(|sha| !sha.is_empty()))
+            ]),
+        )
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<BranchResponse>(&bytes).ok())
+        .map(|response| response.commit.sha)
+        .filter(|sha| !sha.is_empty()))
     }
 
     fn failed_log(&self, run_id: u64) -> Result<Option<String>, CiWatchError> {
-        let log = self.gh_text(&[
-            "run".to_string(),
-            "view".to_string(),
-            run_id.to_string(),
-            "--repo".to_string(),
-            self.repo.clone(),
-            "--log-failed".to_string(),
-        ])?;
-        Ok((!log.is_empty()).then_some(log))
+        let cached = crate::gh_budget::shared_read(
+            &format!("failed-log {} {run_id}", self.repo),
+            RUN_EVIDENCE_TTL,
+            || match self.gh_text(&[
+                "run".to_string(),
+                "view".to_string(),
+                run_id.to_string(),
+                "--repo".to_string(),
+                self.repo.clone(),
+                "--log-failed".to_string(),
+            ]) {
+                Ok(log) if !log.is_empty() => Ok(log.into_bytes()),
+                Ok(_) => Err(None),
+                Err(error) => Err(Some(error)),
+            },
+        );
+        match cached {
+            Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
+            Err(None) => Ok(None),
+            Err(Some(error)) => Err(error),
+        }
     }
 
+    /// Every run of the commit. The newest runs answer it when a run is still
+    /// going (all a pending `ci_completed` reminder waits on) or when they hold
+    /// every run of the commit. Only a commit they cut off is read by its own
+    /// request, and re-read when its newest runs changed or 30 minutes passed:
+    /// at most 2 requests an hour for a parked delivery, not one a poll
+    /// (cas-0bc1: 4,319 core calls an hour exhausted the quota).
     fn runs_for_sha(&self, sha: &str) -> Result<Vec<CiRun>, CiWatchError> {
-        let response: RunsResponse = self.gh_json(&[
-            "api".to_string(),
-            "-X".to_string(),
-            "GET".to_string(),
-            format!("repos/{}/actions/runs", self.repo),
-            "-f".to_string(),
-            format!("head_sha={sha}"),
-            "-f".to_string(),
-            "per_page=100".to_string(),
-        ])?;
-        Ok(response.workflow_runs)
+        let recent = self.recent_runs()?;
+        let listed: Vec<CiRun> = recent.iter().filter(|run| run.head_sha == sha).cloned().collect();
+        let signature = runs_signature(&listed);
+        note_runs_signature(&self.repo, sha, &signature);
+        if listed.iter().any(|run| run.status != "completed") || listing_covers(&recent, &listed) {
+            return Ok(listed);
+        }
+        let key = format!("runs {} {sha}", self.repo);
+        let fresh = |cached: &[u8]| {
+            let same = serde_json::from_slice::<serde_json::Value>(cached)
+                .is_ok_and(|entry| entry["signature"] == signature.as_str());
+            if same { crate::gh_budget::jittered(OUTSIDE_LISTING_RUNS_TTL, &key) } else { Duration::ZERO }
+        };
+        let bytes = crate::gh_budget::shared_read_by(&key, fresh, || {
+            let answer = self.gh_bytes(&[
+                "api".to_string(),
+                "-X".to_string(),
+                "GET".to_string(),
+                format!("repos/{}/actions/runs", self.repo),
+                "-f".to_string(),
+                format!("head_sha={sha}"),
+                "-f".to_string(),
+                "per_page=100".to_string(),
+            ])?;
+            let response: serde_json::Value = serde_json::from_slice(&answer)
+                .map_err(|e| CiWatchError::Malformed(format!("invalid GitHub Actions JSON: {e}")))?;
+            Ok(serde_json::json!({"signature": signature, "response": response}).to_string().into_bytes())
+        })?;
+        let entry: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| CiWatchError::Malformed(format!("invalid GitHub Actions JSON: {e}")))?;
+        serde_json::from_value::<RunsResponse>(entry["response"].clone())
+            .map(|response| response.workflow_runs)
+            .map_err(|e| CiWatchError::Malformed(format!("invalid GitHub Actions JSON: {e}")))
     }
 
     fn check_runs_for_sha(
         &self,
         sha: &str,
     ) -> Result<Option<Vec<serde_json::Value>>, CiWatchError> {
-        let response: serde_json::Value = self.gh_json(&[
-            "api".to_string(),
-            "-X".to_string(),
-            "GET".to_string(),
-            format!("repos/{}/commits/{sha}/check-runs", self.repo),
-            "-f".to_string(),
-            "per_page=100".to_string(),
-        ])?;
+        // cas-0bc1: one answer per commit for every reader on the machine.
+        let bytes = crate::gh_budget::shared_read_by(
+            &crate::gh_budget::check_runs_key(&self.repo, sha),
+            crate::gh_budget::check_runs_ttl,
+            || {
+                self.gh_bytes(&[
+                    "api".to_string(),
+                    "-X".to_string(),
+                    "GET".to_string(),
+                    format!("repos/{}/commits/{sha}/check-runs", self.repo),
+                    "-f".to_string(),
+                    "per_page=100".to_string(),
+                ])
+            },
+        )?;
+        let response: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| CiWatchError::Malformed(format!("invalid GitHub Actions JSON: {e}")))?;
         response
             .get("check_runs")
             .and_then(serde_json::Value::as_array)
@@ -1331,12 +1477,7 @@ impl CiTransport for GhCiTransport {
     }
 
     fn failed_job_detail(&self, run_id: u64) -> Result<Option<FailedJob>, CiWatchError> {
-        let response: JobsResponse = self.gh_json(&[
-            "api".to_string(),
-            "-X".to_string(),
-            "GET".to_string(),
-            format!("repos/{}/actions/runs/{run_id}/jobs", self.repo),
-        ])?;
+        let response = self.run_jobs(run_id)?;
         Ok(response
             .jobs
             .into_iter()
@@ -1363,22 +1504,54 @@ impl CiTransport for GhCiTransport {
         &self,
         branch: &str,
     ) -> Result<Vec<DeliveryPullRequest>, CiWatchError> {
-        self.gh_json(&[
-            "pr".to_string(),
-            "list".to_string(),
-            "--repo".to_string(),
-            self.repo.clone(),
-            "--state".to_string(),
-            "all".to_string(),
-            "--head".to_string(),
-            branch.to_string(),
-            "--limit".to_string(),
-            "20".to_string(),
-            "--json".to_string(),
-            "number,headRefName,headRefOid,state,mergedAt,mergeCommit".to_string(),
-        ])
+        Ok(self.delivery_pull_requests_batch(&[branch])?.remove(branch).unwrap_or_default())
+    }
+
+    /// One GraphQL request for every branch, matched to its PRs locally
+    /// (cas-a9eb). One `gh pr list` per parked delivery per poll, 111 a minute
+    /// for train lanes that never get a PR, tripped GitHub's secondary limit
+    /// and held every Cassy call in backoff for half an hour at a time. The
+    /// branch names travel as variables, so none is spliced into the query.
+    fn delivery_pull_requests_batch(
+        &self,
+        branches: &[&str],
+    ) -> Result<BTreeMap<String, Vec<DeliveryPullRequest>>, CiWatchError> {
+        let repo = crate::cli::integrate::github::RepoRef::from_owner_slash_repo(&self.repo)
+            .ok_or_else(|| CiWatchError::Unavailable("invalid GitHub repository for the delivery PR lookup".to_string()))?;
+        let mut found = BTreeMap::new();
+        for chunk in branches.chunks(DELIVERY_PR_BATCH) {
+            let variables: String = (0..chunk.len()).map(|n| format!(", $h{n}: String!")).collect();
+            let fields: String = (0..chunk.len()).map(|n| format!(
+                " pr{n}: pullRequests(headRefName: $h{n}, states: [OPEN, CLOSED, MERGED], first: 20, orderBy: {{field: CREATED_AT, direction: DESC}}) {{ nodes {{ number headRefName headRefOid state mergedAt mergeCommit {{ oid }} }} }}"
+            )).collect();
+            let query = format!("query($owner: String!, $name: String!{variables}) {{ repository(owner: $owner, name: $name) {{{fields} }} }}");
+            let mut args = vec![
+                "api".to_string(), "graphql".to_string(),
+                "-f".to_string(), format!("query={query}"),
+                "-f".to_string(), format!("owner={}", repo.owner),
+                "-f".to_string(), format!("name={}", repo.repo),
+            ];
+            for (n, branch) in chunk.iter().enumerate() {
+                args.push("-f".to_string());
+                args.push(format!("h{n}={branch}"));
+            }
+            let answer: serde_json::Value = self.gh_json(&args)?;
+            for (n, branch) in chunk.iter().enumerate() {
+                let pulls = serde_json::from_value(answer["data"]["repository"][format!("pr{n}")]["nodes"].clone())
+                    .map_err(|e| CiWatchError::Malformed(format!("invalid delivery PR JSON: {e}")))?;
+                found.insert((*branch).to_string(), pulls);
+            }
+        }
+        Ok(found)
     }
 }
+
+/// Branches asked in one request, so a poll reads at most one request per 150
+/// watched branches. A query must stay bounded: 150 lookups of 20 PRs are 3,000
+/// of GitHub's 500,000 nodes and well inside the command-line limit, so a
+/// project's whole parked set (111 today) is one read; only a larger one takes
+/// another.
+const DELIVERY_PR_BATCH: usize = 150;
 
 fn merge_group_pr_number(branch: &str) -> Option<u64> {
     let (_, suffix) = branch.rsplit_once("/pr-")?;
@@ -1394,10 +1567,13 @@ pub(crate) fn collect_delivery_pr_observations(
     deliveries: &[AwaitingMergeDelivery],
 ) -> Result<Vec<DeliveryPrObservation>, CiWatchError> {
     let mut observations = Vec::new();
+    let branches: BTreeSet<&str> = deliveries.iter().map(|delivery| delivery.branch.as_str()).collect();
+    let pulls = transport.delivery_pull_requests_batch(&branches.into_iter().collect::<Vec<_>>())?;
     for delivery in deliveries {
-        let pulls = transport.delivery_pull_requests(&delivery.branch)?;
         let candidate = pulls
+            .get(&delivery.branch)
             .into_iter()
+            .flatten()
             .filter(|pull| pull.head_branch == delivery.branch)
             .filter(|pull| {
                 if let Some(number) = delivery.pr_number {
@@ -1409,7 +1585,8 @@ pub(crate) fn collect_delivery_pr_observations(
                         .is_none_or(|tip| tip == pull.head_sha)
                 }
             })
-            .max_by_key(|pull| pull.number);
+            .max_by_key(|pull| pull.number)
+            .cloned();
         let Some(pull) = candidate else {
             continue;
         };
@@ -2244,6 +2421,120 @@ mod tests {
         assert_eq!(probed, [Some("CI".to_string()), Some("CI".to_string())], "main-build is never probed");
     }
 
+    /// cas-0bc1 (soundwave and prowl, Nov 22): each pending `ci_completed`
+    /// reminder and each parked delivery cost one run read per commit per 30 s
+    /// poll, and exhausted the shared quota (4,319 core calls an hour). Forty
+    /// commits over ten polls cost one run list a poll; a commit the list cuts
+    /// off costs one read of its own per cache lifetime, counted across the
+    /// expiry; a finished commit's check-runs are read once until its runs change.
+    #[test]
+    fn parked_commits_cost_one_run_list_a_poll_not_one_read_each_cas_0bc1() {
+        use super::super::queue_and_events;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_TEST_GH_BUDGET", "1");
+        let project = env.home().join("project");
+        std::fs::create_dir_all(project.join(".github/workflows")).unwrap();
+        std::fs::write(project.join(".github/workflows/ci.yml"), "name: CI\non: push\n").unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        let mut owner = cas_types::Agent::new_with_role("bc1-owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+        owner.factory_session = Some("bc1".into());
+        crate::store::open_agent_store(&root).unwrap().register(&owner).unwrap();
+        const PARKED: usize = 40;
+        const POLLS: usize = 10;
+        let shas: Vec<String> = (1..=PARKED).map(|n| format!("{n:040x}")).collect();
+        for (n, sha) in shas.iter().enumerate() {
+            crate::factory_delivery_wake::arm_event(&root, &owner, &format!("cas-0bc1-{n}"), "ci_completed",
+                &serde_json::json!({"sha": sha, "workflow": "CI"}), false).unwrap();
+        }
+        let dir = env.home().join("gh");
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, body: serde_json::Value| std::fs::write(dir.join(name), body.to_string()).unwrap();
+        write("runs.json", serde_json::json!({"workflow_runs": []}));
+        write("by-sha.json", serde_json::json!({"workflow_runs": []}));
+        write("checks.json", serde_json::json!({"check_runs": []}));
+        let gh = dir.join("gh");
+        crate::test_paths::warm_stub(&gh, &format!(
+            "#!/bin/sh\necho \"$@\" >> '{dir}/calls.log'\ncase \"$4\" in\nrepos/org/repo/actions/runs) case \"$*\" in *head_sha=*) cat '{dir}/by-sha.json' ;; *) cat '{dir}/runs.json' ;; esac ;;\nrepos/org/repo/commits/*/check-runs) cat '{dir}/checks.json' ;;\nrepos/org/repo/actions/runs/7/jobs) cat '{dir}/jobs.json' ;;\nrepos/org/repo/branches/*) cat '{dir}/branch.json' ;;\n*) exit 97 ;;\nesac\n",
+            dir = dir.display(),
+        ));
+        let calls = || std::fs::read_to_string(dir.join("calls.log")).map_or(0, |log| log.lines().count());
+        let transport = || GhCiTransport {
+            repo: "org/repo".to_string(), cwd: project.clone(), gh_binary: gh.clone(),
+            completed: Default::default(), recent: Default::default(),
+        };
+        // A poll builds its own transport. Nothing has run yet for any commit.
+        let poll = |count: usize| {
+            for _ in 0..count {
+                let candidates = queue_and_events::ci_completed_candidates(&root, "bc1");
+                assert_eq!(candidates.len(), PARKED);
+                assert!(collect_ci_wakes(&transport(), &candidates).is_empty());
+            }
+        };
+        poll(POLLS);
+        assert!(calls() <= POLLS + 1, "{} core calls for {PARKED} commits over {POLLS} polls", calls());
+
+        // Its runs finish: the first look reads the run list and its checks (the
+        // list holds every run of the repo, so it is the commit's runs too); four
+        // more polls add only their run lists.
+        let sha = &shas[0];
+        let run = |attempt: u64, status: &str| serde_json::json!({"workflow_runs": [{"id": 7, "run_attempt": attempt,
+            "name": "CI", "head_branch": "factory/x", "head_sha": sha, "html_url": "https://github.test/runs/7",
+            "status": status, "conclusion": (status == "completed").then_some("success"), "event": "push", "check_suite_id": 7}]});
+        write("checks.json", serde_json::json!({"check_runs": [{"id": 1, "name": "CI", "status": "completed",
+            "conclusion": "success", "check_suite": {"id": 7}}]}));
+        write("runs.json", run(1, "completed"));
+        let before = calls();
+        for _ in 0..5 {
+            let transport = transport();
+            assert_eq!(transport.runs_for_sha(sha).unwrap().len(), 1);
+            assert_eq!(transport.check_runs_for_sha(sha).unwrap().unwrap().len(), 1);
+        }
+        assert_eq!(calls() - before, 2 + 4);
+
+        // A rerun is seen in the run list, and the finished checks are read again.
+        write("runs.json", run(2, "in_progress"));
+        assert!(transport().runs_for_sha(sha).unwrap().iter().any(|run| run.status != "completed"));
+        write("runs.json", run(2, "completed"));
+        let before = calls();
+        let polled = transport();
+        polled.runs_for_sha(sha).unwrap();
+        polled.check_runs_for_sha(sha).unwrap();
+        assert_eq!(calls() - before, 2);
+
+        // A red run's failing job and its branch tip are read once while it stays red.
+        write("jobs.json", serde_json::json!({"jobs": [{"name": "Scoped Validation", "conclusion": "failure", "steps": []}]}));
+        write("branch.json", serde_json::json!({"commit": {"sha": "abc"}}));
+        let before = calls();
+        for _ in 0..5 {
+            let polled = transport();
+            assert_eq!(polled.failing_job(7).unwrap().as_deref(), Some("Scoped Validation"));
+            assert_eq!(polled.branch_tip("factory/x").unwrap().as_deref(), Some("abc"));
+        }
+        assert_eq!(calls() - before, 2);
+
+        // Now the newest 100 runs cut every parked commit off. Each is read by its
+        // own request once, not once a poll, and again only after its cache
+        // expires: the recurring refresh is counted across the expiry.
+        let others: Vec<_> = (0..100u64).map(|n| serde_json::json!({"id": 1000 + n, "run_attempt": 1,
+            "name": "CI", "head_branch": "main", "head_sha": format!("{:040x}", 5000 + n),
+            "html_url": "https://github.test/runs/x", "status": "completed", "conclusion": "success",
+            "event": "push", "check_suite_id": 1000 + n})).collect();
+        write("runs.json", serde_json::json!({"workflow_runs": others}));
+        let before = calls();
+        poll(POLLS);
+        assert_eq!(calls() - before, POLLS + PARKED, "one run list a poll, one read of its own per cut-off commit");
+        let before = calls();
+        poll(POLLS);
+        assert_eq!(calls() - before, POLLS, "no cut-off commit is read again before its cache expires");
+        for entry in std::fs::read_dir(env.home().join(".cas/gh-cache")).unwrap().flatten() {
+            let aged = std::time::SystemTime::now() - Duration::from_secs(40 * 60);
+            let _ = std::fs::File::options().write(true).open(entry.path()).and_then(|file| file.set_modified(aged));
+        }
+        let before = calls();
+        poll(POLLS);
+        assert_eq!(calls() - before, POLLS + PARKED, "expiry costs one read per cut-off commit, not one a poll");
+    }
+
     /// cas-e845 / cas-ae6a: `ci_completed` waits only while a check-run of the
     /// selected runs is still running. A check cancelled with no rerun at the
     /// SHA, or any failed check, settles the wake. Driven through the real
@@ -2318,6 +2609,7 @@ mod tests {
                 cwd: temp.path().to_path_buf(),
                 gh_binary: gh,
                 completed: Default::default(),
+                recent: Default::default(),
             };
             let condition = CiCompleted { sha: sha.to_string(), workflow: Some("CI".to_string()) };
             let runs = ci_completed_runs(&transport, &condition).unwrap();
@@ -2498,13 +2790,14 @@ mod tests {
         let gh = temp.path().join("gh");
         crate::test_paths::warm_stub(
             &gh,
-            "#!/bin/sh\nprintf '%s' '[{\"number\":932,\"headRefName\":\"factory/calm-octopus-51\",\"headRefOid\":\"worker-tip\",\"state\":\"MERGED\",\"mergedAt\":\"2026-09-21T12:00:00Z\",\"mergeCommit\":{\"oid\":\"merge-tip\"}}]'\n",
+            "#!/bin/sh\nprintf '%s' '{\"data\":{\"repository\":{\"pr0\":{\"nodes\":[{\"number\":932,\"headRefName\":\"factory/calm-octopus-51\",\"headRefOid\":\"worker-tip\",\"state\":\"MERGED\",\"mergedAt\":\"2026-09-21T12:00:00Z\",\"mergeCommit\":{\"oid\":\"merge-tip\"}}]}}}}'\n",
         );
         let transport = GhCiTransport {
             repo: "org/repo".to_string(),
             cwd: temp.path().to_path_buf(),
             gh_binary: gh,
             completed: Default::default(),
+            recent: Default::default(),
         };
 
         let pulls = transport
@@ -2513,6 +2806,72 @@ mod tests {
         assert_eq!(pulls.len(), 1);
         assert_eq!(pulls[0].number, 932);
         assert_eq!(pulls[0].merge_commit.as_ref().unwrap().oid, "merge-tip");
+    }
+
+    /// cas-a9eb: 111 parked deliveries, nearly all train lanes that never get a
+    /// PR, were each looked up on every 60 s poll and tripped GitHub's secondary
+    /// limit. A poll now asks GitHub once for all of them, however many there
+    /// are and whatever a cache holds; a PR opening between polls is seen on the
+    /// next poll, and its merge on the one after.
+    #[test]
+    fn parked_deliveries_cost_one_pr_read_a_poll_however_many_cas_a9eb() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_TEST_GH_BUDGET", "1");
+        let dir = env.home().join("gh");
+        std::fs::create_dir_all(&dir).unwrap();
+        let gh = dir.join("gh");
+        // GitHub for this test: every read of PRs is one logged call; a batched
+        // query answers each `h<i>=<branch>` variable as `pr<i>` from
+        // `<branch with / as _>.json` (no PRs when absent).
+        crate::test_paths::warm_stub(&gh, &r#"#!/bin/sh
+echo "$1 $2" >> 'DIR/calls.log'
+case "$1 $2" in
+'pr list') echo '[]' ;;
+'api graphql')
+  out=''; sep=''
+  for a in "$@"; do case "$a" in h[0-9]*=*)
+    i=${a%%=*}; i=${i#h}; f="DIR/$(echo "${a#*=}" | tr / _).json"; nodes='[]'; [ -f "$f" ] && nodes=$(cat "$f")
+    out="$out$sep\"pr$i\":{\"nodes\":$nodes}"; sep=,;; esac; done
+  printf '{"data":{"repository":{%s}}}' "$out" ;;
+*) exit 97 ;;
+esac
+"#.replace("DIR", &dir.display().to_string()));
+        let pull = |branch: &str, state: &str| serde_json::json!([{"number": 9, "headRefName": branch, "headRefOid": "tip",
+            "state": state, "mergedAt": (state == "MERGED").then_some("2026-11-23T01:00:00Z"),
+            "mergeCommit": (state == "MERGED").then(|| serde_json::json!({"oid": "merge-tip"}))}]).to_string();
+        let calls = || std::fs::read_to_string(dir.join("calls.log")).map_or(0, |log| log.lines().count());
+        const PARKED: usize = 111;
+        const POLLS: usize = 10;
+        let deliveries: Vec<AwaitingMergeDelivery> = (0..PARKED).map(|n| AwaitingMergeDelivery {
+            task_id: format!("cas-{n}"), worker: format!("w{n}"), branch: format!("factory/w{n}-cas-{n}"),
+            branch_tip: None, pr_number: None,
+        }).collect();
+        let poll = || collect_delivery_pr_observations(&GhCiTransport {
+            repo: "org/repo".to_string(), cwd: dir.clone(), gh_binary: gh.clone(),
+            completed: Default::default(), recent: Default::default(),
+        }, &deliveries).unwrap();
+
+        let mut per_poll = Vec::new();
+        for _ in 0..POLLS {
+            let before = calls();
+            assert!(poll().is_empty());
+            per_poll.push(calls() - before);
+        }
+        assert_eq!(per_poll, [1; POLLS], "PR reads per poll for {PARKED} parked deliveries, the first included");
+
+        let lane = deliveries[7].branch.clone();
+        std::fs::write(dir.join(format!("{}.json", lane.replace('/', "_"))), pull(&lane, "OPEN")).unwrap();
+        let seen = poll();
+        assert_eq!(seen.iter().map(|o| (o.task_id.as_str(), o.pr_number, o.merge_commit.as_deref())).collect::<Vec<_>>(), [("cas-7", 9, None)]);
+        std::fs::write(dir.join(format!("{}.json", lane.replace('/', "_"))), pull(&lane, "MERGED")).unwrap();
+        assert_eq!(poll().iter().map(|o| o.merge_commit.as_deref()).collect::<Vec<_>>(), [Some("merge-tip")]);
+        assert_eq!(calls(), POLLS + 2, "a PR's opening and its merge are each seen on the next poll, still one read");
+
+        // Run lists cached together do not expire together, and none outlives its lifetime.
+        let expiry = |sha: &str| crate::gh_budget::jittered(OUTSIDE_LISTING_RUNS_TTL, &format!("runs org/repo {sha}"));
+        let (a, b) = (expiry(&format!("{:040x}", 1)), expiry(&format!("{:040x}", 2)));
+        assert_ne!(a, b);
+        assert!(a.max(b) <= OUTSIDE_LISTING_RUNS_TTL && a.min(b) >= OUTSIDE_LISTING_RUNS_TTL.mul_f64(0.9));
     }
 
     #[test]
@@ -2534,6 +2893,7 @@ mod tests {
             cwd: temp.path().to_path_buf(),
             gh_binary: gh.clone(),
             completed: Default::default(),
+            recent: Default::default(),
         };
         for transport in [daemon(), daemon()] {
             let pulls = transport.merge_queue_pull_requests().unwrap();
@@ -2563,6 +2923,7 @@ mod tests {
             cwd: temp.path().to_path_buf(),
             gh_binary: gh.clone(),
             completed: Default::default(),
+            recent: Default::default(),
         };
         let delivery = AwaitingMergeDelivery {
             task_id: "cas-held".to_string(),

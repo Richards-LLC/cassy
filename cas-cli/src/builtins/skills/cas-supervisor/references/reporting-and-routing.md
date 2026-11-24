@@ -23,7 +23,7 @@ A failed check is an incident: find or file the bug, and the fix-forward release
 
 ## Shared docs
 
-Deliveries add per-task fragments (`docs/qa/bug-families/<slug>.yaml`, `docs/product-overview.d/<task-id>.md`) and never edit CODEMAP or PRODUCT_OVERVIEW; park does not check them. Release prep folds the fragments in and regenerates both documents once. At review, request changes when a delivery edits a shared doc instead of adding its fragment.
+Deliveries add per-task fragments (`docs/qa/bug-families/<slug>.yaml`, `docs/product-overview.d/<task-id>.md`) and never edit CODEMAP or PRODUCT_OVERVIEW; park refuses a missing overview fragment (G-167) or a live-journey bug fix with no bug family (G-168). Release prep folds the fragments in and regenerates both documents once. At review, request changes when a delivery edits a shared doc instead of adding its fragment.
 
 ## Publication
 

@@ -13,6 +13,7 @@ import os
 import platform
 from pathlib import Path
 import re
+import shlex
 import signal
 import subprocess
 import statistics
@@ -26,6 +27,8 @@ import zipfile
 
 VERSION = 1
 SAFE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
+# The capped worker's positive named-filter grammar (factory_worker_check::named_filter).
+WORKER_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_:.-]*")
 
 
 def git(root, *args):
@@ -247,7 +250,10 @@ def plan(root, base, zero, history, delivery=False):
         for path in result["paths"]:
             if path.startswith((".claude/", ".codex/", ".grok/", "docs/", "changelog.d/")):
                 continue
-            if path.startswith(("scripts/", ".github/")):
+            # Commander e2e specs, helpers and the hub double never compile into
+            # Rust; lane-journeys runs them. Only a Rust test naming one is
+            # selected, so a journey-only diff runs no Rust (cas-a658).
+            if path.startswith(("scripts/", ".github/", "hub-web/e2e/")):
                 contract_paths.append(path)
                 continue
             if path in {"Cargo.toml", "Cargo.lock", ".config/nextest.toml"} or path.startswith((".cargo/", "vendor/")):
@@ -394,6 +400,18 @@ def lane_split(root, selection):
             selected.append(f"(package({command['package']}) and ({args[args.index('-E') + 1]}))")
         selected = " or ".join(selected)
     own = [row["filter"] for row in selection.get("file_contracts", [])]
+    # GH #2140: `own` is lane CI's nextest expression. The capped worker admits
+    # only positive named filters per package and harness, so each own part
+    # also gets that admitted superset, or is named as lane-CI-only.
+    worker, ci_only = {}, []
+    def prove(package, harness, name):
+        worker.setdefault((package, harness), []).append(f"test({name})")
+    for row in selection.get("file_contracts", []):
+        package, _, harness = row["binary"].partition("::")
+        if WORKER_NAME.fullmatch(row["test"]):
+            prove(row["package"], harness or None, row["test"])
+        else:
+            ci_only.append(row["filter"])
     try:
         crates, _ = workspace(root)
         direct = sorted(name for name, (member, _) in crates.items() if any(p.startswith(member + "/") for p in paths))
@@ -403,13 +421,21 @@ def lane_split(root, selection):
     for name in direct:
         if name != "cas":
             own.append(f"package({name})")
+            ci_only.append(f"package({name})")
             continue
         modules = sorted({p.split("/")[2].removesuffix(".rs") for p in paths if p.startswith("cas-cli/src/")} - {"lib", "main"})
-        parts = [f"(binary(cas) and test(/^{module}::/))" for module in modules if SAFE.fullmatch(module) and "-" not in module]
+        modules = [module for module in modules if SAFE.fullmatch(module) and "-" not in module]
+        parts = [f"(binary(cas) and test(/^{module}::/))" for module in modules]
+        for module in modules:
+            prove("cas", None, f"{module}::")
         for stem, target in sorted(mapping.items()):
             files = integration_sources(root, stem)
             if any(owns(stem, p, files) for p in paths):
                 parts.append(f"binary({target})" if target == stem else f"(binary({target}) and test({stem}::))")
+                if target == stem:
+                    ci_only.append(f"(package(cas) and binary({target}))")
+                else:
+                    prove("cas", target, f"{stem}::")
         if parts:
             own.append("(package(cas) and (" + " or ".join(parts) + "))")
     # Existing whole-tree refusal audits belong before the ring for production
@@ -418,6 +444,7 @@ def lane_split(root, selection):
     if any(path.endswith(".rs") and "/tests/" not in path for path in paths):
         audit = "(package(cas) and binary(cas) and test(gates::registry_tests::))"
         own.append(audit)
+        prove("cas", None, "gates::registry_tests::")
         selected = f"({selected}) or ({audit})" if selected else audit
         if not build:
             build = ["-p", "cas", "--lib"]
@@ -427,7 +454,14 @@ def lane_split(root, selection):
             if "--test" in build and "--lib" not in build:
                 build.append("--lib")
     own = " or ".join(own) or None
-    return {"build": build, "selected": selected, "own": own, "ring": f"({selected}) and not ({own})" if own else selected}
+    commands = []
+    for (package, harness), filters in sorted(worker.items(), key=lambda item: (item[0][0], item[0][1] or "")):
+        args = ["nextest", "run", "-p", package, *(["--lib"] if harness is None else ["--test", harness]),
+                "-E", " | ".join(sorted(set(filters)))]
+        commands.append({"args": args, "command": "cas factory worker-check --cas-root \"$CAS_ROOT\" -- "
+                         + " ".join(shlex.quote(arg) for arg in args)})
+    return {"build": build, "selected": selected, "own": own, "ring": f"({selected}) and not ({own})" if own else selected,
+            "worker": commands, "ci_only": ci_only}
 
 # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
 def lane_count(root, source, expression):
@@ -447,7 +481,9 @@ def lane_run(root, selection, source, expression, extra, destination, role):
     # Preserve archive compiler identity while binding the actual runtime.
     selection = dict(selection, configuration=proof_configuration(root, selection.get("configuration")))
     started = time.monotonic()
-    env = dict(os.environ, VERIFIED_TEST_LOG=str(log.resolve()))
+    # build.rs watches scripts/ recursively. Python helpers invoked by tests
+    # must not create __pycache__ there and invalidate the build just consumed.
+    env = dict(os.environ, VERIFIED_TEST_LOG=str(log.resolve()), PYTHONDONTWRITEBYTECODE="1")
     invocation = ["nextest", "run", *source, "-E", expression, *extra, "--no-fail-fast"]
     status = subprocess.run([str(root / "scripts/run-verified-tests.sh"), *invocation], cwd=root, env=env).returncode
     receipt = record(selection, [str(log)], status, time.monotonic() - started, destination, role)
@@ -820,11 +856,13 @@ def lane_attribute(root, base, failures, destination, configuration=None, base_s
 
 
 def lane_base(root, recorded_ref, inferred):
-    """Resolve the recorded attribution base without changing the impact range.
+    """Attribute against the newest target commit already contained in HEAD.
 
-    A record that is missing or not an ancestor of HEAD falls back to the
-    inferred base; the returned source names which one was used.
+    The plan resolves the live target merge-base. A recorded ancestor is
+    only a fallback when that target cannot be resolved.
     """
+    if inferred:
+        return inferred, "live target merge-base"
     if not recorded_ref:
         return inferred, "inferred: no record requested"
     found = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{recorded_ref}^{{commit}}"], cwd=root, capture_output=True, text=True)
@@ -882,6 +920,9 @@ def lane(root, args):
         write(out, {"plan": selection, "split": split})
         outputs = {"mode": selection["mode"], "build-args": " ".join(split["build"]), "base-source": selection["base_source"]}
         print(f"Lane impact: {selection['mode']} ({'; '.join(selection['reasons']) or 'delivery range'}); own: {split['own']}; ring: {split['ring']}")
+        # GH #2140: the own expression above is lane CI's; these are the worker's.
+        print("Worker proof: " + ("; ".join(row["command"] for row in split["worker"]) or "none")
+              + "; lane CI only: " + (", ".join(split["ci_only"]) or "none"))
         print("Subprocess suites: " + ", ".join(selection.get("subprocess_stems", [])))
         status = 0
     else:

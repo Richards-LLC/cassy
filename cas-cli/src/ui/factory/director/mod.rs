@@ -22,6 +22,7 @@ pub(crate) mod tasks;
 
 pub use data::{AgentSummary, DirectorData, DirectorStores, TaskSummary};
 pub(crate) use events::pick_best_open_branch_epic;
+pub(crate) use events::worker_has_pending_reminder;
 pub use events::{
     DirectorEvent, DirectorEventDetector, SupervisorActionableState, SupervisorStallTracker,
 };

@@ -1,7 +1,7 @@
 import type { PreviewWindow } from "./progress-model";
 import type { CheckedAccountUsage } from "./account-usage-check";
 import type { CommandReceipt } from "./supervisor-commands";
-import type { AccountChange, AccountsCatalog } from "./accounts-model";
+import type { AccountChange, AccountsCatalog, GatewayInventory } from "./accounts-model";
 import { installationLock, notifyInstallation } from "./installation-access";
 import { catalog, installationStore } from "./storage";
 import { credentialFence, type CredentialFence } from "./commander-journal";
@@ -875,6 +875,11 @@ export class HubConnectionSupervisor {
   /** Registry-backed machine accounts; management uses the hub's allowlist. */
   async accounts(signal?: AbortSignal): Promise<AccountsCatalog> {
     return this.request("GET", "/v1/accounts", undefined, signal);
+  }
+
+  /** The machine's home gateway readiness and hub accounts; read-only. */
+  async gatewayAccounts(signal?: AbortSignal): Promise<GatewayInventory> {
+    return this.request("GET", "/v1/accounts/gateway", undefined, signal);
   }
 
   async checkAccountUsage(account: string, signal?: AbortSignal): Promise<CheckedAccountUsage> {

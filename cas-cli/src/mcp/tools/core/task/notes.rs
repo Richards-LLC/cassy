@@ -246,6 +246,12 @@ impl CasCore {
             }),
         };
         metadata["notification_ids"] = serde_json::json!(note_notification_ids(note));
+        // GH #2401: the AC checklist gate (G-166) reads supervisor rulings here.
+        let supervisor = note_type.eq_ignore_ascii_case("decision")
+            .then(|| self.resolve_live_supervisor_authority().ok()).flatten();
+        if supervisor.is_some() {
+            metadata["supervisor_decision"] = serde_json::json!(note);
+        }
         let event = Event::new(
             EventType::TaskNoteAdded,
             EventEntityType::Task,
@@ -256,9 +262,7 @@ impl CasCore {
         .with_metadata(metadata);
 
         let event_id = event_store.record(&event)?;
-        if note_type.eq_ignore_ascii_case("decision")
-            && let Ok(supervisor) = self.resolve_live_supervisor_authority()
-        {
+        if let Some(supervisor) = supervisor {
             super::block_hold::record_supervisor_decision(&self.cas_root, &supervisor, task_id, event_id)
                 .map_err(anyhow::Error::msg)?;
         }

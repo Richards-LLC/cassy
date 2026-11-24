@@ -5747,6 +5747,15 @@ async fn transfer_adopt_branch_recovers_unassigned_recorded_source_cas_fa05() {
         assert_eq!(after.deliverables.parked_branch.as_deref(), Some(expected.as_str()));
         assert_eq!(after.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));
         assert!(after.deliverables.handoff_branches.contains(&recorded));
+        // cas-faa9 (GH #1437, #2334): the start record follows the adopted
+        // lane and receiver and keeps the delivery's base, so a queued start,
+        // rebind and close measure the lane that holds the delivery.
+        let start = after.deliverables.factory_branch_start.as_ref().unwrap();
+        assert_eq!(
+            (start.assignee.as_str(), start.branch.as_str(), start.base_sha.as_str()),
+            (receiver.name.as_str(), expected.as_str(),
+                task.deliverables.factory_branch_start.as_ref().unwrap().base_sha.as_str()),
+        );
         assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().agent_id, receiver.id);
     }
 }

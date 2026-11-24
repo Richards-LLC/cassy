@@ -13592,7 +13592,8 @@ mod worker_commit_guard_tests {
     fn raw_github_merge_hook_holds_the_exact_verifier_dispatch_cas_eb2e() {
         use cas_types::{
             AgentRole, Event, EventEntityType, EventType, RepositoryProofBoundary, Verification,
-            VerificationProofBoundary, VerificationProvenance, VerificationStatus,
+            VerificationDispatchState, VerificationProofBoundary, VerificationProvenance,
+            VerificationStatus, WorkerCompletionReceiptInput, WorkerDeliveryState,
         };
 
         let mut env = TestEnvGuard::temp_home();
@@ -13608,19 +13609,52 @@ mod worker_commit_guard_tests {
             .unwrap();
         assert!(head.status.success());
         let head = std::str::from_utf8(&head.stdout).unwrap().trim();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "{:?}", output.stderr);
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["remote", "add", "origin", "https://github.com/acme/project.git"]);
+        git(&["branch", "factory/proof", head]);
+        git(&["commit", "--allow-empty", "-m", "prepared candidate"]);
+        let candidate_head = git(&["rev-parse", "HEAD"]);
+        assert_ne!(candidate_head, head);
         let gh = repo.path().join("gh");
         crate::test_paths::warm_stub(
             &gh,
             r#"#!/bin/sh
-case "$1 $2 $3" in
-  'api graphql -f')
-    [ "$6" = "id=PR_fixture" ] || exit 1
-    printf '{"data":{"node":{"number":2546,"headRefName":"factory/proof","headRefOid":"%s","repository":{"nameWithOwner":"acme/project"}}}}' "$CAS_TEST_PR_HEAD";;
-  'pr view 2546') printf '{"number":2546,"headRefName":"factory/proof","headRefOid":"%s","statusCheckRollup":[]}' "$CAS_TEST_PR_HEAD";;
-  'pr view 2547') printf '{"number":2547,"headRefName":"factory/other","headRefOid":"%s","statusCheckRollup":[]}' "$CAS_TEST_PR_HEAD";;
-  'pr view 2548') printf '{"number":2548,"headRefName":"factory/proof","headRefOid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","statusCheckRollup":[]}';;
+if [ "$1 $2" = 'api graphql' ]; then
+  [ "$6" = "id=PR_fixture" ] || exit 1
+  printf '{"data":{"node":{"number":2546,"headRefName":"factory/proof","headRefOid":"%s","repository":{"nameWithOwner":"acme/project"}}}}' "$CAS_TEST_PR_HEAD"
+  exit
+fi
+[ "$1 $2" = 'pr view' ] || exit 1
+number=$3
+branch=factory/proof
+head=$CAS_TEST_PR_HEAD
+case "$number" in
+  2546) ;;
+  2547) branch=factory/other;;
+  2548) head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;;
   *) exit 1;;
 esac
+while [ "$1" != '--json' ]; do [ "$#" -gt 1 ] || exit 1; shift; done
+IFS=,
+separator=''
+printf '{'
+for field in $2; do
+  printf '%s"%s":' "$separator" "$field"
+  case "$field" in
+    number) printf '%s' "$number";;
+    url) printf '"https://github.com/acme/project/pull/%s"' "$number";;
+    headRefName) printf '"%s"' "$branch";;
+    headRefOid) printf '"%s"' "$head";;
+    statusCheckRollup) printf '[]';;
+    *) exit 1;;
+  esac
+  separator=,
+done
+printf '}'
 "#,
         );
         env.set("CAS_QA_GH", &gh);
@@ -13629,14 +13663,23 @@ esac
         std::fs::write(&config, "[qa]\nindependent_pass = false\n").unwrap();
 
         let mut task = Task::new("cas-verifier-pr".into(), "Raw merge verifier fixture".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
         task.deliverables.delivery_pr_number = Some(2546);
         task.deliverables.parked_branch = Some("factory/proof".into());
         open_task_store(&cas_root).unwrap().add(&task).unwrap();
         let supervisor = Agent::new_with_role("merge-supervisor".into(), "supervisor".into(), AgentRole::Supervisor);
         open_agent_store(&cas_root).unwrap().register(&supervisor).unwrap();
-        let proof = VerificationProofBoundary::task_at(RepositoryProofBoundary {
+        let receipt = cas_store::build_worker_completion_receipt(&WorkerCompletionReceiptInput {
+            task_id: task.id.clone(), worker_agent_id: "worker".into(), repo_selector: "acme/project".into(),
+            source_branch: "factory/proof".into(), commit_sha: head.into(), merge_base_sha: head.into(),
+            target_branch: "main".into(), target_sha: head.into(), proof_reference: "fixture".into(),
+            scope_summary: "Raw merge gate".into(), artifact_path: None,
+        }, "worker", chrono::Utc::now());
+        let transaction = cas_store::create_worker_delivery(&cas_root, &receipt, WorkerDeliveryState::AwaitingMerge, "worker").unwrap();
+        let mut proof = VerificationProofBoundary::delivery(receipt.id, transaction.id);
+        proof.repository = Some(RepositoryProofBoundary {
             peer_premerge: None, repository_root: cwd.into(), worktree_root: cwd.into(),
-            head_commit: head.into(), state_digest: "fixture".into(), target_branch: None,
+            head_commit: candidate_head, state_digest: "fixture".into(), target_branch: None,
             anchor_commits: vec![head.into()],
         });
         let dispatch = || {
@@ -13669,16 +13712,19 @@ esac
                     "supervisor_decision": format!("Raw GitHub merge override {}: {reason}", dispatch.id),
                 }))).unwrap();
         };
-        let run = |role: &str, command: &str, expected: Option<&str>| {
+        let denial_for = |role: &str, command: &str| {
             let mut input = hook_git_write_input(cwd, command);
             input.agent_role = Some(role.into());
             if role == "supervisor" {
                 input.session_id = supervisor.id.clone();
             }
             let output = handle_pre_tool_use(&input, Some(&cas_root)).unwrap();
-            let denial = crate::gates::facts::hook_denial(&output);
+            crate::gates::facts::hook_denial(&output).map(str::to_string)
+        };
+        let run = |role: &str, command: &str, expected: Option<&str>| {
+            let denial = denial_for(role, command);
             match expected {
-                Some(code) => assert!(denial.is_some_and(|text| text.contains(code)),
+                Some(code) => assert!(denial.as_deref().is_some_and(|text| text.contains(code)),
                     "{role} {command}: expected {code}, got {denial:?}"),
                 None => assert!(denial.is_none(), "{role} {command}: {denial:?}"),
             }
@@ -13687,6 +13733,7 @@ esac
         let command = merge(2546);
         let api = concat!("gh api -X PUT ", "repos/acme/project/pulls/2546/", "merge");
         let graphql = concat!("gh api graphql -f query='mutation { mergePull", "Request(input: {pullRequestId: \"PR_fixture\"}) { clientMutationId } }'");
+        let graphql_variables = concat!("gh api graphql -f query='mutation($pr: ID!) { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }' -F pr=PR_fixture");
         let first = dispatch();
         run("worker", &command, Some("PR_VERIFIER_PENDING"));
         run("supervisor", api, Some("PR_VERIFIER_PENDING"));
@@ -13704,6 +13751,16 @@ esac
         let audit = audit.metadata.as_ref().unwrap();
         assert_eq!(audit["task_id"], task.id);
         assert_eq!(audit["detail"], format!("{}: {reason}", first.id));
+
+        let variables_denial = denial_for("worker", graphql_variables);
+        cas_store::request_changes_for_parked_delivery(&cas_root, &task.id, &supervisor.id, "repair fixture").unwrap();
+        let reopened = open_task_store(&cas_root).unwrap().get(&task.id).unwrap();
+        assert!(reopened.deliverables.parked_branch.is_none());
+        assert!(reopened.deliverables.delivery_pr_number.is_none());
+        assert_eq!(cas_store::get_verification_dispatch(&cas_root, &first.id).unwrap().state, VerificationDispatchState::Invalidated);
+        let repair_denial = denial_for("worker", &command);
+        let rejected = |denial: Option<String>| denial.is_some_and(|text| text.contains("PR_VERIFIER_REJECTED"));
+        assert_eq!((rejected(repair_denial), rejected(variables_denial)), (true, true), "same-source repair and GraphQL field-variable holds");
 
         let next = dispatch();
         assert_ne!(next.id, first.id);

@@ -152,6 +152,37 @@ pub(crate) fn live_workers(root: &Path) -> Result<LiveWorkers, String> {
     Ok(live)
 }
 
+/// The requester's worker recipe. The receiver spawns exactly this or refuses.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Recipe {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
+}
+
+impl Recipe {
+    pub(crate) fn from_request(req: &cas_mcp::FactoryRequest) -> Self {
+        Self { cli: req.cli.clone(), model: req.model.clone(), effort: req.effort.clone(), lane: req.lane.clone() }
+    }
+
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn render(&self) -> String {
+        [("cli", &self.cli), ("model", &self.model), ("effort", &self.effort), ("lane", &self.lane)]
+            .into_iter()
+            .filter_map(|(name, value)| value.as_ref().map(|value| format!("{name}={value}")))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RoutePlan {
     key: String,
@@ -169,6 +200,8 @@ struct RoutePlan {
     live_workers: Option<usize>,
     #[serde(default)]
     max_workers: Option<usize>,
+    #[serde(default, skip_serializing_if = "Recipe::is_empty")]
+    recipe: Recipe,
 }
 
 impl RoutePlan {
@@ -197,7 +230,7 @@ impl RoutePlan {
     ) -> Result<String, crate::cloud::peer_mailbox::PeerSendError> {
         let project_id = crate::cloud::resolve_canonical_id(root)
             .ok_or_else(|| send_error("build routing needs a canonical repository identity"))?;
-        let body = crate::cloud::peer_mailbox::attach_message_intent(&route_brief(task), Some("ask"), false)
+        let body = crate::cloud::peer_mailbox::attach_message_intent(&route_brief(task, &self.recipe), Some("ask"), false)
             .map_err(send_error)?;
         let message = crate::cloud::peer_mailbox::PeerSend {
             project_id,
@@ -231,7 +264,7 @@ fn clip(text: &str, max: usize) -> String {
 
 /// A bounded staffing ask: identity, target, the supervisor's spawn brief,
 /// and clipped description and acceptance criteria.
-fn route_brief(task: &cas_types::Task) -> String {
+fn route_brief(task: &cas_types::Task, recipe: &Recipe) -> String {
     let spawn_brief = task.notes.rfind(SPAWN_BRIEF_MARKER).map(|start| {
         let rest = &task.notes[start + SPAWN_BRIEF_MARKER.len()..];
         rest.split(&format!("\n{ROUTE_MARKER}")).next().unwrap_or(rest)
@@ -251,6 +284,13 @@ fn route_brief(task: &cas_types::Task) -> String {
         kind = task.task_type,
         priority = task.priority,
     );
+    if !recipe.is_empty() {
+        brief.push_str(&format!(
+            "\nWorker recipe: {}\nSpawn exactly this recipe. Never substitute another; if it cannot be \
+             spawned here, refuse back to the requester with the reason.\n",
+            recipe.render(),
+        ));
+    }
     for (label, text, max) in [
         ("Supervisor brief", spawn_brief.unwrap_or(""), BRIEF_CHARS),
         ("Description", task.description.as_str(), DESCRIPTION_CHARS),
@@ -283,6 +323,34 @@ pub(crate) fn routed_from(task: &cas_types::Task) -> Option<String> {
     task.notes.lines().rev().find_map(|line| {
         serde_json::from_str::<RoutePlan>(line.strip_prefix(ROUTE_MARKER)?).ok()
     }).map(|plan| plan.source_machine_id)
+}
+
+/// Receiver side: a task routed here from another machine carries the
+/// requester's recipe. Fill what the spawn request omits; refuse what differs.
+pub(crate) fn apply_route_recipe(task: &cas_types::Task, request: &mut Recipe) -> Result<(), String> {
+    let local = cas_types::Agent::get_or_generate_machine_id();
+    let Some(plan) = task.notes.lines().rev().find_map(|line| {
+        serde_json::from_str::<RoutePlan>(line.strip_prefix(ROUTE_MARKER)?).ok()
+    }).filter(|plan| plan.source_machine_id != local) else { return Ok(()) };
+    let routed = plan.recipe;
+    for (name, wanted, asked) in [
+        ("cli", &routed.cli, &mut request.cli),
+        ("model", &routed.model, &mut request.model),
+        ("effort", &routed.effort, &mut request.effort),
+        ("lane", &routed.lane, &mut request.lane),
+    ] {
+        match (wanted, asked.as_ref()) {
+            (Some(wanted), Some(asked)) if wanted != asked => return Err(format!(
+                "Routed recipe mismatch for {}: the requester asked for {name}={wanted}, this spawn has \
+                 {name}={asked}. Nothing was queued. Spawn with the routed recipe ({}) or refuse back to \
+                 the requester; never substitute.",
+                task.id, routed.render(),
+            )),
+            (Some(wanted), None) => *asked = Some(wanted.clone()),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn send_error(error: impl ToString) -> crate::cloud::peer_mailbox::PeerSendError {
@@ -391,6 +459,7 @@ fn prepare(
     sender: &cas_types::Agent,
     task: &mut cas_types::Task,
     brief: Option<&str>,
+    recipe: &Recipe,
     config: &crate::config::FactoryConfig,
     guard: &crate::factory_build_guard::BuildGuardSnapshot,
 ) -> Result<Option<RoutePlan>, String> {
@@ -534,6 +603,7 @@ fn prepare(
         observed_at: Some(capacity.observed_at),
         live_workers: capacity.live_workers,
         max_workers: capacity.max_workers,
+        recipe: recipe.clone(),
     };
     if let Some(brief) = brief {
         task.notes.push_str(&format!("\n{SPAWN_BRIEF_MARKER}{brief}\n"));
@@ -550,6 +620,7 @@ pub(crate) fn route(
     sender: &cas_types::Agent,
     task_id: &str,
     brief: Option<&str>,
+    recipe: &Recipe,
     config: &crate::config::FactoryConfig,
     guard: &crate::factory_build_guard::BuildGuardSnapshot,
 ) -> Result<Option<String>, String> {
@@ -599,7 +670,7 @@ pub(crate) fn route(
     // an observed departure on an unclaimed task restores local admission.
     if let Some(receipt) = existing_receipt(&mut expected)? { return Ok(Some(receipt)); }
     let mut task = expected.clone();
-    let plan = prepare(root, sender, &mut task, brief, config, guard)?;
+    let plan = prepare(root, sender, &mut task, brief, recipe, config, guard)?;
     if task.notes != expected.notes {
         task.updated_at = tasks
             .update_if_current(&task, &expected)
@@ -635,6 +706,39 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const REPO: &str = "github.com/acme/widgets";
+
+    fn sonnet_high() -> Recipe {
+        Recipe {
+            cli: Some("claude".into()),
+            model: Some("claude-sonnet-5-5".into()),
+            effort: Some("high".into()),
+            lane: None,
+        }
+    }
+
+    /// The receiver spawns the routed recipe exactly, or refuses; a local task is untouched.
+    #[test]
+    fn routed_recipe_is_applied_or_refused_never_substituted_gh_2419() {
+        let routed = |source: &str| {
+            let mut task = cas_types::Task::new("cas-recipe".into(), "Routed".into());
+            task.notes = format!("{ROUTE_MARKER}{}", serde_json::json!({
+                "key": "build-route:r:cas-recipe", "source_machine_id": source,
+                "sender_agent_id": "s", "recipient_agent_id": "r", "recipient": "r@m",
+                "free_slots": 1, "load_per_cpu": null, "recipe": sonnet_high(),
+            }));
+            task
+        };
+        let task = routed("another-machine");
+        let mut omitted = Recipe::default();
+        apply_route_recipe(&task, &mut omitted).unwrap();
+        assert_eq!(omitted, sonnet_high());
+        let mut wrong = Recipe { model: Some("claude-opus-4-8".into()), ..Default::default() };
+        let refusal = apply_route_recipe(&task, &mut wrong).unwrap_err();
+        assert!(refusal.contains("model") && refusal.contains("claude-sonnet-5-5"), "{refusal}");
+        let mut local = Recipe::default();
+        apply_route_recipe(&routed(&cas_types::Agent::get_or_generate_machine_id()), &mut local).unwrap();
+        assert!(local.is_empty());
+    }
 
     fn peer(id: &str, slots: usize, load: f64, age: i64) -> serde_json::Value {
         serde_json::json!({
@@ -684,7 +788,7 @@ mod tests {
     async fn retry_route(root: &Path, sender: &cas_types::Agent) -> Result<Option<String>, String> {
         let (root, sender) = (root.to_path_buf(), sender.clone());
         tokio::task::spawn_blocking(move || route(
-            &root, &sender, "cas-retry", None, &Default::default(),
+            &root, &sender, "cas-retry", None, &Recipe::default(), &Default::default(),
             &crate::factory_build_guard::evaluate(8, Some(24.0), 5, 1, 5),
         )).await.unwrap()
     }
@@ -759,7 +863,7 @@ mod tests {
         assert_eq!(live_worker_count(&root).unwrap(), 7);
         let routed_root = root.clone();
         let result = tokio::task::spawn_blocking(move || route(
-            &routed_root, &sender, "cas-retry", None, &Default::default(),
+            &routed_root, &sender, "cas-retry", None, &Recipe::default(), &Default::default(),
             &crate::factory_build_guard::evaluate(8, Some(1.0), 0, 1, 5),
         )).await.unwrap().unwrap();
         assert!(result.is_none());
@@ -1014,6 +1118,7 @@ mod tests {
                     &sender_copy,
                     &id,
                     Some("Supervisor full brief"),
+                    &sonnet_high(),
                     &config,
                     &guard,
                 )
@@ -1032,6 +1137,10 @@ mod tests {
                 let updated = tasks.get(&task.id).unwrap();
                 assert!(updated.assignee.is_none());
                 assert!(updated.notes.contains("build-route:") && updated.notes.contains("best"));
+                let noted = updated.notes.lines().find_map(|line| {
+                    serde_json::from_str::<RoutePlan>(line.strip_prefix(ROUTE_MARKER)?).ok()
+                }).unwrap();
+                assert_eq!(noted.recipe, sonnet_high(), "{case}: BUILD_ROUTE note carries the recipe");
                 let (root_copy, sender_copy, id) = (root.clone(), sender.clone(), task.id.clone());
                 tokio::task::spawn_blocking(move || {
                     route(
@@ -1039,6 +1148,7 @@ mod tests {
                         &sender_copy,
                         &id,
                         None,
+                        &Recipe::default(),
                         &Default::default(),
                         &crate::factory_build_guard::evaluate(8, Some(24.0), 5, 1, 5),
                     )
@@ -1078,6 +1188,9 @@ mod tests {
                         .contains("Supervisor full brief")
                 );
                 assert!(body["body"].as_str().unwrap().contains("ask"));
+                for value in ["claude", "claude-sonnet-5-5", "high"] {
+                    assert!(text.contains(value), "{case}: route brief carries {value}");
+                }
                 assert_eq!(
                     body["dedupe_key"],
                     format!("build-route:{REPO}:{}", task.id)
@@ -1332,6 +1445,7 @@ mod tests {
                         &sender,
                         "cas-release",
                         None,
+                        &Recipe::default(),
                         &config,
                         &crate::factory_build_guard::evaluate(8, Some(24.0), 5, 1, 5),
                     )
@@ -1441,6 +1555,7 @@ mod tests {
                     &sender,
                     id,
                     None,
+                    &Recipe::default(),
                     &Default::default(),
                     &crate::factory_build_guard::evaluate(8, Some(24.0), 5, 1, 5),
                 )

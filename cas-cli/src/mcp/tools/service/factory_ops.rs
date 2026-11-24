@@ -2951,6 +2951,10 @@ impl CasService {
                     .patch_execution_state(task_id, &serde_json::json!({"class_audit": class}))
                     .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
             }
+            let mut recipe = crate::factory_build_routing::Recipe::from_request(&req);
+            crate::factory_build_routing::apply_route_recipe(&task, &mut recipe)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+            (req.cli, req.model, req.effort, req.lane) = (recipe.cli, recipe.model, recipe.effort, recipe.lane);
             preassigned_task = Some(task.clone());
             if task.is_terminal() {
                 return Err(Self::error(
@@ -3254,11 +3258,12 @@ impl CasService {
                     self.inner.cas_root.clone(), task_id.to_string(), spawn_brief.clone(),
                     factory_config.clone(), build_guard.clone(),
                 );
+                let recipe = crate::factory_build_routing::Recipe::from_request(&req);
                 let routed = tokio::task::spawn_blocking(move || {
                     let mut config = config;
                     // A forced local spawn releases a prior automatic route.
                     config.auto_route_builds &= !force_build_guard;
-                    crate::factory_build_routing::route(&root, &sender, &id, brief.as_deref(), &config, &guard)
+                    crate::factory_build_routing::route(&root, &sender, &id, brief.as_deref(), &recipe, &config, &guard)
                 }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
                     .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?;
                 if let Some(receipt) = routed { return Ok(Self::success(receipt)) }

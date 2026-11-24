@@ -18,6 +18,7 @@ mod delivery_evolution;
 mod delivery_git;
 mod snapshot_approval;
 mod rule_references;
+mod dead_code;
 mod rebased_delivery;
 pub(crate) use rebased_delivery::same_patch_set as rebased_delivery_has_same_patches;
 pub(crate) use super::qa_dispatch::freshest_target_ref;
@@ -9770,6 +9771,20 @@ impl CasCore {
                 &task, &evidence_repo, rule_head.as_deref(), req.reason.as_deref().unwrap_or(""),
             ) {
                 gate_refusals.push(message);
+            }
+            // cas-d68f: name every symbol the delivery left without a caller.
+            // gate[G-169 park as-of]: Delivery leaves symbols without callers (dead-code sweep)
+            match dead_code::at_park(&evidence_repo, &resolved_parent_branch, rule_head.as_deref()) {
+                Ok(None) => {}
+                Ok(Some(note)) => close_notes.record(&mut task, &note),
+                Err(message) if supervisor_override => {
+                    accepted_override_codes.push("G-169");
+                    close_notes.record(&mut task, &format!(
+                        "✅ DECISION dead-code sweep waived by supervisor override: {}. Waived refusal: {message}",
+                        req.reason.as_deref().unwrap_or("").trim()
+                    ));
+                }
+                Err(message) => gate_refusals.push(crate::gates::tag("G-169", message)),
             }
             // cas-4b33: journey registry upkeep (G-49) runs as the lane lint
             // and CODEMAP/PRODUCT_OVERVIEW are regenerated at release prep, so
@@ -49625,6 +49640,9 @@ mod no_code_close_tests;
 #[cfg(test)]
 #[path = "close_ops/blast_radius_park_tests.rs"]
 mod blast_radius_park_tests;
+#[cfg(test)]
+#[path = "close_ops/dead_code_tests.rs"]
+mod dead_code_tests;
 #[cfg(test)]
 #[path = "close_ops/g61_family_close_tests.rs"]
 mod g61_family_close_tests;

@@ -149,6 +149,7 @@ impl CasCore {
                     .to_string(),
             );
         }
+        lines.push("Dead code: park names every function, method, export, type or CSS class the delivery leaves without a caller; delete it or keep its caller.".to_string());
         if !receipt_scope::workspace_package_dirs(&repo).is_empty() {
             lines.push("Focused proof: each changed Rust crate needs a passing capped test receipt at the tip.".to_string());
         }

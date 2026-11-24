@@ -534,10 +534,13 @@ impl Cursor {
         } else {
             Some(turn.cached.values().fold(0u64, |sum, n| sum.saturating_add(*n)))
         };
+        // A replayed history has no record of what the agent ran then, only what it runs now.
+        let recorded = |observed: &Option<String>, current: &Option<String>| observed.as_deref().and_then(slug)
+            .or_else(|| current.as_deref().filter(|_| self.since.is_none()).and_then(slug));
         let spend = TurnSpend {
             harness: Some(harness_name(self.source.cli).to_owned()),
-            model: turn.model.as_deref().and_then(slug).or_else(|| self.identity.model.as_deref().and_then(slug)),
-            effort: turn.effort.as_deref().and_then(slug).or_else(|| self.identity.effort.as_deref().and_then(slug)),
+            model: recorded(&turn.model, &self.identity.model),
+            effort: recorded(&turn.effort, &self.identity.effort),
             cached_input_tokens: cached,
         };
         let mut event = NewQualityEvent::new(

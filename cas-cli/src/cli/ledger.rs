@@ -42,17 +42,7 @@ pub struct LedgerArgs {
 enum LedgerCommand {
     /// Alias of `cas scorecard`
     #[command(hide = true)]
-    Report {
-        /// Release tag, vX.Y.Z. Omit for work since the last release.
-        #[arg(long)]
-        release: Option<String>,
-        /// Read local rows only; do not pull from Cloud first
-        #[arg(long)]
-        offline: bool,
-        /// Measurement deadline for cross-machine park visibility (never a gate).
-        #[arg(long, default_value_t = 10)]
-        park_visibility_minutes: u32,
-    },
+    Report(ScorecardArgs),
     /// Turn history already on disk into events, including filed Cassy problems (safe to rerun)
     Backfill {
         /// How many days of task notes and verifications to read
@@ -88,19 +78,15 @@ enum LedgerCommand {
 }
 
 pub fn execute_scorecard(args: &ScorecardArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
-    scorecard(args.release.as_deref(), args.offline, args.park_visibility_minutes, cli, cas_root)
-}
-
-fn scorecard(release: Option<&str>, offline: bool, park_visibility_minutes: u32, cli: &Cli, cas_root: &Path) -> Result<()> {
-    if !offline {
+    if !args.offline {
         pull_before_report(cas_root);
     }
     let repo = cas_root.parent().unwrap_or(cas_root);
-    let mut report = build_report(cas_root, repo, release)?;
-    if park_visibility_minutes != 10 {
-        report.sensors = sensors::local(cas_root, report.from, report.to, park_visibility_minutes);
+    let mut report = build_report(cas_root, repo, args.release.as_deref())?;
+    if args.park_visibility_minutes != 10 {
+        report.sensors = sensors::local(cas_root, report.from, report.to, args.park_visibility_minutes);
     }
-    sensors::external(cas_root, report.from, report.to, offline, &mut report.sensors);
+    sensors::external(cas_root, report.from, report.to, args.offline, &mut report.sensors);
     report.health = health::assess(&report);
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -112,9 +98,7 @@ fn scorecard(release: Option<&str>, offline: bool, park_visibility_minutes: u32,
 
 pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
     match &args.command {
-        LedgerCommand::Report { release, offline, park_visibility_minutes } => {
-            scorecard(release.as_deref(), *offline, *park_visibility_minutes, cli, cas_root)?;
-        }
+        LedgerCommand::Report(report) => execute_scorecard(report, cli, cas_root)?,
         LedgerCommand::Backfill { days,sync } => {
             let since = Utc::now() - Duration::days(*days);
             let inserted = crate::quality_ledger::backfill(cas_root, since)?;
@@ -2315,7 +2299,7 @@ mod tests {
         use clap::Parser;
         let release = |args: &[&str]| match super::super::Cli::try_parse_from(args).unwrap().command {
             Some(super::super::Commands::Scorecard(a)) => a.release,
-            Some(super::super::Commands::Ledger(LedgerArgs { command: LedgerCommand::Report { release, .. } })) => release,
+            Some(super::super::Commands::Ledger(LedgerArgs { command: LedgerCommand::Report(a) })) => a.release,
             _ => panic!("not a report command: {args:?}"),
         };
         assert_eq!(release(&["cas", "scorecard", "--release", "v9.99.0"]).as_deref(), Some("v9.99.0"));

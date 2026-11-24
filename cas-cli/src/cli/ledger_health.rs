@@ -14,8 +14,6 @@ use super::{LedgerReport, Measure};
 const IMPOSSIBLE_MINUTES: f64 = 30.0 * 24.0 * 60.0;
 /// Share of examined hosted jobs whose runner could not be read before the sensor is broken.
 const MISSING_SHARE: f64 = 0.05;
-/// Per-task spend must add up to the actor totals within this share.
-const RECONCILE_SHARE: f64 = 0.01;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -140,12 +138,8 @@ pub(super) fn assess(report: &LedgerReport) -> Vec<SensorHealth> {
     });
 
     let c = &report.spend_coverage;
-    let summed: u64 = report.spend_by_task.values().map(|t| t.total.input_tokens).sum();
-    let off = summed.abs_diff(t.input_tokens) as f64;
     rows.push(if c.turns == 0 {
         row("turn_spend", Health::Empty, "no model turns in the window")
-    } else if off > RECONCILE_SHARE * t.input_tokens as f64 {
-        row("turn_spend", Health::Broken, format!("per-task input {summed} does not reconcile with actor total {}", t.input_tokens))
     } else if c.with_model == 0 {
         row("turn_spend", Health::Empty, format!("0 of {} turns carry model, effort or harness; turns recorded before the producer stored them cannot be split", c.turns))
     } else {

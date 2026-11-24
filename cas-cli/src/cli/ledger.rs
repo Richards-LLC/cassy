@@ -1919,7 +1919,7 @@ mod tests {
         ] {
             let mut event = NewQualityEvent::new(key, QualityPayload::Turn { supersedes: None, notice_kind: None,
                 woken_by: channel, actions: if no_op { vec![] } else { vec![cas_store::TurnAction::TaskMutation] },
-                no_op, input_tokens: usage, output_tokens: usage.map(|_| 5), minutes: usage.map(|_| 0.5),
+                no_op, input_tokens: usage, output_tokens: usage.map(|_| 5), minutes: usage.map(|_| 0.5), spend: None,
             });
             event.occurred_at = occurred_at;
             event.actor = Some("sup-a".into());

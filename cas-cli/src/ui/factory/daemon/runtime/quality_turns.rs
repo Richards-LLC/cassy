@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use cas_store::{
-    NewQualityEvent, PromptQueueStore, QualityPayload, QueueOrigin, TurnAction, WakeChannel,
+    NewQualityEvent, PromptQueueStore, QualityPayload, QueueOrigin, TurnAction, TurnSpend, WakeChannel,
 };
 use cas_types::{Agent, AgentRole};
 use chrono::{DateTime, Utc};
@@ -42,6 +42,12 @@ struct Cursor {
     created: Option<SystemTime>,
     pending: Option<Pending>,
     usage: (u64, u64),
+    /// Codex reports cumulative cached input beside `usage`.
+    cached_usage: u64,
+    /// The scanned agent's recorded model identity and whether it is a worker
+    /// (its turns belong to the one task it is working).
+    identity: crate::agent_model::AgentModel,
+    worker_name: Option<String>,
     outbox: VecDeque<NewQualityEvent>,
     retry_at: Option<Instant>,
     /// cas-5f67: input tokens and end time of turns newly written this pass.
@@ -64,7 +70,40 @@ struct Pending {
     messages: HashMap<String, (u64, u64)>,
     usage: Option<(u64, u64)>,
     baseline: (u64, u64),
+    /// Cached input of the turn: Claude sums its messages, Codex diffs cumulative counts.
+    cached: HashMap<String, u64>,
+    cached_baseline: u64,
+    cached_total: Option<u64>,
+    model: Option<String>,
+    effort: Option<String>,
     reply: String,
+}
+
+/// Identity strings are stored as slugs; anything else would refuse the whole event.
+fn slug(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= 96
+        && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':' | b'/')))
+    .then(|| value.to_owned())
+}
+
+fn harness_name(cli: cas_mux::SupervisorCli) -> &'static str {
+    match cli {
+        cas_mux::SupervisorCli::Claude => "claude",
+        cas_mux::SupervisorCli::Codex => "codex",
+        cas_mux::SupervisorCli::Grok => "grok",
+        cas_mux::SupervisorCli::OpenCode => "opencode",
+    }
+}
+
+/// The one task a worker holds, or none when it holds several or none.
+fn active_task(root: &Path, worker: &str) -> Option<String> {
+    let tasks = crate::store::open_task_store_local(root).ok()?;
+    let mut ids = tasks
+        .ids_by_assignees_and_statuses(&[worker], &[crate::types::TaskStatus::InProgress])
+        .ok()?;
+    (ids.len() == 1).then(|| ids.remove(0))
 }
 
 fn timestamp(value: &Value) -> Option<DateTime<Utc>> {
@@ -391,6 +430,11 @@ impl Pending {
             messages: HashMap::new(),
             usage: None,
             baseline,
+            cached: HashMap::new(),
+            cached_baseline: 0,
+            cached_total: None,
+            model: None,
+            effort: None,
             reply: String::new(),
         }
     }
@@ -459,6 +503,12 @@ impl Cursor {
             created: None,
             pending: None,
             usage: (0, 0),
+            cached_usage: 0,
+            identity: crate::agent_model::AgentModel {
+                id: String::new(), name: String::new(), role: String::new(),
+                harness: None, model: None, effort: None,
+            },
+            worker_name: None,
             outbox: VecDeque::new(),
             retry_at: None,
             recorded: Vec::new(),
@@ -482,6 +532,17 @@ impl Cursor {
                 (i.saturating_add(*a), o.saturating_add(*b))
             }))
         };
+        let cached = if turn.cached.is_empty() {
+            turn.cached_total
+        } else {
+            Some(turn.cached.values().fold(0u64, |sum, n| sum.saturating_add(*n)))
+        };
+        let spend = TurnSpend {
+            harness: Some(harness_name(self.source.cli).to_owned()),
+            model: turn.model.as_deref().and_then(slug).or_else(|| self.identity.model.as_deref().and_then(slug)),
+            effort: turn.effort.as_deref().and_then(slug).or_else(|| self.identity.effort.as_deref().and_then(slug)),
+            cached_input_tokens: cached,
+        };
         let mut event = NewQualityEvent::new(
             format!(
                 "turn|{}|{}|{}",
@@ -497,10 +558,15 @@ impl Cursor {
                     .started
                     .filter(|start| *start <= at)
                     .map(|start| (at - start).num_milliseconds() as f64 / 60_000.0),
+                spend: Some(spend),
             },
         );
         event.occurred_at = at;
         event.actor = Some(self.source.agent_id.clone());
+        // A replayed history cannot say which task a worker held then.
+        if self.since.is_none() && let Some(worker) = &self.worker_name {
+            event.task_id = active_task(root, worker);
+        }
         self.outbox.push_back(event);
         self.flush(root);
     }
@@ -602,7 +668,14 @@ impl Cursor {
                                     usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
                                 );
                             turn.messages.insert(id.to_owned(), (i, o));
+                            turn.cached.insert(
+                                id.to_owned(),
+                                usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
+                            );
                         }
+                    }
+                    if let Some(model) = value.pointer("/message/model").and_then(Value::as_str) {
+                        turn.model = Some(model.to_owned());
                     }
                     for part in content.as_array().into_iter().flatten() {
                         if part["type"] == "tool_use"
@@ -644,7 +717,9 @@ impl Cursor {
                     if let Some(id) = payload["turn_id"].as_str()
                         && self.pending.as_ref().is_none_or(|turn| turn.id != id)
                     {
-                        self.pending = Some(Pending::new(id, at, self.usage));
+                        let mut turn = Pending::new(id, at, self.usage);
+                        turn.cached_baseline = self.cached_usage;
+                        self.pending = Some(turn);
                     }
                 }
                 "token_count" => {
@@ -654,7 +729,10 @@ impl Cursor {
                         usage["output_tokens"].as_u64(),
                     ) {
                         self.usage = (i, o);
+                        let cached = usage["cached_input_tokens"].as_u64();
+                        self.cached_usage = cached.unwrap_or(self.cached_usage);
                         if let Some(turn) = &mut self.pending {
+                            turn.cached_total = cached.and_then(|c| c.checked_sub(turn.cached_baseline));
                             turn.usage = i
                                 .checked_sub(turn.baseline.0)
                                 .zip(o.checked_sub(turn.baseline.1));
@@ -669,6 +747,11 @@ impl Cursor {
                     }
                 }
                 _ => {}
+            }
+        } else if kind == "turn_context" {
+            if let Some(turn) = &mut self.pending {
+                turn.model = payload["model"].as_str().map(str::to_owned);
+                turn.effort = payload["effort"].as_str().map(str::to_owned);
             }
         } else if kind == "response_item"
             && let Some(turn) = &mut self.pending
@@ -819,6 +902,8 @@ impl Cursor {
         queue: &dyn PromptQueueStore,
         agents: &[Agent],
     ) -> std::io::Result<()> {
+        self.identity = crate::agent_model::AgentModel::from_agent(agent);
+        self.worker_name = (agent.role == AgentRole::Worker).then(|| agent.name.clone());
         self.flush(root);
         // Backpressure bounds memory on a temporarily unavailable local store.
         if self.outbox.len() >= 512 {
@@ -835,6 +920,7 @@ impl Cursor {
             self.offset = 0;
             self.pending = None;
             self.usage = (0, 0);
+            self.cached_usage = 0;
         }
         #[cfg(test)]
         if let Some(hook) = self.before_read.take() {

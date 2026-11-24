@@ -195,7 +195,7 @@ pub use qa_pass_store::{
 pub use quality_event_store::{
     CheckOutcome, CheckStage, FeedbackSource, FeedbackVerdict, InterventionKind, NewQualityEvent,
     QUALITY_EVENT_BATCH_LIMIT, QUALITY_EVENT_SCHEMA_STATEMENTS, QualityEvent, QualityEventWire,
-    EstimateReference, ReviewEvidence, QualityPayload, WakeChannel, TurnAction, QUALITY_EVENT_TURN_UPGRADE_STATEMENTS, QUALITY_EVENT_FRICTION_UPGRADE_STATEMENTS, QUALITY_EVENT_ESTIMATE_UPGRADE_STATEMENTS, FrictionSource, ensure_quality_event_schema, import_quality_events,
+    EstimateReference, ReviewEvidence, TurnSpend, QualityPayload, WakeChannel, TurnAction, QUALITY_EVENT_TURN_UPGRADE_STATEMENTS, QUALITY_EVENT_FRICTION_UPGRADE_STATEMENTS, QUALITY_EVENT_ESTIMATE_UPGRADE_STATEMENTS, FrictionSource, ensure_quality_event_schema, import_quality_events,
     normalize_release_version, quality_event_by_id, quality_events_after, quality_events_between,
     quality_open_estimates, quality_check_samples, quality_events_for_task, quality_interventions_since, quality_release_events,
     record_quality_event, quality_event_recorded, sanitize_quality_link, sanitize_quality_title,

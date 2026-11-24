@@ -308,7 +308,7 @@ async fn rejected_turns_do_not_block_other_quality_events_or_pull() {
                     no_op: true,
                     input_tokens: Some(30),
                     output_tokens: Some(5),
-                    minutes: Some(0.05),
+                    minutes: Some(0.05), spend: None,
                 },
             );
             cas_store::record_quality_event(&root, &turn).unwrap();
@@ -398,7 +398,7 @@ async fn unrelated_turn_batch_errors_surface_after_pull() {
                     no_op: true,
                     input_tokens: None,
                     output_tokens: None,
-                    minutes: None,
+                    minutes: None, spend: None,
                 },
             );
             cas_store::record_quality_event(&root, &turn).unwrap();

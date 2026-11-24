@@ -271,6 +271,21 @@ pub struct ReviewEvidence {
     pub supersedes: Option<String>,
 }
 
+/// What a turn ran on, recorded where the turn is read so a report never has to
+/// re-parse a transcript. `cached_input_tokens` is the part of `input_tokens`
+/// the harness served from cache.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TurnSpend {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+}
+
 /// Kind-specific metrics. Strings are slugs, versions or hex; never free text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -295,6 +310,8 @@ pub enum QualityPayload {
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
         minutes: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spend: Option<TurnSpend>,
     },
     CheckRun {
         check_id: String,
@@ -381,10 +398,14 @@ impl QualityPayload {
                 if !is_slug(estimate_id) || !is_slug(subject) || !is_slug(reason) || !actual_minutes.is_finite() || *actual_minutes<0.0
                     || (*below_typical && !inside_range) { return Err("invalid estimate outcome".into()); }
             }
-            Self::Turn { actions, no_op, minutes, notice_kind, supersedes, .. } => {
+            Self::Turn { actions, no_op, minutes, notice_kind, supersedes, spend, .. } => {
                 if notice_kind.as_deref().is_some_and(|kind| !is_slug(kind))
                     || supersedes.as_deref().is_some_and(|id| !is_slug(id)) {
                     return Err("invalid notice kind".into());
+                }
+                if spend.as_ref().is_some_and(|s| [&s.harness, &s.model, &s.effort]
+                    .into_iter().flatten().any(|value| !is_slug(value))) {
+                    return Err("invalid turn spend identity".into());
                 }
                 if *no_op != actions.is_empty() || actions.len() > 8
                     || actions.iter().collect::<std::collections::BTreeSet<_>>().len() != actions.len()
@@ -1002,7 +1023,7 @@ mod tests {
         assert_eq!(quality_events_after(dir.path(), 0, 10).unwrap(), before);
         let mut turn = NewQualityEvent::new("turn", QualityPayload::Turn { supersedes: None, notice_kind: None,
             woken_by: WakeChannel::Unknown, actions: vec![], no_op: true,
-            input_tokens: None, output_tokens: None, minutes: Some(0.5),
+            input_tokens: None, output_tokens: None, minutes: Some(0.5), spend: None,
         });
         assert!(record_quality_event(dir.path(), &turn).unwrap());
         let rows = quality_events_after(dir.path(), 0, 10).unwrap();

@@ -2045,6 +2045,8 @@ async fn premerge_approval_of_a_no_code_spike_covers_the_artifacts_it_reviewed_g
         assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{case}: {parked}");
 
         let repo = f.dir.path();
+        git(repo, &["config", "user.name", "CAS Test"]);
+        git(repo, &["config", "user.email", "cas@example.test"]);
         env.set("CAS_AGENT_ROLE", "supervisor");
         let train_owner = CasCore::with_daemon(f.cas_dir(), None, None);
         train_owner.set_agent_id_for_testing("nocode-supervisor-session".into());

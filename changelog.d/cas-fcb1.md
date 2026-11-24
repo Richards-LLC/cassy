@@ -16,5 +16,6 @@
   A named Rust selection that runs zero tests runs its crate once instead, and
   park accepts that crate pass for the changed tests; the Rust prescription
   names the crate, harness and exact test. Deleted files owe nothing.
-  Registry journey specs, and helpers only journeys import, follow the journey
-  lane. A pass at the exact commit counts from any worktree of the repository.
+  Registry journey specs whose Playwright config starts no local server (a
+  deployed host), and helpers only those journeys import, follow the journey
+  lane; locally served journeys stay owed by the worker. A pass at the exact commit counts from any worktree of the repository.

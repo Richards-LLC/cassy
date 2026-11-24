@@ -5431,6 +5431,37 @@ async fn ended_dismissal_is_shared_durable_and_generation_bound() {
     }
 }
 
+/// DESIGN-NOTE proof plan: POST /v1/sessions refuses `routing: gateway` for a
+/// project whose machine has no ready hub, refuses an unknown route, and
+/// launches nothing in either case.
+#[tokio::test]
+async fn launch_refuses_a_gateway_route_without_a_ready_hub_and_launches_nothing() {
+    let home = crate::test_env_guard::TestEnvGuard::temp_home();
+    let repo = home.home().join("Petrastella").join("gw-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&repo).status().unwrap().success());
+    crate::store::init_cas_dir(&repo).unwrap();
+    let root = super::projects::configured_launch_roots().unwrap().into_iter().next().expect("the Petrastella launch root");
+    let mut scopes = control_scopes();
+    scopes.insert(Scope::SessionLaunch);
+    let fixture = ops_fixture(scopes);
+    let manager = crate::ui::factory::SessionManager::new();
+    for (routing, status, code) in [("gateway", StatusCode::UNPROCESSABLE_ENTITY, "gateway_unavailable"), ("sideways", StatusCode::BAD_REQUEST, "invalid_routing")] {
+        let name = format!("gw-refused-{routing}");
+        let (got, body) = fixture
+            .call("POST", "/v1/sessions", Some(serde_json::json!({
+                "target": {"kind": "browse", "root_id": root.id, "path": "gw-repo"},
+                "supervisor_cli": "claude",
+                "name": name,
+                "routing": routing,
+            })))
+            .await;
+        assert_eq!(got, status, "{routing}: {body}");
+        assert_eq!(body["error"], code, "{routing}: {body}");
+        assert!(manager.find_session(Some(&name)).unwrap().is_none(), "{routing}: nothing launches");
+    }
+}
+
 /// End session was the one Commander mutation with no audit row (brief O8).
 #[tokio::test]
 async fn end_session_writes_audit_row() {

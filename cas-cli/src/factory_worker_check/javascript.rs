@@ -151,9 +151,10 @@ const NODE_TEST_REPORTER: &str = r#"export default async function* (source) {
     const failed = type === 'test:fail' && !data.skip && !data.todo;
     if (failed) { success = false; file.status = 'failed'; }
     if (data.details?.type === 'suite') continue;
+    const error = data.details?.error;
     file.assertionResults.push({
       fullName: [...names.slice(0, data.nesting), data.name].join(' '),
-      failureType: failed ? data.details?.error?.failureType : undefined,
+      failureType: failed ? error?.failureType ?? (error?.name === 'AbortError' ? 'testAborted' : undefined) : undefined,
       status: data.skip ? 'skipped' : data.todo ? 'todo' : failed ? 'failed' : 'passed',
     });
   }

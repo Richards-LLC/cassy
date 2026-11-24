@@ -16,6 +16,14 @@ pub struct FactoryGatewayConfig {
     /// Worker harnesses routed through the hub. Unset means claude and codex.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clients: Option<Vec<String>>,
+    /// User-level only: the hub's existing usage dashboard (CPA Manager Plus),
+    /// read for Commander's hub account inventory. Same private-host rule.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dashboard: Option<String>,
+    /// User-level only: the dashboard's admin key file (mode 0600). Cassy uses
+    /// it for read-only GETs and never sends it or the URL to Commander.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dashboard_key_file: Option<String>,
 }
 
 impl FactoryGatewayConfig {

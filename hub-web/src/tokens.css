@@ -56,6 +56,7 @@
   --mobile-pane-min-width: 260px;
   --mobile-attention-label-width: 200px;
   --rail-item-min: 44px;
+  --pill-action-height: 32px;
   --browser-notice-height: 32px;
   --keyboard-viewport-height: 100dvh;
   --outage-banner-space: 0px;
@@ -179,6 +180,7 @@
     --mobile-pane-min-width: 260px;
     --mobile-attention-label-width: 200px;
     --rail-item-min: 44px;
+    --pill-action-height: 32px;
     --browser-notice-height: 32px;
     --keyboard-viewport-height: 100dvh;
     --outage-banner-space: 0px;
@@ -302,6 +304,7 @@ html[data-scheme="light"] {
   --mobile-pane-min-width: 260px;
   --mobile-attention-label-width: 200px;
   --rail-item-min: 44px;
+  --pill-action-height: 32px;
   --browser-notice-height: 32px;
   --keyboard-viewport-height: 100dvh;
   --outage-banner-space: 0px;
@@ -424,6 +427,7 @@ html[data-scheme="dark"] {
   --mobile-pane-min-width: 260px;
   --mobile-attention-label-width: 200px;
   --rail-item-min: 44px;
+  --pill-action-height: 32px;
   --browser-notice-height: 32px;
   --keyboard-viewport-height: 100dvh;
   --outage-banner-space: 0px;

@@ -178,11 +178,6 @@ bug_families:
     tasks: [cas-99e7]
     invariants: [HUB-J27-NATIVE-IDLE-COMMANDS]
     journeys: [HUB-J27]
-  reload-cassy-claude-codex-badge:
-    title: Reload Cassy waits for a quiet moment, confirms Codex's supervisor restart, proves the installed build and leaves a durable loaded-build badge
-    tasks: [cas-8c4f]
-    invariants: [HUB-J27-RELOAD-PROOF]
-    journeys: [HUB-J27]
   card-reload-and-command-follow-through:
     title: Reload Cassy is visible on skewed supervisor cards; header commands open beside their button and stale busy receipts resolve or dismiss
     tasks: [cas-fd9ff]
@@ -2790,6 +2785,11 @@ bug_families:
     tasks: [cas-dc08]
     journeys: [FACTORY-SPAWN, FACTORY-CLOSE]
     invariants: []
+  reload-cassy-claude-codex-badge:
+    title: Reload Cassy waits for a quiet moment, confirms Codex's supervisor restart, proves the installed build and leaves a durable loaded-build badge
+    tasks: [cas-8c4f]
+    invariants: [HUB-J27-RELOAD-PROOF]
+    journeys: [HUB-J27]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -3034,10 +3034,6 @@ invariants:
     statement: Older Claude MCP cards expose Reload Cassy directly and the existing conversation-header menu always retains it; ordinary cards add no action line or extra Tab stop; card and typed mcp share the existing command and truthful receipt. Header commands open beside their button. A completed command shows its outcome as a self-clearing toast with no card; refused status stays until dismissed; submitted dismissal does not cancel or duplicate a mutation, and accepted retries clear earlier busy refusals.
     check: Run the reload and dismiss-reload cases in supervisor-commands.journey.ts at desktop and phone, assert card version stays old while queued and changes only with observed receipt/catalog evidence, no chat sends, anchored dropdown bounds, refusal dismissal and post-turn completion. Run ProjectNavigation and SupervisorCommandSession Vitest guards for unsupported harnesses and concurrent commands.
     bug: {task: cas-fd9ff}
-  HUB-J27-RELOAD-PROOF:
-    statement: Reload Cassy sends nothing when the live MCP already runs the installed build; otherwise it queues until the native turn ends and shows the waiting animation. Claude reconnects natively; Codex restarts its supervisor only after confirmation, with workers kept. Success needs a replacement live MCP whose version equals cas --version; a mismatch is a failure with a next step. Brief store contention never becomes a failure. The open conversation header and factory status bar show the loaded build and Eastern load time until the next reload.
-    check: Run reload_cassy_requires_a_replacement_live_registry_pid_and_version; run the HUB-J27 Claude reload and Codex confirm cases in supervisor-commands.journey.ts at desktop and phone, asserting the waiting animation while queued or submitted, one confirmed Codex frame, the mismatch receipt and the header badge after the observed catalog.
-    bug: {task: cas-8c4f}
   HUB-J27-DISMISS-CANCEL:
     statement: Dismiss cancels the caller's queued Finish or interactive receipt daemon-side without PTY input. A closed native chooser releases its stale flag before a later command, while genuinely submitted commands and native modals still prevent unsafe input. Refusals identify the blocking command and its recovery.
     check: Run queued_finish_can_be_cancelled_without_typing_then_exit_is_accepted_cas_f1a2 and native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser; run the HUB-J27 queued Finish dismissal before Exit at desktop and 390 px, assert one caller-owned cancel frame, no chat sends, and no dismissal before the daemon receipt.
@@ -3649,6 +3645,14 @@ invariants:
     statement: A supervisor can retry an open epic's freeze with the returned promotion payload; train label, integration target and freeze persist together, making the epic visible to auto-cut. Divergent open train lanes refuse before mutation with their epic ids.
     check: Run mcp_promotes_release_epic_and_exposes_it_to_auto_cut_cas_e49f and mcp_promotion_refuses_divergent_train_without_mutation_cas_e49f through factory MCP; replay the returned command, read active_trains and the auto-cut poll on a published lane, then attempt promotion beside a genuinely divergent Git lane and require unchanged task rows.
     bug: {task: cas-e49f}
+  HUB-J13-GATEWAY-ROUTE:
+    statement: For a selected project, New session offers Direct or Home gateway. It names the routed workers, says the supervisor stays direct, disables the gateway with the hub's reason when it isn't ready, and pins the chosen route on the launch. Accounts shows the machine's hub accounts read-only, apart from native profiles; it lists no Team accounts and sends no hub key or address. Team lanes show each worker's effective route and fallback reason.
+    check: Run gateway::tests::session_pin_overrides_the_project_setting_in_both_directions, gateway_accounts tests, the bridge status projection test, launch-session, accounts-panel and team-view vitest, and the HUB-J13 home-gateway journey (1280/390 light/dark). Batch QA starts real Claude and Codex sessions through the gateway on the candidate, and the hub dashboard attributes their requests to cassy/<worker>. It also stops the hub to read a fallback lane.
+    bug: {task: cas-87e9f23877d30ea6}
+  HUB-J27-RELOAD-PROOF:
+    statement: Reload Cassy sends nothing when the live MCP already runs the installed build; otherwise it queues until the native turn ends and shows the waiting animation. Claude reconnects natively; Codex restarts its supervisor only after confirmation, with workers kept. Success needs a replacement live MCP whose version equals cas --version; a mismatch is a failure with a next step. Brief store contention never becomes a failure. The open conversation header and factory status bar show the loaded build and Eastern load time until the next reload.
+    check: Run reload_cassy_requires_a_replacement_live_registry_pid_and_version; run the HUB-J27 Claude reload and Codex confirm cases in supervisor-commands.journey.ts at desktop and phone, asserting the waiting animation while queued or submitted, one confirmed Codex frame, the mismatch receipt and the header badge after the observed catalog.
+    bug: {task: cas-8c4f}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS
@@ -4738,6 +4742,7 @@ journeys:
   - hub-web/src/accounts-panel.css
   - hub-web/src/accounts-model.ts
   - hub-web/src/account-usage-check.ts
+  - hub-web/src/account-meters.ts
   - cas-cli/src/hub/accounts.rs
   - cas-cli/src/hub/account_routes.rs
   - hub-web/src/launch-session.ts

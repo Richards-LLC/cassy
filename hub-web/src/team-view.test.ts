@@ -8,7 +8,7 @@ it("joins the selected session to real receipts, keeps focus on live updates and
   const root = document.createElement("section"); root.tabIndex = 0; document.body.append(root);
   const snapshot: TeamSnapshot = {
     roster: ["lark", "owl", "robin"], supervisor: "supervisor", supervisors: ["supervisor"], focused: "release", actions: [request],
-    agents: [{ name: "lark", current_task: "work", liveness: "executing", harness: "codex", model: "gpt-6.1", task_started_at: "2026-10-28T12:00:00Z", recent_trail: [{ step: "started", reference: "event:12" }], latest_activity: { summary: "SECRET RAW TOOL OUTPUT", created_at_rfc3339: "2026-10-28T12:00:00Z" } }, { name: "outsider" }],
+    agents: [{ name: "lark", current_task: "work", liveness: "executing", harness: "codex", model: "gpt-6.1", route: { kind: "fallback", reason: "hub unreachable" }, task_started_at: "2026-10-28T12:00:00Z", recent_trail: [{ step: "started", reference: "event:12" }], latest_activity: { summary: "SECRET RAW TOOL OUTPUT", created_at_rfc3339: "2026-10-28T12:00:00Z" } }, { name: "outsider" }],
     tasks: [{ id: "work", title: "Ship the staffing view", status: "InProgress", epic_id: "release" }, { id: "merge", title: "Review", status: "AwaitingMerge", epic_id: "release" }],
     epics: [{ id: "release", title: "Release staffing", status: "InProgress", progress: { total: 8, merged: 3, merges_per_hour: 1.5 } }],
   };
@@ -20,6 +20,11 @@ it("joins the selected session to real receipts, keeps focus on live updates and
   expect(root.textContent).toContain("6.1");
   expect(root.textContent).not.toMatch(/SECRET RAW|outsider/);
   expect(root.querySelectorAll('[data-reported="true"]')).toHaveLength(1);
+  // The effective route and its fallback reason are per lane; an unreported route is never shown as direct.
+  expect(root.querySelector('.team-lane[data-worker="lark"] .team-route')?.getAttribute("data-route")).toBe("fallback");
+  expect(root.querySelector('.team-lane[data-worker="lark"] .team-route')?.textContent).toContain("hub unreachable");
+  expect(root.querySelector('.team-lane[data-worker="owl"] .team-route')?.getAttribute("data-route")).toBe("unreported");
+  expect(root.querySelector(".team-routes")).not.toBeNull();
   expect(root.querySelector('.team-lane[data-worker="lark"] .supervisor-state')?.classList.contains("working")).toBe(true);
   // Receipt names say when it was reported; an internal event id means nothing to a reader.
   const started = root.querySelector('.team-lane[data-worker="lark"] .team-trail li');

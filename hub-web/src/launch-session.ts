@@ -1,5 +1,6 @@
-import { AccountUsageChecks, type CheckAccountUsage } from "./account-usage-check";
-import { accountCapacity, type AccountWindow } from "./accounts-model";
+import { AccountUsageChecks, type CheckAccountUsage, type CheckedAccountUsage } from "./account-usage-check";
+import { capacityLine, exclusionText, fillMeters, localReadLine, meterMarkup, pickReason, readings, type PickReason, type WindowReading } from "./account-meters";
+import type { AccountWindow, UsageSource } from "./accounts-model";
 // New session (cas-0f51): start a factory session on a paired machine from
 // Commander — machine → project → supervisor → start — and land on its
 // supervisor. The sheet lives on <body>, outside #app, so a shell rebuild
@@ -53,15 +54,38 @@ export interface BrowseEntry {
 
 export interface BrowseListing { root: BrowseRoot; path: string; entries: BrowseEntry[]; truncated: boolean }
 
-export interface LaunchRequest { target: LaunchTarget; supervisor_cli: SupervisorCli; workers?: number; profile?: string }
+export type WorkerRoute = "direct" | "gateway";
+export interface LaunchRequest { target: LaunchTarget; supervisor_cli: SupervisorCli; workers?: number; profile?: string; routing?: WorkerRoute }
+
+/** New Session's worker route for the chosen project (GET /v1/launch/profiles `gateway`). Never an address or key. */
+export interface GatewayRouteOption { available: boolean; reason?: string; preselected: WorkerRoute; clients: string[] }
 
 /** One account profile a CLI can run as (GET /v1/launch/profiles, cas-7b52). */
-export interface LaunchProfile { name: string; logged_in: boolean; is_default: boolean; recommendation?: string; exclusion?: string; usage?: string; windows?: AccountWindow[]; usage_observed_at?: string | null }
+export interface LaunchProfile { name: string; logged_in: boolean; is_default: boolean; recommendation?: string; exclusion?: string; usage?: string; windows?: AccountWindow[]; usage_observed_at?: string | null; usage_source?: UsageSource }
+
+/** Logged-out logins and duplicates can't run a supervisor; they collapse under one disclosure. */
+export const notOffered = (profile: LaunchProfile): boolean => !profile.logged_in || Boolean(profile.exclusion?.startsWith("duplicate of "));
 
 /** One CLI's accounts. A missing CLI is installed=false with no error; a failed check keeps installed=true and names the error. */
 export interface CliProfiles { installed: boolean; profiles: LaunchProfile[]; error?: string }
 
-export type LaunchProfiles = Partial<Record<SupervisorCli, CliProfiles>>;
+export type LaunchProfiles = Partial<Record<SupervisorCli, CliProfiles>> & { gateway?: GatewayRouteOption | null };
+
+/**
+ * The route step, or hidden when the machine's hub predates routing or no
+ * project is chosen. It names exactly which roles the choice moves.
+ */
+export function routeStep(option: GatewayRouteOption | null | undefined, chosen: WorkerRoute | undefined, machine: string): { kind: "hidden" } | { kind: "choice"; route: WorkerRoute; gateway: boolean; scope: string; note?: string } {
+  if (!option) return { kind: "hidden" };
+  const route: WorkerRoute = option.available ? chosen ?? option.preselected : "direct";
+  const routed = option.clients.map(supervisorCliLabel);
+  const workers = routed.length ? `${routed.join(" and ")} workers` : "No workers";
+  const scope = `Home gateway moves ${workers}. The supervisor and other workers stay direct.`;
+  const note = !option.available ? `The home gateway isn't ready on ${machine}${option.reason ? `: ${option.reason}` : ""}.`
+    : route === "gateway" ? "Workers keep their own account for hooks and sessions; the hub picks which of its accounts serves each request. If the hub isn't ready when a worker starts, that worker starts direct and says so."
+    : undefined;
+  return { kind: "choice", route, gateway: option.available, scope, note };
+}
 
 /** The supervisors that run as a chosen account; Grok has none. */
 const ACCOUNT_CLIS: readonly SupervisorCli[] = ["claude", "codex"];
@@ -107,11 +131,18 @@ export function accountStep(cli: SupervisorCli, profiles: { status: string; data
   return { kind: "list", entry };
 }
 
+/** "ledger-api · Codex · 2 workers via gateway": the Start bar's one line. */
+export function startLine(input: { project: string; cli: SupervisorCli; workers?: number; route?: WorkerRoute }): string {
+  const crew = input.workers ? `${input.workers} ${input.workers === 1 ? "worker" : "workers"}${input.route === "gateway" ? " via gateway" : ""}` : "no workers";
+  return `${input.project} · ${supervisorCliLabel(input.cli)} · ${crew}`;
+}
+
 /** "Start cas-src with Claude (support@…) and 2 workers on soundwave." */
-export function launchSummary(input: { verb: string; project: string; cli: SupervisorCli; account?: string; workers?: number; machine: string; end: string }): string {
+export function launchSummary(input: { verb: string; project: string; cli: SupervisorCli; account?: string; workers?: number; machine: string; end: string; route?: WorkerRoute }): string {
   const who = `${supervisorCliLabel(input.cli)}${input.account ? ` (${input.account})` : ""}`;
   const crew = input.workers ? ` and ${input.workers} ${input.workers === 1 ? "worker" : "workers"}` : "";
-  return `${input.verb} ${input.project} with ${who}${crew} on ${input.machine}${input.end}`;
+  const via = input.route === "gateway" ? ", workers via the home gateway," : "";
+  return `${input.verb} ${input.project} with ${who}${crew}${via} on ${input.machine}${input.end}`;
 }
 
 export type LaunchResult =
@@ -248,6 +279,10 @@ export function launchErrorCopy(result: { status: number; code?: string; detail?
     return { title: `The ${name} account ${profile} isn't logged in on ${machine}.`, advice: `Run this on ${machine}, or pick another account, then start again.`, command: accountLoginCommand(cli as SupervisorCli, profile) };
   }
   switch (result.code) {
+    case "gateway_unavailable":
+      return { title: `The home gateway isn't ready on ${machine}.`, advice: "Choose Direct, or start the hub on the machine, then start again." };
+    case "invalid_routing":
+      return { title: `${machine} doesn't know that worker route.`, advice: "Choose Direct, or update Cassy on the machine." };
     case "invalid_profile":
       return { title: `That ${name} account isn't on ${machine} any more.`, advice: "The account list has been refreshed. Pick another account, then start again." };
     case "cli_missing":
@@ -295,6 +330,7 @@ export function launchSheetMarkup(): string {
     <header class="launch-head"><h2 id="launch-title">New session</h2><button type="button" class="launch-close" data-launch-action="close" aria-label="Close new session">×</button></header>
     <label class="launch-machine" data-launch-machine-field>Machine<select name="launch-machine"></select></label>
     <section class="launch-view" data-testid="launch-view" data-launch-view="form" aria-labelledby="launch-title">
+      <section class="launch-plan" data-testid="launch-plan" aria-label="This session" aria-live="polite"><div data-plan="project"><p class="launch-plan-k">Project</p><p class="launch-plan-v"></p></div><div data-plan="supervisor"><p class="launch-plan-k"></p><p class="launch-plan-v"></p><p class="launch-plan-meta"></p></div><div data-plan="workers"><p class="launch-plan-k">Workers</p><p class="launch-plan-v"></p></div></section>
       <fieldset class="launch-project">
         <legend>Project</legend>
         <div class="launch-tabs" role="tablist" aria-label="How to find the project">
@@ -314,6 +350,7 @@ export function launchSheetMarkup(): string {
       <fieldset class="launch-cli" aria-describedby="launch-cli-hint"><legend>Supervisor</legend><div class="launch-cli-options">${clis}</div><small id="launch-cli-hint" class="field-hint">Which assistant runs the supervisor.</small></fieldset>
       <fieldset class="launch-account" hidden><legend>Account</legend><div class="launch-account-body" data-launch-accounts></div></fieldset>
       <label class="launch-workers"><span>Workers <span class="launch-optional">(optional)</span></span><input name="launch-workers" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="None" aria-describedby="launch-workers-hint"><small id="launch-workers-hint" class="field-hint">Up to 16. None starts the supervisor alone.</small></label>
+      <fieldset class="launch-route" data-testid="launch-route" aria-describedby="launch-route-scope" hidden><legend>Workers' model traffic</legend><div class="launch-cli-options"><label class="launch-cli-option"><input type="radio" name="launch-route" value="direct"><span>Direct</span></label><label class="launch-cli-option"><input type="radio" name="launch-route" value="gateway"><span>Home gateway</span></label></div><div class="launch-route-line"><small id="launch-route-scope" class="field-hint"></small><details class="launch-route-more" hidden><summary aria-label="About the home gateway" title="About the home gateway">ⓘ</summary><small class="field-hint launch-route-note"></small></details></div><small class="field-hint launch-route-warn" role="status" hidden></small></fieldset>
       </div>
       <p class="launch-invalid" role="alert" hidden></p>
       <div class="dialog-actions launch-actions"><p class="launch-summary" aria-live="polite"></p><button type="button" data-launch-action="close">Cancel</button><button type="button" class="primary" data-launch-action="start" aria-disabled="true">Start</button></div>
@@ -355,6 +392,8 @@ export class LaunchSheet {
   private cliChosen = false;
   private profiles: Load<LaunchProfiles> = { status: "idle" };
   private account: string | undefined;
+  /** An explicit route choice; otherwise the project's own preselection. */
+  private route: WorkerRoute | undefined;
   private profilesGeneration = 0;
   private readonly usageChecks: AccountUsageChecks;
   private loads = new AbortController();
@@ -394,6 +433,7 @@ export class LaunchSheet {
     // count or filter left from the last launch must never ride along
     // unseen (cas-0f51 QA F01).
     this.cliChosen = false;
+    this.route = undefined;
     this.query = "";
     (this.$("input[name=launch-workers]") as HTMLInputElement).value = "";
     this.$(".launch-invalid").hidden = true;
@@ -453,6 +493,7 @@ export class LaunchSheet {
       if (target.name === "launch-machine") { this.selectMachine(target.value); return; }
       if (target.name === "launch-cli") { this.cli = target.value as SupervisorCli; this.cliChosen = true; this.account = this.defaultAccountFor(this.cli); this.renderAccounts(); this.syncChecked(); this.syncActions(); return; }
       if (target.name === "launch-account") { this.account = target.value; this.syncChecked(); this.syncActions(); return; }
+      if (target.name === "launch-route") { this.route = target.value as WorkerRoute; this.renderRoute(); this.syncChecked(); this.syncActions(); return; }
       if (target.name === "launch-project") { this.choose(target as HTMLInputElement); return; }
     });
     dialog.addEventListener("input", (event) => {
@@ -555,6 +596,7 @@ export class LaunchSheet {
     const entry = this.profiles.status === "ready" ? this.profiles.data[this.cli] : undefined;
     if (!entry?.profiles.some((profile) => profile.name === this.account && profile.logged_in)) this.account = this.defaultAccountFor(this.cli);
     this.renderAccounts();
+    this.renderRoute();
     this.syncChecked();
     this.syncActions();
   }
@@ -569,6 +611,40 @@ export class LaunchSheet {
     const step = this.step();
     if (step.kind !== "list") return undefined;
     return step.entry.profiles.some((profile) => profile.name === this.account && profile.logged_in) ? this.account : undefined;
+  }
+
+  private routeStep(): ReturnType<typeof routeStep> {
+    const option = this.profiles.status === "ready" && this.selection ? this.profiles.data.gateway : undefined;
+    return routeStep(option, this.route, this.machine()?.label ?? "the machine");
+  }
+
+  private renderRoute(): void {
+    const fieldset = this.dialog?.querySelector<HTMLElement>(".launch-route");
+    if (!fieldset) return;
+    const step = this.routeStep();
+    fieldset.hidden = step.kind === "hidden";
+    if (step.kind === "hidden") return;
+    for (const input of fieldset.querySelectorAll<HTMLInputElement>("input[name=launch-route]")) {
+      input.checked = input.value === step.route;
+      input.disabled = input.value === "gateway" && !step.gateway;
+      input.closest("label")?.classList.toggle("is-disabled", input.disabled);
+    }
+    fieldset.querySelector<HTMLElement>("#launch-route-scope")!.textContent = step.scope;
+    // One line under the toggle; how the gateway behaves sits behind ⓘ, and only a hub that isn't ready speaks up in place.
+    const more = fieldset.querySelector<HTMLDetailsElement>(".launch-route-more")!;
+    const warn = fieldset.querySelector<HTMLElement>(".launch-route-warn")!;
+    more.hidden = !step.gateway || !step.note;
+    if (more.hidden) more.open = false;
+    fieldset.querySelector<HTMLElement>(".launch-route-note")!.textContent = step.gateway ? step.note ?? "" : "";
+    warn.hidden = step.gateway || !step.note;
+    warn.textContent = step.gateway ? "" : step.note ?? "";
+    this.syncChecked();
+  }
+
+  /** The route to pin: sent only to a hub that offered the choice. */
+  private chosenRoute(): WorkerRoute | undefined {
+    const step = this.routeStep();
+    return step.kind === "choice" ? step.route : undefined;
   }
 
   private renderAccounts(): void {
@@ -587,7 +663,45 @@ export class LaunchSheet {
       body.innerHTML = `<p class="launch-empty launch-account-note" role="status">${escapeHtml(step.message)}</p><button type="button" class="launch-retry" data-launch-action="retry-accounts">Try again</button>`;
       return;
     }
-    body.innerHTML = `<div class="launch-list launch-accounts" role="radiogroup" aria-label="${escapeHtml(supervisorCliLabel(this.cli))} accounts">${step.entry.profiles.map((profile) => accountRowMarkup(this.cli, profile, profile.name === this.account, this.usageChecks.markup(this.machineId!, `${this.cli}:${profile.name}`), this.usageChecks.hasResult(this.machineId!, `${this.cli}:${profile.name}`))).join("")}</div>`;
+    const offered = step.entry.profiles.filter((profile) => !notOffered(profile));
+    const hidden = step.entry.profiles.filter(notOffered);
+    const usage = (profile: LaunchProfile) => this.usageChecks.result(this.machineId!, `${this.cli}:${profile.name}`);
+    const label = this.machine()?.label;
+    const candidates = offered.map((profile) => ({ name: profile.name, list: profileReadings(profile, usage(profile), label), exclusion: exclusionText(profile.exclusion) }));
+    // An older hub sends no windows: its own reason is all there is.
+    const reasonFor = (profile: LaunchProfile, index: number) => !profile.recommendation ? undefined
+      : profile.windows || usage(profile) ? pickReason(candidates[index]!, candidates.filter((_, other) => other !== index)) : { text: profile.recommendation, low: false };
+    const rows = offered.map((profile, index) => accountRowMarkup(profile, profile.name === this.account, this.usageChecks.markup(this.machineId!, `${this.cli}:${profile.name}`), usage(profile), reasonFor(profile, index), label)).join("");
+    const more = hidden.length ? `<details class="launch-not-offered" data-testid="launch-not-offered"><summary>${hidden.length} not offered</summary>${hidden.map((profile) => notOfferedMarkup(this.cli, profile)).join("")}</details>` : "";
+    body.innerHTML = `<div class="launch-list launch-accounts" role="radiogroup" aria-label="${escapeHtml(supervisorCliLabel(this.cli))} accounts">${rows || `<p class="launch-empty">No ${escapeHtml(supervisorCliLabel(this.cli))} account here can start a session.</p>`}</div>${more}`;
+    fillMeters(body);
+    this.syncPlan();
+  }
+
+  /** The profile the plan strip describes: the chosen one, else what the machine falls back to. */
+  private planProfile(): LaunchProfile | undefined {
+    const step = this.step();
+    return step.kind === "list" ? step.entry.profiles.find((profile) => profile.name === this.chosenAccount()) : undefined;
+  }
+
+  /** The two-second answer above every control: project, who supervises, and the workers' route. */
+  private syncPlan(): void {
+    const plan = this.dialog?.querySelector<HTMLElement>("[data-testid=launch-plan]");
+    if (!plan) return;
+    // Each line ellipsises; its title carries the whole text.
+    const set = (part: string, selector: string, text: string) => { const node = plan.querySelector<HTMLElement>(`[data-plan=${part}] ${selector}`)!; node.textContent = text; node.title = text; };
+    set("project", ".launch-plan-v", this.selection?.name ?? "Choose a project");
+    const profile = this.planProfile();
+    set("supervisor", ".launch-plan-k", `Supervisor · ${supervisorCliLabel(this.cli)}`);
+    set("supervisor", ".launch-plan-v", profile?.name ?? (ACCOUNT_CLIS.includes(this.cli) ? "Machine default account" : "One account"));
+    const checked = profile && this.usageChecks.result(this.machineId!, `${this.cli}:${profile.name}`);
+    const list = profile && profileReadings(profile, checked, this.machine()?.label);
+    set("supervisor", ".launch-plan-meta", !profile || !(checked || profile.windows) ? "" : !checked && profile.usage_source === "local" ? localReadLine(list!, profile.usage_observed_at) : capacityLine(list!));
+    const workers = parseWorkers((this.$("input[name=launch-workers]") as HTMLInputElement).value);
+    const count = workers.ok ? workers.workers ?? 0 : 0;
+    const route = this.chosenRoute();
+    set("workers", ".launch-plan-k", `Workers · ${count}`);
+    set("workers", ".launch-plan-v", !count ? "Supervisor alone" : route === "gateway" ? "Through the home gateway" : "Direct");
   }
 
   private async loadCatalog(machineId: string): Promise<void> {
@@ -674,6 +788,8 @@ export class LaunchSheet {
     const roots = this.catalog.status === "ready" ? this.catalog.data.browse_roots : [];
     const browseTab = this.$("#launch-tab-browse");
     browseTab.hidden = roots.length === 0;
+    // One way to find a project needs no tab bar; the fieldset's legend already names it.
+    this.$(".launch-tabs").hidden = browseTab.hidden;
     if (browseTab.hidden && this.mode === "browse") this.mode = "known";
     for (const tab of this.dialog.querySelectorAll<HTMLElement>("[role=tab]")) {
       const selected = tab.dataset.launchMode === this.mode;
@@ -696,7 +812,10 @@ export class LaunchSheet {
 
   /** The checked choice's row carries a class, not only :has(), so browsers without :has still show it. */
   private syncChecked(): void {
-    for (const input of this.dialog?.querySelectorAll<HTMLInputElement>("input[type=radio]") ?? []) input.closest("label")?.classList.toggle("is-checked", input.checked);
+    for (const input of this.dialog?.querySelectorAll<HTMLInputElement>("input[type=radio]") ?? []) {
+      input.closest("label")?.classList.toggle("is-checked", input.checked);
+      input.closest(".launch-account-entry")?.classList.toggle("is-checked", input.checked);
+    }
   }
 
   private showView(view: View): void {
@@ -822,9 +941,12 @@ export class LaunchSheet {
     const ready = Boolean(this.selection && machine && launchUsable(machine));
     start.setAttribute("aria-disabled", String(!ready));
     const workers = parseWorkers((this.$("input[name=launch-workers]") as HTMLInputElement).value);
+    // One line by Start: the plan strip above carries the detail.
     summary.textContent = this.selection && machine
-      ? launchSummary({ verb: "Start", project: this.selection.name, cli: this.cli, account: this.chosenAccount(), workers: workers.ok ? workers.workers : undefined, machine: machine.label, end: "." })
+      ? startLine({ project: this.selection.name, cli: this.cli, workers: workers.ok ? workers.workers : undefined, route: this.chosenRoute() })
       : "Choose a project to start.";
+    summary.title = summary.textContent;
+    this.syncPlan();
   }
 
   private async start(): Promise<void> {
@@ -847,8 +969,9 @@ export class LaunchSheet {
     const selection = this.selection;
     const cli = this.cli;
     const profile = this.chosenAccount();
-    const request: LaunchRequest = { target: selection.target, supervisor_cli: cli, ...(workers.workers === undefined ? {} : { workers: workers.workers }), ...(profile ? { profile } : {}) };
-    this.showStarting(launchSummary({ verb: "Starting", project: selection.name, cli, account: profile, workers: workers.workers, machine: machine.label, end: "…" }), `Asking ${machine.label} to start it.`);
+    const routing = this.chosenRoute();
+    const request: LaunchRequest = { target: selection.target, supervisor_cli: cli, ...(workers.workers === undefined ? {} : { workers: workers.workers }), ...(profile ? { profile } : {}), ...(routing ? { routing } : {}) };
+    this.showStarting(launchSummary({ verb: "Starting", project: selection.name, cli, account: profile, workers: workers.workers, machine: machine.label, end: "…", route: routing }), `Asking ${machine.label} to start it.`);
     let result: LaunchResult;
     try {
       result = await this.host.launch(machine.id, request);
@@ -865,7 +988,7 @@ export class LaunchSheet {
       }
       this.showError(launchErrorCopy(result, cli, machine.label, profile), result.detail);
       // An account that vanished or logged out: Back shows the list as it is now.
-      if (result.code === "invalid_profile" || result.code === "not_logged_in") void this.loadProfiles(machine.id);
+      if (result.code === "invalid_profile" || result.code === "not_logged_in" || result.code === "gateway_unavailable") void this.loadProfiles(machine.id);
       return;
     }
     countUsage("session.launch");
@@ -990,20 +1113,33 @@ export function commandTokensMarkup(command: string): string {
     .join(" ");
 }
 
-function accountRowMarkup(cli: SupervisorCli, profile: LaunchProfile, checked: boolean, checkMarkup: string, checkedUsage: boolean): string {
+/** The readings a profile's row draws: an explicit check's, else the listed ones. */
+export function profileReadings(profile: LaunchProfile, usage: CheckedAccountUsage | undefined, machine?: string): WindowReading[] {
+  // With a hub configured, this machine's own check isn't the shared number: it draws muted, named.
+  return readings(usage?.windows ?? profile.windows, usage ? usage.observed_at : profile.usage_observed_at, Date.now(), usage ? undefined : profile.usage_source, usage && profile.usage_source ? machine ?? "this machine" : undefined);
+}
+
+/** One pickable account: radio, name, why it leads (from its own readings), two brief meters, and ↻. */
+function accountRowMarkup(profile: LaunchProfile, checked: boolean, checkMarkup: string, usage: CheckedAccountUsage | undefined, reason: PickReason | undefined, machine?: string): string {
   const name = escapeHtml(profile.name);
-  const reason = profile.windows && profile.recommendation ? "Based on the capacity and reset times below." : profile.recommendation;
-  const exclusion = profile.windows && profile.exclusion?.startsWith("resets later than ") ? "Other accounts reset sooner." : profile.exclusion;
-  const recommendation = reason ? `<small class="launch-account-tag">Recommended</small><small class="launch-row-path">${escapeHtml(reason)}</small>` : exclusion ? `<small class="launch-row-path">${escapeHtml(exclusion)}</small>` : "";
-  const usage = (profile.windows ? accountCapacity(profile.windows, profile.usage_observed_at) : profile.usage?.split("; ") ?? []).map(window => `<small class="launch-row-path">${escapeHtml(window)}</small>`).join("");
-  const tag = recommendation + (checkedUsage ? "" : usage) + (profile.is_default ? '<small class="launch-account-tag">Default</small>' : "");
-  if (profile.logged_in) {
-    return `<div class="launch-account-entry"><label class="launch-row launch-choice launch-account-row"><input type="radio" name="launch-account" value="${name}"${checked ? " checked" : ""}><span class="launch-row-text"><span class="launch-row-name">${name}</span>${tag}</span></label>${checkMarkup}</div>`;
-  }
-  // Logged out: shown so the operator sees every account, never selectable,
-  // with the one command that fixes it.
+  const list = profileReadings(profile, usage, machine);
+  const pick = profile.recommendation ? '<small class="launch-account-pick" data-testid="account-recommended">Recommended</small>' : "";
+  const exclusion = exclusionText(profile.exclusion);
+  const why = reason ? `<small class="launch-account-why${reason.low ? " launch-account-low" : ""}" data-testid="account-pick-reason"${reason.reset ? ` data-reset="${reason.reset}"` : ""}${reason.soonest === undefined ? "" : ` data-soonest="${reason.soonest}"`}>${escapeHtml(reason.text)}</small>`
+    : exclusion ? `<small class="launch-account-why">${escapeHtml(exclusion)}</small>` : "";
+  const meters = !usage && profile.usage_source === "local" ? `<small class="launch-account-why" data-testid="account-local-read">${escapeHtml(localReadLine(list, profile.usage_observed_at))}</small>`
+    : usage || profile.windows ? `<span class="launch-meters">${list.map((reading) => meterMarkup(reading, { labelled: true, brief: true })).join("")}</span>`
+    : profile.usage ? `<small class="launch-account-why">${escapeHtml(profile.usage)}</small>` : "";
+  return `<div class="launch-account-entry"><label class="launch-row launch-choice launch-account-row"><input type="radio" name="launch-account" value="${name}"${checked ? " checked" : ""}><span class="launch-row-text"><span class="launch-account-line"><span class="launch-row-name">${name}</span>${pick}${profile.is_default ? '<small class="launch-account-tag">Default</small>' : ""}</span>${why}${meters}</span></label>${checkMarkup}</div>`;
+}
+
+/** A logged-out login or a duplicate: listed so every account is accounted for, never selectable. A logged-out one carries the command that fixes it. */
+function notOfferedMarkup(cli: SupervisorCli, profile: LaunchProfile): string {
+  const name = escapeHtml(profile.name);
   const command = accountLoginCommand(cli, profile.name);
-  return `<div class="launch-row launch-account-row launch-account-out"><label class="launch-account-label"><input type="radio" name="launch-account" value="${name}" disabled><span class="launch-row-text"><span class="launch-row-name">${name}</span>${tag}<small class="launch-account-state">Logged out. Log in on the machine:</small></span></label><span class="launch-login"><code>${escapeHtml(command)}</code><button type="button" data-launch-action="copy" data-command="${escapeHtml(command)}" aria-label="Copy login command for ${name}">Copy</button></span>${checkMarkup}</div>`;
+  const login = profile.logged_in ? "" : `<span class="launch-login"><code>${escapeHtml(command)}</code><button type="button" data-launch-action="copy" data-command="${escapeHtml(command)}" aria-label="Copy login command for ${name}">Copy</button></span>`;
+  const state = profile.logged_in ? profile.exclusion ?? "" : "Logged out. Log in on the machine:";
+  return `<div class="launch-row launch-account-row launch-account-out" data-account="${name}"><span class="launch-row-text"><span class="launch-row-name">${name}</span><small class="launch-account-state">${escapeHtml(state)}</small></span>${login}</div>`;
 }
 
 function browseProjectRowMarkup(entry: BrowseEntry, root: BrowseRoot, checked: boolean): string {

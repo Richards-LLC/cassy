@@ -211,6 +211,8 @@ impl Config {
             "factory.gateway.enabled" => Some(factory.gateway.enabled.to_string()),
             "factory.gateway.endpoint" => Some(factory.gateway.endpoint.clone().unwrap_or_default()),
             "factory.gateway.key_file" => Some(factory.gateway.key_file.clone().unwrap_or_default()),
+            "factory.gateway.dashboard" => Some(factory.gateway.dashboard.clone().unwrap_or_default()),
+            "factory.gateway.dashboard_key_file" => Some(factory.gateway.dashboard_key_file.clone().unwrap_or_default()),
             "factory.claude.fallback_model" => Some(factory.claude.fallback_model.clone().unwrap_or_default()),
             "factory.nice_cargo" => Some(factory.nice_cargo.to_string()),
             "factory.spawn_min_free_gib" => Some(factory.spawn_min_free_gib.to_string()),

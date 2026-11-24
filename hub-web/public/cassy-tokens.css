@@ -2,7 +2,7 @@
  * Source: docs/design/design-tokens.json -> hub-web/src/tokens.css + hub-web/src/glass.css (token blocks only).
  * Scheme: light by default, dark under prefers-color-scheme: dark; html[data-scheme="light"|"dark"] forces one.
  * Sync and check: node hub-web/scripts/sync-cassy-tokens.mjs (cassy hub-web/DESIGN.md "Shared tokens").
- * cassy-tokens-sha256: 8b94e4e70bcb0aa519f17954061beefd4ac460b3bcf5350b685a4a247c29933d
+ * cassy-tokens-sha256: f2186f881b9c82e3936e0d1c0d5af90c945e364c8912630997e322e7c151c121
  */
 /* House roles (src/tokens.css) */
 :root {
@@ -59,6 +59,7 @@
   --mobile-pane-min-width: 260px;
   --mobile-attention-label-width: 200px;
   --rail-item-min: 44px;
+  --pill-action-height: 32px;
   --browser-notice-height: 32px;
   --keyboard-viewport-height: 100dvh;
   --outage-banner-space: 0px;
@@ -181,6 +182,7 @@
     --mobile-pane-min-width: 260px;
     --mobile-attention-label-width: 200px;
     --rail-item-min: 44px;
+    --pill-action-height: 32px;
     --browser-notice-height: 32px;
     --keyboard-viewport-height: 100dvh;
     --outage-banner-space: 0px;
@@ -303,6 +305,7 @@ html[data-scheme="light"] {
   --mobile-pane-min-width: 260px;
   --mobile-attention-label-width: 200px;
   --rail-item-min: 44px;
+  --pill-action-height: 32px;
   --browser-notice-height: 32px;
   --keyboard-viewport-height: 100dvh;
   --outage-banner-space: 0px;
@@ -424,6 +427,7 @@ html[data-scheme="dark"] {
   --mobile-pane-min-width: 260px;
   --mobile-attention-label-width: 200px;
   --rail-item-min: 44px;
+  --pill-action-height: 32px;
   --browser-notice-height: 32px;
   --keyboard-viewport-height: 100dvh;
   --outage-banner-space: 0px;

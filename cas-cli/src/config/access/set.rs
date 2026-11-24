@@ -337,6 +337,19 @@ impl Config {
                 self.factory.get_or_insert_with(FactoryConfig::default).gateway.key_file =
                     (!path.is_empty()).then(|| path.to_string());
             }
+            "factory.gateway.dashboard" => {
+                let endpoint = value.trim();
+                let endpoint = (!endpoint.is_empty())
+                    .then(|| cas_mux::gateway::validate_endpoint(endpoint))
+                    .transpose()
+                    .map_err(MemError::Other)?;
+                self.factory.get_or_insert_with(FactoryConfig::default).gateway.dashboard = endpoint;
+            }
+            "factory.gateway.dashboard_key_file" => {
+                let path = value.trim();
+                self.factory.get_or_insert_with(FactoryConfig::default).gateway.dashboard_key_file =
+                    (!path.is_empty()).then(|| path.to_string());
+            }
             "factory.claude.fallback_model" => {
                 let model = cas_types::factory_claude::FactoryClaudeConfig::parse_fallback(value).map_err(MemError::Other)?;
                 self.factory.get_or_insert_with(FactoryConfig::default).claude.fallback_model = model;

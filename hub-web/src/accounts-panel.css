@@ -6,57 +6,72 @@
 .accounts-heading h2 { margin: 0; }
 .accounts-heading p { margin: var(--space-1) 0 0; }
 .accounts-heading button { border-radius: var(--radius-pill); }
-.accounts-heading p, .accounts-notice, .accounts-readonly, .accounts-empty, .accounts-machine-summary, .accounts-cleanup-lead { color: var(--ink-mid); }
+.accounts-heading p, .accounts-notice { color: var(--ink-mid); }
 .accounts-notice:empty { display: none; }
 .accounts-machines > section { margin-top: var(--space-6); }
 .accounts-machines > section + section { padding-top: var(--space-6); border-top: var(--line-width) solid var(--line-subtle); }
 .accounts-machine { margin: 0; font: var(--weight-semibold) var(--fs-md)/var(--line-ui) var(--font-ui); }
-.accounts-machine-summary { margin: var(--space-1) 0 var(--space-3); font-size: var(--fs-meta); }
 .accounts-provider-group { margin-top: var(--space-4); }
-.accounts-provider { margin: 0 0 var(--space-2); color: var(--ink-mid); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); letter-spacing: var(--tracking-label); text-transform: uppercase; }
-.accounts-cleanup-lead { margin: 0 0 var(--space-2); font-size: var(--fs-meta); }
-.accounts-ledger { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 24rem), 1fr)); gap: var(--card-gap); list-style: none; margin: 0; padding: 0; }
-.accounts-row { display: flex; gap: var(--space-3); align-items: flex-start; min-width: 0; padding: var(--card-padding); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-surface); background: var(--bg-raised); overflow-wrap: anywhere; }
-.accounts-row.needs-cleanup { border-color: var(--state-warn); }
-.accounts-card-body { display: grid; gap: var(--space-1); flex: 1; min-width: 0; }
-.accounts-card-body p { margin: 0; }
-.accounts-identity { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
-.accounts-identity strong { font: var(--weight-semibold) var(--fs-base)/var(--line-ui) var(--font-ui); }
-.accounts-badges { display: inline-flex; gap: var(--space-1); margin-inline-start: auto; }
-.accounts-badges:empty { display: none; }
-.accounts-badge { padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--bg-active); color: var(--ink); font: var(--weight-semibold) var(--fs-xs)/22px var(--font-ui); }
-.accounts-alias { color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-mono); }
-.accounts-where { color: var(--ink-mid); font-size: var(--fs-meta); }
-.accounts-where code { color: var(--ink); font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-mono); }
-.accounts-state .status-chip { text-transform: none; letter-spacing: 0; font-family: var(--font-ui); font-weight: var(--weight-medium); }
-.accounts-cleanup-why { color: var(--warn-text, var(--state-warn)); font-size: var(--fs-meta); }
-.accounts-usage { display: grid; gap: var(--space-1); margin-top: var(--space-1); }
-.accounts-meter { display: grid; grid-template-columns: 3.5rem minmax(3rem, 4.5rem) minmax(0, 1fr); align-items: center; gap: var(--space-2); font-size: var(--fs-meta); }
-.accounts-meter-name { color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-mono); }
-.accounts-bar { block-size: 6px; border-radius: var(--radius-pill); background: var(--bg-active); overflow: hidden; }
-.accounts-bar > span { display: block; block-size: 100%; inline-size: 0; border-radius: var(--radius-pill); background: var(--state-ok); }
-.accounts-bar > span.low { background: var(--state-warn); }
-.accounts-bar > span.crit { background: var(--state-crit); }
-.accounts-meter-text { min-width: 0; color: var(--ink); }
-.accounts-reset { color: var(--ink-mid); white-space: nowrap; }
-.accounts-observed { color: var(--ink-mid); font-size: var(--fs-xs); }
+.accounts-provider { margin: 0 0 var(--space-2); color: var(--ink-mid); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); letter-spacing: var(--tracking-label); font-variant-caps: all-small-caps; }
+/* Redesign (cas-87e9f238): one ledger grid for every provider and the hub.
+   Identity and actions, then the 5-hour and weekly windows, aligned across
+   rows, providers and the hub ledger; one hairline per row, no nested cards. */
+.accounts-sheet { --accounts-grid: minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 1fr); }
+.accounts-summary { display: grid; justify-items: start; gap: var(--space-2); margin: var(--space-1) 0 var(--space-3); }
+.accounts-cleanup-banner button { white-space: nowrap; }
+.accounts-summary p { margin: 0; }
+.accounts-quiet { margin: 0; color: var(--ink-mid); font-size: var(--fs-meta); font-variant-numeric: tabular-nums; }
+.accounts-flag { color: var(--state-warn); font-size: var(--fs-meta); font-weight: var(--weight-medium); }
+.accounts-cols { display: grid; grid-template-columns: var(--accounts-grid); gap: var(--space-4); padding: 0 var(--space-3) var(--space-2); border-bottom: var(--line-width) solid var(--line-subtle); color: var(--ink-mid); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); letter-spacing: var(--tracking-label); font-variant-caps: all-small-caps; }
+.accounts-provider-group, .accounts-gateway { margin-top: var(--space-4); }
+.accounts-provider { margin: 0 0 var(--space-1); padding-inline: var(--space-3); color: var(--ink-mid); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); letter-spacing: var(--tracking-label); font-variant-caps: all-small-caps; }
+.accounts-group-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-2); }
+.accounts-group-head .accounts-provider { margin: 0; }
+.accounts-gateway > .accounts-quiet, .accounts-gateway > .accounts-flag { padding: 0 var(--space-3) var(--space-2); }
+.accounts-ledger { display: grid; list-style: none; margin: 0; padding: 0; }
+.accounts-row { display: grid; grid-template-columns: var(--accounts-grid); gap: var(--space-2) var(--space-4); align-items: center; min-width: 0; padding: var(--space-3); border-bottom: var(--line-width) solid var(--line-subtle); transition: background-color 120ms ease; }
+.accounts-row:hover { background: var(--bg-hover); }
+.accounts-row.is-next { box-shadow: inset 3px 0 0 var(--color-action); }
+.accounts-row.needs-cleanup { background: var(--tint-warn); }
+.accounts-row > .accounts-editor { grid-column: 1 / -1; }
+.accounts-who { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); min-width: 0; }
+.accounts-name { display: grid; gap: 2px; min-width: 0; }
+.accounts-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: var(--weight-semibold) var(--fs-base)/var(--line-ui) var(--font-ui); }
+.accounts-subline { display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--space-2); min-width: 0; }
+.accounts-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); }
+code.accounts-sub { font-family: var(--font-mono); }
+.accounts-next { padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--bg-active); color: var(--color-verdict); font: var(--weight-semibold) var(--fs-xs)/20px var(--font-ui); white-space: nowrap; }
+.accounts-cell { min-width: 0; }
+/* Desktop names the windows in the column heads; only the phone labels each meter.
+   Without a label column the bar starts flush with its header. */
+.accounts-row .meter-window { display: none; }
+.accounts-row .meter { grid-template-columns: minmax(3rem, 1fr) auto; grid-template-areas: "bar value" "when when"; }
+.accounts-why { flex-basis: 100%; font-weight: var(--weight-regular); }
+.accounts-span { grid-column: 2 / -1; display: grid; gap: var(--space-2); }
+.accounts-num { font-size: var(--fs-meta); font-variant-numeric: tabular-nums; }
+.accounts-hub-row:hover { background: transparent; }
+.accounts-skeleton .skeleton-dot { inline-size: 40px; block-size: 40px; border-radius: 50%; background: var(--bg-active); }
+.accounts-skeleton .skeleton-name { display: grid; gap: var(--space-2); }
+.accounts-skeleton .skeleton-line { display: block; inline-size: 70%; block-size: 10px; border-radius: var(--radius-pill); background: var(--bg-active); }
+.accounts-skeleton .skeleton-short { inline-size: 45%; }
+.accounts-skeleton .accounts-row { min-block-size: 70px; }
+.accounts-skeleton .accounts-who { grid-template-columns: auto minmax(0, 1fr); }
 .accounts-actions, .accounts-login { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
-.accounts-actions { margin-top: var(--space-2); }
-.accounts-actions button, .accounts-login button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--look-glass-strong); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
-.accounts-actions button:hover:not(:disabled), .accounts-login button:hover { background: var(--bg-hover); }
+.accounts-actions { flex-wrap: nowrap; }
+.accounts-menu button, .accounts-login button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: transparent; color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
+.accounts-menu button:hover:not(:disabled), .accounts-login button:hover { background: var(--bg-hover); }
 .accounts-actions button[data-operation="remove"] { color: var(--crit-bg); border-color: var(--crit-bg); }
-.accounts-actions button:disabled { cursor: not-allowed; border-style: dashed; color: var(--ink-mid); }
+.accounts-menu button:disabled { cursor: not-allowed; border-style: dashed; color: var(--ink-mid); }
 .accounts-login code { min-width: 0; padding: var(--space-1) var(--space-2); border-radius: var(--radius-control); background: var(--bg-panel); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-xs); }
-.accounts-readonly { font-size: var(--fs-meta); }
 .accounts-grant { display: grid; gap: var(--space-2); margin-bottom: var(--space-2); padding: var(--card-padding); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-surface); background: var(--bg-raised); font-size: var(--fs-meta); }
 .accounts-grant p { margin: 0; }
 .accounts-editor { margin-top: var(--space-4); padding: var(--card-padding); border: 2px solid var(--color-action); border-radius: var(--radius-surface); background: var(--bg-raised); }
 .accounts-cleanup-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-3); padding: var(--space-2) var(--space-2) var(--space-2) var(--card-padding); border: var(--line-width) solid var(--state-warn); border-radius: var(--radius-surface); background: var(--bg-raised); font-size: var(--fs-meta); }
 .accounts-cleanup-banner p { margin: 0; }
-.accounts-cleanup-banner button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--look-glass-strong); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
+.accounts-cleanup-banner button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: transparent; color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
 .accounts-cleanup-banner button:disabled { border-style: dashed; color: var(--ink-mid); cursor: not-allowed; }
 .accounts-more { position: relative; }
-.accounts-more > summary { display: inline-flex; align-items: center; justify-content: center; min-width: var(--pill-action-height); min-height: var(--pill-action-height); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--look-glass-strong); color: var(--ink); cursor: pointer; list-style: none; font-size: var(--fs-md); }
+.accounts-more > summary { display: inline-flex; align-items: center; justify-content: center; min-width: var(--pill-action-height); min-height: var(--pill-action-height); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: transparent; color: var(--ink); cursor: pointer; list-style: none; font-size: var(--fs-md); }
 .accounts-more > summary::-webkit-details-marker { display: none; }
 .accounts-more > summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 .accounts-menu { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); }
@@ -68,15 +83,42 @@
 @media (max-width: 600px) {
   .accounts-sheet { width: calc(100vw - var(--space-4)); max-height: calc(100dvh - var(--space-4)); padding: var(--space-4); }
   .accounts-heading { gap: var(--space-2); }
-  .accounts-row { padding: var(--space-3) var(--space-2); }
-  .accounts-meter { grid-template-columns: 3rem minmax(2.5rem, 4rem) minmax(0, 1fr); }
-  .accounts-reset { white-space: normal; }
-  .accounts-actions button, .accounts-login button, .accounts-more > summary, .accounts-cleanup-banner button { min-height: var(--rail-item-min); }
+  .accounts-cols { display: none; }
+  .accounts-row .meter-window { display: block; }
+  .accounts-row .meter { grid-template-columns: auto minmax(3rem, 1fr) auto; grid-template-areas: "label bar value" "label when when"; }
+  /* Each meter gets its own full-width line, starting under the name. */
+  .accounts-row { grid-template-columns: minmax(0, 1fr); padding: var(--space-3) var(--space-1); }
+  .accounts-row > .accounts-cell { padding-inline-start: calc(40px + var(--space-3)); }
+  .accounts-who, .accounts-span { grid-column: 1 / -1; }
+  /* The name keeps the width: ↻ moves into the ⋯ menu. */
+  .accounts-actions > .account-usage-check { display: none; }
+  .accounts-menu > .account-usage-menu { display: contents; }
+  .accounts-cleanup-banner { flex-wrap: nowrap; }
+  .accounts-cleanup-banner p { min-width: 0; }
+  .accounts-hub-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .accounts-hub-row .accounts-who { grid-column: 1 / -1; }
+  .accounts-menu button, .accounts-login button, .accounts-more > summary, .accounts-cleanup-banner button { min-height: var(--rail-item-min); }
   .accounts-more > summary { min-width: var(--rail-item-min); }
 }
 @media (prefers-contrast: more), (forced-colors: active) {
   .accounts-sheet { background: var(--bg-panel); color: var(--ink); border: 1px solid currentColor; }
   .accounts-row, .accounts-grant { border-color: var(--line-strong); }
-  .accounts-bar { outline: 1px solid currentColor; }
 }
 @media print { .accounts-actions, .accounts-login button, .accounts-editor, [data-accounts-close] { display: none; } }
+.accounts-flag code { font-family: var(--font-mono); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+/* A phone keeps each meter's line to "in 2 h"; the reset instant is in its label. */
+@media (max-width: 600px) { .accounts-row .meter-at { display: none; } }
+/* A check's result lands on the row's meters; only a failure needs words beside ↻. */
+.accounts-actions .account-usage-result:not(.is-error) { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.accounts-tag { color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/20px var(--font-ui); white-space: nowrap; }
+/* Desktop keeps ↻ beside ⋯; the menu's copy of the check is for the phone. */
+@media (min-width: 601px) { .accounts-menu > .account-usage-menu { display: none; } }
+.accounts-duplicate { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+.accounts-duplicate code { font-family: var(--font-mono); font-size: var(--fs-xs); }
+.accounts-duplicate button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--crit-bg); border-radius: var(--radius-pill); background: transparent; color: var(--crit-bg); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
+.accounts-duplicate button:disabled { border-style: dashed; color: var(--ink-mid); border-color: var(--line-strong); cursor: not-allowed; }
+.accounts-row .meter-value--none { color: var(--ink-mid); }
+.accounts-nowrap { white-space: nowrap; }
+.accounts-sub.accounts-why { white-space: normal; overflow: visible; }
+/* The summary hugs its lines; the cleanup confirmation under the banner takes the full width (the dialog form has no intrinsic width). */
+.accounts-summary > .accounts-editor { justify-self: stretch; }

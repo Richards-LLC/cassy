@@ -55,6 +55,17 @@ pub const SECRET_FILE_NAMES: [&str; 1] = [".env"];
 pub const SECRET_NAME_FRAGMENTS: [&str; 5] =
     ["id_rsa", "id_ed25519", "credentials.json", "secrets.yaml", "secrets.json"];
 
+/// Login-persistence directories under the home directory, denied whatever
+/// the operator's `write_roots` say: anything written there runs at the next
+/// login, outside the sandbox (GH #2324).
+pub const PERSISTENCE_DIRS: [&str; 1] = ["Library/LaunchAgents"];
+
+fn persistence_denies() -> Vec<String> {
+    dirs::home_dir()
+        .map(|home| PERSISTENCE_DIRS.iter().map(|dir| home.join(dir).display().to_string()).collect())
+        .unwrap_or_default()
+}
+
 /// Whether the generated profile denies writing a file with this name.
 pub fn secret_write_denied(file_name: &str) -> bool {
     SECRET_FILE_NAMES.contains(&file_name)
@@ -144,7 +155,7 @@ pub fn claude_sandbox_block(roots: &ProfileRoots<'_>) -> Value {
         // `gh` and other Go tools verify TLS through trustd (cas-ac77).
         "enableWeakerNetworkIsolation": true,
         "network": { "allowedDomains": ALLOWED_DOMAINS },
-        "filesystem": { "allowWrite": allow, "denyWrite": [] },
+        "filesystem": { "allowWrite": allow, "denyWrite": persistence_denies() },
     })
 }
 

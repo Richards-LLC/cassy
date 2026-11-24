@@ -2785,7 +2785,7 @@ impl CasService {
     async fn factory_spawn_workers_in_with_name_source(
         &self,
         ctx: &crate::ops::fleet::FleetContext,
-        req: FactoryRequest,
+        mut req: FactoryRequest,
         provisioner_build: Option<&str>,
         next_name: &mut (dyn FnMut() -> String + Send),
     ) -> Result<CallToolResult, McpError> {

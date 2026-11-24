@@ -3141,7 +3141,8 @@ workers keep their work, ordered task queues remain local, and `force=true` on
 spawn retains the explicit local override. Routing stores a `BUILD_ROUTE` note
 with the stable `build-route:<repo>:<task>` identity, leaves the local assignee
 empty and sends one `kind=ask` through the existing durable peer outbox with the
-full task and supervisor brief. Retries reuse its selected recipient and send
+full task, supervisor brief and the requested worker recipe (cli, model, effort or
+lane; the receiving spawn applies it or refuses, never substitutes). Retries reuse its selected recipient and send
 key only while the peer is live, its heartbeat and sample remain fresh, and the
 route is less than 15 minutes old. Otherwise an expired note restores local
 admission; history still prevents routing onward. Unsent retry entries are

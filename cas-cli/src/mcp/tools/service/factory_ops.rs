@@ -2952,11 +2952,11 @@ impl CasService {
                     .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
             }
             let mut recipe = crate::factory_build_routing::Recipe::from_request(&req);
-            crate::factory_build_routing::apply_route_recipe(&task, &mut recipe)
+            crate::factory_build_routing::apply_route_recipe(&task, &mut recipe, req.workers.as_deref())
                 .map_err(|mismatch| {
                     let mut error = Self::error(ErrorCode::INVALID_PARAMS, mismatch.to_string());
                     error.data = Some(serde_json::json!({"code": crate::factory_build_routing::RecipeMismatch::CODE,
-                        "task_id": mismatch.task_id, "field": mismatch.field,
+                        "task_id": mismatch.task_id, "field": mismatch.field, "slot": mismatch.slot,
                         "routed": mismatch.routed, "requested": mismatch.requested}));
                     error
                 })?;

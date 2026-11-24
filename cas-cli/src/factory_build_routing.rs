@@ -330,6 +330,8 @@ pub(crate) fn routed_from(task: &cas_types::Task) -> Option<String> {
 pub(crate) struct RecipeMismatch {
     pub task_id: String,
     pub field: &'static str,
+    /// The `workers[]` slot whose override conflicts; `None` for the batch fields.
+    pub slot: Option<usize>,
     pub routed: String,
     pub requested: String,
     recipe: Recipe,
@@ -352,13 +354,32 @@ impl std::fmt::Display for RecipeMismatch {
 }
 
 /// Receiver side: a task routed here from another machine carries the
-/// requester's recipe. Fill what the spawn request omits; refuse what differs.
-pub(crate) fn apply_route_recipe(task: &cas_types::Task, request: &mut Recipe) -> Result<(), RecipeMismatch> {
+/// requester's recipe. Fill what the spawn request omits; refuse what differs,
+/// in the batch fields or in any per-slot `workers[]` override.
+pub(crate) fn apply_route_recipe(
+    task: &cas_types::Task,
+    request: &mut Recipe,
+    workers: Option<&str>,
+) -> Result<(), RecipeMismatch> {
     let local = cas_types::Agent::get_or_generate_machine_id();
     let Some(plan) = task.notes.lines().rev().find_map(|line| {
         serde_json::from_str::<RoutePlan>(line.strip_prefix(ROUTE_MARKER)?).ok()
     }).filter(|plan| plan.source_machine_id != local) else { return Ok(()) };
     let routed = plan.recipe;
+    let mismatch = |field, slot, wanted: &str, asked: &str| RecipeMismatch {
+        task_id: task.id.clone(), field, slot, routed: wanted.to_string(), requested: asked.to_string(),
+        recipe: routed.clone(),
+    };
+    let slots: Vec<serde_json::Value> = workers.and_then(|raw| serde_json::from_str(raw).ok()).unwrap_or_default();
+    for (slot, entry) in slots.iter().enumerate() {
+        for (field, wanted) in [("cli", &routed.cli), ("model", &routed.model), ("effort", &routed.effort)] {
+            if let (Some(wanted), Some(asked)) = (wanted, entry.get(field).and_then(|value| value.as_str()))
+                && wanted != asked
+            {
+                return Err(mismatch(field, Some(slot), wanted, asked));
+            }
+        }
+    }
     for (field, wanted, asked) in [
         ("cli", &routed.cli, &mut request.cli),
         ("model", &routed.model, &mut request.model),
@@ -366,10 +387,7 @@ pub(crate) fn apply_route_recipe(task: &cas_types::Task, request: &mut Recipe) -
         ("lane", &routed.lane, &mut request.lane),
     ] {
         match (wanted, asked.as_ref()) {
-            (Some(wanted), Some(asked)) if wanted != asked => return Err(RecipeMismatch {
-                task_id: task.id.clone(), field, routed: wanted.clone(), requested: asked.clone(),
-                recipe: routed.clone(),
-            }),
+            (Some(wanted), Some(asked)) if wanted != asked => return Err(mismatch(field, None, wanted, asked)),
             (Some(wanted), None) => *asked = Some(wanted.clone()),
             _ => {}
         }
@@ -754,16 +772,24 @@ mod tests {
         };
         let task = routed("another-machine");
         let mut omitted = Recipe::default();
-        apply_route_recipe(&task, &mut omitted).unwrap();
+        apply_route_recipe(&task, &mut omitted, None).unwrap();
         assert_eq!(omitted, sonnet_high());
         let mut wrong = Recipe { model: Some("claude-opus-4-8".into()), ..Default::default() };
-        let refusal = apply_route_recipe(&task, &mut wrong).unwrap_err();
+        let refusal = apply_route_recipe(&task, &mut wrong, None).unwrap_err();
         assert_eq!(
             (refusal.field, refusal.routed.as_str(), refusal.requested.as_str()),
             ("model", "claude-sonnet-5-5", "claude-opus-4-8"),
         );
+        assert_eq!(refusal.slot, None);
+        let slot_override = r#"[{"name":"a"},{"effort":"low"}]"#;
+        let refusal = apply_route_recipe(&task, &mut Recipe::default(), Some(slot_override)).unwrap_err();
+        assert_eq!(
+            (refusal.field, refusal.slot, refusal.routed.as_str(), refusal.requested.as_str()),
+            ("effort", Some(1), "high", "low"),
+        );
+        apply_route_recipe(&task, &mut Recipe::default(), Some(r#"[{"model":"claude-sonnet-5-5"}]"#)).unwrap();
         let mut local = Recipe::default();
-        apply_route_recipe(&routed(&cas_types::Agent::get_or_generate_machine_id()), &mut local).unwrap();
+        apply_route_recipe(&routed(&cas_types::Agent::get_or_generate_machine_id()), &mut local, Some(r#"[{"cli":"codex"}]"#)).unwrap();
         assert!(local.is_empty());
     }
 

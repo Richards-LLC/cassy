@@ -15,6 +15,8 @@ use super::Cli;
 mod scorers;
 #[path = "ledger_sensors.rs"]
 mod sensors;
+#[path = "ledger_health.rs"]
+mod health;
 
 #[derive(Args)]
 pub struct LedgerArgs {
@@ -82,6 +84,7 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
                 report.sensors = sensors::local(cas_root, report.from, report.to, *park_visibility_minutes);
             }
             sensors::external(cas_root, report.from, report.to, *offline, &mut report.sensors);
+            report.health = health::assess(&report);
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -588,6 +591,8 @@ struct CheckRow {
     /// Sum of observed durations, absent when none was observed; rows without
     /// one count in `untimed`, never as zero.
     minutes: Option<f64>,
+    /// Longest single observed duration, for spotting impossible samples.
+    max_minutes: Option<f64>,
     timed: u32,
     untimed: u32,
 }
@@ -600,7 +605,10 @@ impl CheckRow {
             CheckOutcome::Flaky => self.flaky += 1,
             CheckOutcome::Error => self.error += 1,
         }
-        if let Some(minutes) = minutes { *self.minutes.get_or_insert(0.0) += minutes; }
+        if let Some(minutes) = minutes {
+            *self.minutes.get_or_insert(0.0) += minutes;
+            self.max_minutes = Some(self.max_minutes.map_or(minutes, |most| most.max(minutes)));
+        }
         self.timed += u32::from(minutes.is_some());
         self.untimed += u32::from(minutes.is_none());
     }
@@ -684,6 +692,45 @@ impl TurnTotals {
     }
 }
 
+/// Tokens and minutes spent, with the cached share of input kept apart.
+/// `input_tokens` includes `cached_input_tokens`, as in `TurnTotals`.
+#[derive(Debug, Default, Serialize)]
+struct Spend {
+    turns: u64,
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    output_tokens: u64,
+    minutes: f64,
+}
+
+impl Spend {
+    fn add(&mut self, input: Option<u64>, cached: Option<u64>, output: Option<u64>, minutes: Option<f64>) {
+        self.turns += 1;
+        self.input_tokens = self.input_tokens.saturating_add(input.unwrap_or(0));
+        self.cached_input_tokens = self.cached_input_tokens.saturating_add(cached.unwrap_or(0));
+        self.output_tokens = self.output_tokens.saturating_add(output.unwrap_or(0));
+        self.minutes += minutes.unwrap_or(0.0);
+    }
+}
+
+/// One task's spend, split by `harness/model/effort`.
+#[derive(Debug, Default, Serialize)]
+struct TaskSpend {
+    #[serde(flatten)]
+    total: Spend,
+    by_split: BTreeMap<String, Spend>,
+}
+
+/// How many turns could be attributed, so a mostly-unknown split is visible.
+#[derive(Debug, Default, Serialize)]
+struct SpendCoverage {
+    turns: u64,
+    with_model: u64,
+    with_task: u64,
+}
+
+const NO_TASK: &str = "(no task)";
+
 #[derive(Debug, Serialize)]
 struct ReviewRound {
     verification_id: String,
@@ -748,6 +795,13 @@ struct LedgerReport {
     turns_by_notice_kind: BTreeMap<String, TurnTotals>,
     wake_classification_missing_inputs: BTreeMap<String, usize>,
     turns_by_channel: BTreeMap<&'static str, TurnTotals>,
+    /// Spend per task (local tasks by id, other projects' as `project/id`), then
+    /// by `harness/model/effort`; turns outside any task sit under `(no task)`.
+    spend_by_task: BTreeMap<String, TaskSpend>,
+    spend_by_split: BTreeMap<String, Spend>,
+    spend_coverage: SpendCoverage,
+    /// Every sensor as ok, empty or broken, with its reason.
+    health: Vec<health::SensorHealth>,
     /// Turns per supervisor (its agent id), then per wake channel.
     turns_by_actor: BTreeMap<String, BTreeMap<&'static str, TurnTotals>>,
     /// Distinct tasks whose delivery merged in the window, from the merge record:
@@ -863,13 +917,14 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
     let superseded: std::collections::BTreeSet<_> = events.iter().filter_map(|e| match &e.payload {
         QualityPayload::Turn { supersedes, .. } => supersedes.as_ref().map(|id| (e.project_id.clone(), id.clone())), _ => None,
     }).collect();
+    let has_kind = |kind: &Option<String>| kind.as_ref().is_some_and(|k| k != "unknown" && !k.bytes().all(|b| b.is_ascii_digit()));
+    let noticing: std::collections::BTreeSet<_> = events.iter().filter(|e| !superseded.contains(&(e.project_id.clone(), e.id.clone())))
+        .filter(|e| matches!(&e.payload, QualityPayload::Turn { notice_kind, .. } if has_kind(notice_kind)))
+        .map(|e| e.project_id.clone()).collect();
     for e in &events {
         if superseded.contains(&(e.project_id.clone(), e.id.clone())) { continue }
-        if matches!(&e.payload, QualityPayload::Turn { notice_kind, .. } if notice_kind.as_ref()
-            .is_none_or(|kind| kind == "unknown" || kind.bytes().all(|b| b.is_ascii_digit()))) {
-            let reason = if actors.as_ref().is_none_or(|rows| !rows.iter().any(|a| e.actor.as_deref() == Some(a.id.as_str()))) {
-                "actor_identity_not_retained"
-            } else { "notice_kind_not_recovered_from_retained_inputs" };
+        if matches!(&e.payload, QualityPayload::Turn { notice_kind, .. } if !has_kind(notice_kind)) {
+            let reason = wake_gap_reason(e, actors.as_deref(), noticing.contains(&e.project_id));
             *report.wake_classification_missing_inputs.entry(reason.into()).or_default() += 1;
         }
     }
@@ -909,6 +964,17 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
     report.estimate_trend=grouped.into_iter().map(|(release,events)|
         (release,crate::quality_ledger::estimates::calibration(&events))).collect();
     Ok(report)
+}
+
+/// Why a wake has no notice kind. Only this project's own agents can be looked
+/// up in this project's agent store: another project's actor is never there, so
+/// its absence says nothing. Such a project is judged by what it emits instead.
+fn wake_gap_reason(event: &QualityEvent, local_actors: Option<&[cas_types::Agent]>, project_emits_kinds: bool) -> &'static str {
+    if !event.project_id.is_empty() {
+        return if project_emits_kinds { "foreign_wake_notice_missing" } else { "emitting_project_records_no_notice_kind" };
+    }
+    let retained = local_actors.is_some_and(|rows| rows.iter().any(|a| event.actor.as_deref() == Some(a.id.as_str())));
+    if retained { "notice_kind_not_recovered_from_retained_inputs" } else { "actor_identity_not_retained" }
 }
 
 /// Where a task stands: `fixed in vX` once a release tag holds its delivery.
@@ -1017,6 +1083,10 @@ fn aggregate(
         turns_by_notice_kind: BTreeMap::new(),
         wake_classification_missing_inputs: BTreeMap::new(),
         turns_by_channel: BTreeMap::new(),
+        spend_by_task: BTreeMap::new(),
+        spend_by_split: BTreeMap::new(),
+        spend_coverage: SpendCoverage::default(),
+        health: Vec::new(),
         turns_by_actor: BTreeMap::new(),
         deliveries: unknown("no merge record read"),
         merged: Vec::new(),
@@ -1063,7 +1133,22 @@ fn aggregate(
             report.projects.push(project.clone());
         }
         match &event.payload {
-            QualityPayload::Turn { woken_by, notice_kind, no_op, input_tokens, output_tokens, minutes, .. } => {
+            QualityPayload::Turn { woken_by, notice_kind, no_op, input_tokens, output_tokens, minutes, spend, .. } => {
+                let identity = |value: Option<&String>| value.map_or("unknown", String::as_str).to_owned();
+                let split = format!("{}/{}/{}",
+                    identity(spend.as_ref().and_then(|s| s.harness.as_ref())),
+                    identity(spend.as_ref().and_then(|s| s.model.as_ref())),
+                    identity(spend.as_ref().and_then(|s| s.effort.as_ref())));
+                let cached = spend.as_ref().and_then(|s| s.cached_input_tokens);
+                let task = event.task_id.as_ref().map_or_else(|| NO_TASK.to_owned(), |task|
+                    if event.project_id.is_empty() { task.clone() } else { format!("{project}/{task}") });
+                report.spend_coverage.turns += 1;
+                report.spend_coverage.with_model += u64::from(spend.as_ref().is_some_and(|s| s.model.is_some()));
+                report.spend_coverage.with_task += u64::from(event.task_id.is_some());
+                report.spend_by_split.entry(split.clone()).or_default().add(*input_tokens, cached, *output_tokens, *minutes);
+                let row = report.spend_by_task.entry(task).or_default();
+                row.total.add(*input_tokens, cached, *output_tokens, *minutes);
+                row.by_split.entry(split).or_default().add(*input_tokens, cached, *output_tokens, *minutes);
                 report.turns_by_notice_kind.entry(notice_kind.as_ref()
                     .filter(|kind| !kind.bytes().all(|b| b.is_ascii_digit())).cloned()
                     .unwrap_or_else(|| "unknown".into())).or_default()
@@ -1293,6 +1378,25 @@ fn duration(minutes: Option<f64>) -> String {
     minutes.map_or_else(|| "not measured".to_string(), |minutes| format!("{minutes:.0} min"))
 }
 
+fn render_spend(out: &mut String, report: &LedgerReport) {
+    use std::fmt::Write;
+    let line = |label: &str, s: &Spend| format!("{label}: {} turns, {} input ({} cached), {} output, {:.1} min",
+        s.turns, s.input_tokens, s.cached_input_tokens, s.output_tokens, s.minutes);
+    let _ = writeln!(out, "\nSpend by harness/model/effort");
+    for (split, spend) in &report.spend_by_split {
+        let _ = writeln!(out, "  {}", line(split, spend));
+    }
+    let _ = writeln!(out, "\nSpend by task");
+    let mut tasks: Vec<_> = report.spend_by_task.iter().collect();
+    tasks.sort_by_key(|(_, t)| std::cmp::Reverse(t.total.input_tokens));
+    for (task, spend) in tasks {
+        let _ = writeln!(out, "  {}", line(task, &spend.total));
+        for (split, part) in &spend.by_split {
+            let _ = writeln!(out, "    {}", line(split, part));
+        }
+    }
+}
+
 fn render(report: &LedgerReport) -> String {
     use std::fmt::Write;
     let mut out = String::new();
@@ -1310,6 +1414,8 @@ fn render(report: &LedgerReport) -> String {
         report.events,
         report.projects.len()
     );
+
+    health::render(&mut out, &report.health);
 
     let _ = writeln!(out, "\nModel turns: {} wakes, {} no-op wakes", report.turns.wakes, report.turns.no_op_wakes);
     let _ = writeln!(out, "  measured usage: {} input tokens, {} output tokens, {:.2} minutes",
@@ -1330,6 +1436,7 @@ fn render(report: &LedgerReport) -> String {
     for (input, count) in &report.wake_classification_missing_inputs {
         let _ = writeln!(out, "    unknown input {input}: {count} wakes");
     }
+    render_spend(&mut out, report);
     let _ = writeln!(out, "\nDelivery review history");
     for row in &report.reviews {
         let _ = writeln!(out, "  {} {}: {} rounds", row.task, row.cycle_id.as_deref().unwrap_or("cycle unknown"), row.rounds.len());

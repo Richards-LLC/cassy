@@ -1660,7 +1660,12 @@ impl ProxyEngine {
                     let mut body = lookup;
                     body["ok"] = Value::Bool(false);
                     body["request_id"] = Value::String(request_id.into());
-                    if !body["error"].is_object() {
+                    // GH #1968: request_not_found means Violet never received
+                    // the post, so its reply intent is still unconsumed.
+                    if !body["error"].is_object() && body["reason"] == "request_not_found" {
+                        body["error"] = serde_json::json!({"code": "not_posted", "retryable": true,
+                            "message": "Violet never received this request. Retry violet_post with the same request_id and unchanged arguments."});
+                    } else if !body["error"].is_object() {
                         body["error"] = serde_json::json!({"code": "not_posted", "retryable": false,
                             "message": "Violet confirmed that this request did not post."});
                     }

@@ -298,10 +298,11 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const marks = count || flag ? `<span class="conversation-marks">${count}${flag}</span>` : "";
   const version = rowVersion(row);
   const standby = row.standby ? `<span class="conversation-standby" title="Workers stopped; resume to bring them back">Standby</span>` : "";
-  // cas-8c4f: a current supervisor keeps its loaded build and Eastern load time on the card until the next reload.
+  // cas-8c4f: a current supervisor keeps its loaded build on the card until the next reload; cas-0d58: the
+  // pill shows the version alone so it never ellipsises, and its title carries the Eastern load time.
   const loaded = version && !version.update ? cassyLoaded(row.mcp_version, row.mcp_loaded_at) : undefined;
   const badge = standby + (version?.update ? `<span class="supervisor-version update-available" data-testid="supervisor-version" title="${escapeHtml(version.description)}">${escapeHtml(version.version)} <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span></span>`
-    : loaded ? `<span class="supervisor-version loaded" data-testid="supervisor-version" title="${escapeHtml(cassyLoadedBadge(row.mcp_version, row.mcp_loaded_at)!)}">${escapeHtml(loaded.version)} · ${escapeHtml(loaded.time)}</span>` : "");
+    : loaded ? `<span class="supervisor-version loaded" data-testid="supervisor-version" title="${escapeHtml(cassyLoadedBadge(row.mcp_version, row.mcp_loaded_at)!)}">${escapeHtml(loaded.version)}</span>` : "");
   // Two sessions of one project on one machine read apart by their codename.
   // cas-6faf: such siblings reserve the same Most recent slot; inactive slots have no spoken name.
   const mark = row.showCodename && row.group ? `<span class="conversation-session-slot"${row.group.active ? "" : ' aria-hidden="true"'}><span class="conversation-session-mark" data-testid="conversation-session-mark">Most recent</span></span>` : "";

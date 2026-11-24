@@ -2008,6 +2008,9 @@ dialog form > *,
 .conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .conversation-identity .host-where.codename-squeezed > .host-machine { min-width: 0; }
 #conversation-control { flex: none; white-space: pre; }
+/* cas-0d58: the loaded-build pill keeps its size; the machine and codename
+   text beside it truncates first, so it is never cut or under the actions. */
+#conversation-cassy { flex: none; align-self: center; margin-inline-start: var(--space-2); }
 /* cas-e1db: the state chip is one fixed-height line in any font, so swapping
    Live for a reconnecting state cannot change the header's height and move
    the reader's thread. */
@@ -3505,6 +3508,12 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .project-card .conversation-machine-name { flex: 0 1000 auto; color: var(--ink-mid); font-size: var(--fs-xs); }
 .project-card .conversation-session-slot[aria-hidden="true"] { flex: 0 1000 auto; min-width: 0; overflow: hidden; }
 .project-card .conversation-machine-name::before { content: "· "; }
+/* cas-0d58: in the card the version badge yields before the machine name and
+   ellipsises in its own box; its title keeps the whole line. Its weight dwarfs
+   the name's 1000 because even a sub-pixel loss shows the name's ellipsis. The
+   open row's machine name clips too: the one-line card cannot wrap it. */
+.project-card .supervisor-version { display: block; flex: 0 10000000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.project-card .conversation-row:is(:focus-visible, [aria-current="true"]) .conversation-machine-name { overflow: hidden; text-overflow: ellipsis; }
 .project-card .conversation-supervisor-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink-soft); font: var(--weight-regular) var(--fs-xs)/1.35 var(--font-mono); }
 .project-card .conversation-when { font-family: var(--font-mono); }
 .project-card .conversation-marks { grid-column: 4; grid-row: 1; display: inline-flex; align-items: center; gap: var(--space-1); }
@@ -3764,4 +3773,3 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 @keyframes reload-wait-breathe { 0%, 100% { opacity: 0.35; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-2px); } }
 @media (prefers-reduced-motion: reduce) { .reload-wait i { animation: none; opacity: 0.7; } }
 @media (forced-colors: active) { .reload-wait i { background: CanvasText; } }
-.conversation-cassy-label { font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-mono); color: var(--ink-mid); white-space: nowrap; }

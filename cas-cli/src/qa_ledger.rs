@@ -540,10 +540,8 @@ pub fn check_for_task(path: &Path, task: &cas_types::Task) -> Report {
 pub(crate) fn check_visual_capture(
     dir: &Path,
     task: &cas_types::Task,
-    screenshots: &[std::path::PathBuf],
-) -> Result<(), String> {
-    use std::io::{Read, Seek, SeekFrom};
-
+    screenshots: &[crate::qa_evidence::BatchVisualCapture],
+) -> Result<Vec<std::path::PathBuf>, String> {
     let dir = dir.canonicalize().map_err(|error| error.to_string())?;
     let ledger = crate::qa_evidence::resolve_bundle_file(&dir, "ledger", "LEDGER.md")
         .map_err(|refusal| refusal.problem)?;
@@ -551,28 +549,38 @@ pub(crate) fn check_visual_capture(
     if !report.ok {
         return Err(report.refusal());
     }
-    let has_capture = report.rows.iter().any(|row| {
-        matches!(row.verdict, Verdict::Pass | Verdict::Fail)
-            && evidence_cell_path(&dir, &row.evidence_path).is_some_and(|capture| {
-                if !screenshots.contains(&capture) || !capture.is_file() {
-                    return false;
-                }
-                let mut header = [0; 24];
-                let mut end = [0; 12];
-                std::fs::File::open(capture).is_ok_and(|mut file| {
-                    file.read_exact(&mut header).is_ok()
-                        && &header[..16] == b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"
-                        && header[16..20] != [0; 4]
-                        && header[20..24] != [0; 4]
-                        && file.seek(SeekFrom::End(-12)).is_ok_and(|offset| offset > 24)
-                        && file.read_exact(&mut end).is_ok()
-                        && end == *b"\0\0\0\0IEND\xaeB`\x82"
-                })
-            })
+    let capture = report.rows.iter().find_map(|row| {
+        if !matches!(row.verdict, Verdict::Pass | Verdict::Fail) {
+            return None;
+        }
+        let path = evidence_cell_path(&dir, &row.evidence_path)?;
+        screenshots.iter().any(|shot| shot.path == path && shot.cell == row.cell && capture_matches(&path, &shot.sha256))
+            .then_some(path)
     });
-    has_capture.then_some(()).ok_or_else(|| {
+    capture.map(|path| vec![ledger, path]).ok_or_else(|| {
         "LEDGER.md needs a PASS or FAIL row citing a readable screenshot of the changed state from the delivered run".into()
     })
+}
+
+fn capture_matches(path: &Path, sha256: &str) -> bool {
+    use std::io::{Cursor, Read};
+
+    const LIMIT: usize = 25 * 1024 * 1024;
+    if !path.is_file() {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(path) else { return false };
+    let mut bytes = Vec::new();
+    if file.take((LIMIT + 1) as u64).read_to_end(&mut bytes).is_err()
+        || bytes.len() > LIMIT
+        || format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&bytes)) != sha256
+    {
+        return false;
+    }
+    let decoder = png::Decoder::new_with_limits(Cursor::new(bytes.as_slice()), png::Limits { bytes: LIMIT });
+    let Ok(mut reader) = decoder.read_info() else { return false };
+    let Some(size) = reader.output_buffer_size().filter(|size| *size <= LIMIT) else { return false };
+    reader.next_frame(&mut vec![0; size]).is_ok() && reader.finish().is_ok()
 }
 
 /// The same parser plus safe readable PASS captures, relative to the ledger.

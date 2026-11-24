@@ -1202,6 +1202,10 @@ struct VisualQaRun {
     renders: Vec<VisualQaRender>,
     #[serde(default)]
     screenshots: Vec<VisualQaScreenshot>,
+    #[serde(default)]
+    build: Option<VisualQaBuild>,
+    #[serde(default, rename = "observedAssets")]
+    observed_assets: Option<VisualQaAssets>,
     /// Older canonical reports omit this field, so only an explicit `false`
     /// is refused there. A single-source report must record `true`.
     #[serde(default)]
@@ -1211,35 +1215,98 @@ struct VisualQaRun {
 #[derive(Debug, Deserialize)]
 struct VisualQaScreenshot {
     path: String,
+    #[serde(default)]
+    url: String,
+    state: Option<String>,
+    #[serde(default)]
+    sha256: String,
 }
 
-pub(crate) fn batch_visual_screenshots(
+#[derive(Debug, Deserialize)]
+struct VisualQaBuild {
+    revision: String,
+    sha256: String,
+    assets: VisualQaAssets,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct VisualQaAssets {
+    index: String,
+    main: String,
+}
+
+fn is_sha256(hash: &str) -> bool {
+    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn check_visual_build(run: &VisualQaRun, report: &Path, revision: &str) -> Result<(), String> {
+    if run.strict != Some(true) {
+        return Err(format!("{} was not recorded with --strict", report.display()));
+    }
+    if !run.build.as_ref().is_some_and(|build| {
+        build.revision == revision
+            && is_sha256(&build.sha256)
+            && is_sha256(&build.assets.index)
+            && is_sha256(&build.assets.main)
+            && run.observed_assets.as_ref() == Some(&build.assets)
+    }) {
+        return Err(format!("{} does not bind the browser's entry assets to the receipt for {revision}", report.display()));
+    }
+    Ok(())
+}
+
+pub(crate) struct BatchVisualCapture {
+    pub path: PathBuf,
+    pub cell: String,
+    pub sha256: String,
+}
+
+pub(crate) fn batch_visual_evidence(
     dir: &Path,
     not_before: i64,
     head: &str,
-) -> Result<Vec<PathBuf>, String> {
+    base: Option<&str>,
+) -> Result<(Vec<PathBuf>, Vec<BatchVisualCapture>), String> {
     let dir = dir.canonicalize().map_err(|error| error.to_string())?;
     let report = resolve_bundle_file(&dir, "visual_qa_json", "visual-qa/visual-qa.json")
         .map_err(|refusal| refusal.problem)?;
-    let run = read_visual_qa_run(&report, "Batch visual QA")?;
-    if run.strict != Some(true) {
-        return Err("the visual report was not recorded with --strict".into());
-    }
-    if let Err(pass_error) = check_visual_qa_run_at(&report, not_before, head, None) {
+    let claim = "Batch visual QA";
+    let run = read_visual_qa_run(&report, claim)?;
+    check_visual_build(&run, &report, head)?;
+    let targets = check_run_provenance(&run, &report, claim, Some((not_before, head)), None)?;
+    let mut reports = vec![report.clone()];
+    if let Err(pass_error) = check_passing_visual_qa(&run, &report, claim) {
+        let base = base.ok_or("cannot measure the scoped visual baseline commit")?;
         let baseline = resolve_bundle_file(&dir, "visual_qa_baseline_json", "visual-qa-baseline/visual-qa.json")
             .map_err(|_| pass_error)?;
         if baseline == report {
             return Err("the scoped baseline must be a separate run of the base build".into());
         }
-        if read_visual_qa_run(&baseline, "Batch visual QA baseline")?.strict != Some(true) {
-            return Err("the visual baseline was not recorded with --strict".into());
-        }
-        check_visual_qa_scoped_at(&report, &baseline, not_before, head, None)?;
+        let base_run = read_visual_qa_run(&baseline, claim)?;
+        check_visual_build(&base_run, &baseline, base)?;
+        let base_targets = check_run_provenance(&base_run, &baseline, claim, None, None)?;
+        compare_visual_qa_runs(&run, &base_run, &report, &baseline, &targets, &base_targets, claim)?;
+        reports.push(baseline);
     }
     let sweep_dir = report.parent().ok_or("visual report has no parent directory")?;
-    Ok(run.screenshots.iter().filter_map(|shot| {
-        resolve_bundle_file(sweep_dir, "visual screenshot", &shot.path).ok()
-    }).collect())
+    let captures = run.screenshots.into_iter().filter_map(|shot| {
+        let page = url::Url::parse(&shot.url).ok()?;
+        let origin = url_origin(&shot.url)?;
+        if !is_sha256(&shot.sha256) || !targets.iter().any(|target| url_origin(target).as_deref() == Some(origin.as_str())) {
+            return None;
+        }
+        let mut cell = visual_qa_page(page.as_str());
+        if let Some(fragment) = page.fragment() {
+            cell.push('#');
+            cell.push_str(fragment);
+        }
+        if let Some(state) = shot.state {
+            cell = format!("{cell} [{state}]");
+        }
+        let path = resolve_bundle_file(sweep_dir, "visual screenshot", &shot.path).ok()?;
+        Some(BatchVisualCapture { path, cell, sha256: shot.sha256 })
+    }).collect();
+    Ok((reports, captures))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1341,6 +1408,12 @@ pub fn check_visual_qa_run_at(
 ) -> Result<(), String> {
     let claim = "claims a visual-QA pass, but";
     let run = read_visual_qa_run(report, claim)?;
+    check_passing_visual_qa(&run, report, claim)?;
+    check_run_provenance(&run, report, claim, Some((not_before, not_before_label)), deployed_origin)?;
+    Ok(())
+}
+
+fn check_passing_visual_qa(run: &VisualQaRun, report: &Path, claim: &str) -> Result<(), String> {
     let legacy_single_source = run.status.is_empty() && run.total_issues.is_some();
     if legacy_single_source {
         if run.total_issues != Some(0)
@@ -1366,13 +1439,6 @@ pub fn check_visual_qa_run_at(
             run.total_issues
         ));
     }
-    check_run_provenance(
-        &run,
-        report,
-        claim,
-        Some((not_before, not_before_label)),
-        deployed_origin,
-    )?;
     Ok(())
 }
 
@@ -1400,6 +1466,9 @@ fn check_run_provenance(
     fresh: Option<(i64, &str)>,
     deployed_origin: Option<&str>,
 ) -> Result<Vec<String>, String> {
+    if run.status == "REFUSED" {
+        return Err(format!("{claim} {} refused the browser run", report.display()));
+    }
     if run.strict == Some(false) {
         return Err(format!(
             "{claim} {} records a run without --strict",
@@ -1811,6 +1880,18 @@ pub fn check_visual_qa_scoped_at(
     )?;
     let base_run = read_visual_qa_run(baseline, claim)?;
     let base_targets = check_run_provenance(&base_run, baseline, claim, None, None)?;
+    compare_visual_qa_runs(&tip_run, &base_run, tip, baseline, &tip_targets, &base_targets, claim)
+}
+
+fn compare_visual_qa_runs(
+    tip_run: &VisualQaRun,
+    base_run: &VisualQaRun,
+    tip: &Path,
+    baseline: &Path,
+    tip_targets: &[String],
+    base_targets: &[String],
+    claim: &str,
+) -> Result<ScopedVisualQa, String> {
     let (Some(tip_findings), Some(base_findings)) = (
         tip_run.comparable_findings(),
         base_run.comparable_findings(),

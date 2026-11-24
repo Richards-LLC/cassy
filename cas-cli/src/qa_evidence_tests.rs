@@ -480,7 +480,7 @@ fn scoped_close(fx: &Fixture, cas_root: &Path, notes: &str) -> Result<Vec<String
     task.notes = notes.into();
     crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::qa_evidence_close_gate_for_paths(
         cas_root, &task, &fx.repo, "", Some(&fx.head), Some(&["web/app.css".into()]), None
-    )
+    ).map(|pass| pass.notes)
 }
 
 /// GH #1061: a long-running close service can retain a flat-path citation

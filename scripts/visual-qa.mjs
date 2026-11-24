@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFile, mkdir, writeFile, rm, mkdtemp, rename } from 'node:fs/promises';
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -1304,6 +1305,53 @@ export async function runVisualQa(options) {
   catch (error) { throw new Error(redactQaText(error, options?.secrets)); }
 }
 
+const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+
+async function openVisualPage(page, url, options) {
+  if (!options.requireBuild) {
+    await page.goto(url, { waitUntil: 'load' });
+    return;
+  }
+  const origin = new URL(url).origin;
+  const scripts = new Map();
+  page.on('response', response => {
+    if (response.ok() && response.request().resourceType() === 'script') scripts.set(response.url(), response);
+  });
+  const index = await page.goto(url, { waitUntil: 'load' });
+  if (!index?.ok() || origin === 'null' || new URL(index.url()).origin !== origin) {
+    throw new Error('The candidate entry document must be served by the swept origin.');
+  }
+  const documentHandle = await page.evaluateHandle(() => document);
+  const entry = await page.evaluate(() => [...document.querySelectorAll('script[type="module"][src]')].map(script => script.src));
+  const main = entry.length === 1 && scripts.get(entry[0]);
+  if (!main || new URL(main.url()).origin !== origin) throw new Error('The candidate main module was not loaded from the swept origin.');
+  const receipt = await page.evaluate(async () => {
+    const response = await fetch('/RECEIPT.json', { cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error('The swept build root did not serve RECEIPT.json.');
+    return response.json();
+  });
+  const isDigest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+  if (!/^[a-f0-9]{40}$/.test(receipt?.revision ?? '') || !isDigest(receipt.sha256) || !isDigest(receipt.assets?.index) || !isDigest(receipt.assets?.main)) {
+    throw new Error('The served receipt must name the full revision and SHA-256 digests for the build and entry assets.');
+  }
+  const { revision, sha256: binary, assets: { index: expectedIndex, main: expectedMain } } = receipt;
+  return {
+    documentHandle,
+    binding: {
+      build: { revision, sha256: binary, assets: { index: expectedIndex, main: expectedMain } },
+      observedAssets: { index: sha256(await index.body()), main: sha256(await main.body()) },
+    },
+  };
+}
+
+async function screenshotSource(page, opened, source) {
+  if (!opened) return source;
+  if (!await opened.documentHandle.evaluate(entry => entry === document)) {
+    throw new Error('Capture navigated away from the verified build document.');
+  }
+  return page.url();
+}
+
 async function inspectVisualQa(options) {
   const journey = options?.journey ? await loadJourney(options.journey) : undefined;
   const inputUrls = [...(options?.urls ?? [])];
@@ -1334,6 +1382,7 @@ async function inspectVisualQa(options) {
   const pageDeclarations = [];
   const readiness = [];
   const journeyRuns = [];
+  const builds = [];
   const seen = new Set();
   let warnedUnownedTrace = false;
   try {
@@ -1347,10 +1396,12 @@ async function inspectVisualQa(options) {
       const recordFinding = (finding, informational = false) => captured.events.push({ finding, informational });
       let requiresJavaScript;
       let screenText;
+      let screenshot;
       const context = await browser.newContext({ storageState: options.storageState, extraHTTPHeaders: options.extraHTTPHeaders, colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height } });
       try {
         const page = await context.newPage();
-        await page.goto(url, { waitUntil: 'load' });
+        const opened = await openVisualPage(page, url, options);
+        captured.build = opened?.binding;
         let measured = await waitForPageReadiness(page, readinessOptions);
         await settlePage(page);
         // Settling can finish an animation whose callback replaces the shell.
@@ -1388,6 +1439,7 @@ async function inspectVisualQa(options) {
         await page.emulateMedia({ media: 'screen' });
 
         const screenshotBuffer = await capturePage(page, join(captureDir, `${index}.png`), readyTimeoutMs, recordFinding);
+        screenshot = { url: await screenshotSource(page, opened, source), sha256: sha256(screenshotBuffer) };
         for (const info of inspection.infos) {
           const sampledBackground = sampleScreenshotBackground(screenshotBuffer, info.box);
           const sampledRatio = sampledBackground && info.foreground ? rgbContrast(info.foreground, sampledBackground) : undefined;
@@ -1411,7 +1463,7 @@ async function inspectVisualQa(options) {
         }
       }
 
-      screenshots.push({ path: `${slug(source)}-${scheme}-${viewport.name}.png`, url: source, scheme, viewport });
+      screenshots.push({ path: `${slug(source)}-${scheme}-${viewport.name}.png`, ...screenshot, scheme, viewport });
       return captured;
     };
     const results = new Array(tasks.length);
@@ -1428,6 +1480,7 @@ async function inspectVisualQa(options) {
     if (failure) throw failure;
     for (const [index, captured] of results.entries()) {
       const { source, scheme, viewport } = tasks[index];
+      if (captured.build) builds.push(captured.build);
       findings.push(...captured.findings);
       readiness.push(...captured.readiness);
       for (const declaration of captured.pageDeclarations) {
@@ -1488,7 +1541,8 @@ async function inspectVisualQa(options) {
             const page = await context.newPage();
             try {
               for (const route of state.routes) await installRoute(page, route, holds);
-              await page.goto(url, { waitUntil: 'load' });
+              const opened = await openVisualPage(page, url, options);
+              if (opened) builds.push(opened.binding);
               // Verify an explicitly requested startup shell before interaction;
               // a declared post-interaction loading state remains inspectable.
               if (options.readySelector) {
@@ -1527,7 +1581,7 @@ async function inspectVisualQa(options) {
                 const sampledRatio = sampledBackground && info.foreground ? rgbContrast(info.foreground, sampledBackground) : undefined;
                 recordFinding({ ...info, sampledBackground, sampledRatio }, true);
               }
-              screenshots.push({ path: run.screenshot, url: source, state: state.name, scheme, viewport });
+              screenshots.push({ path: run.screenshot, url: await screenshotSource(page, opened, source), state: state.name, scheme, viewport, sha256: sha256(screenshotBuffer) });
             } catch (error) {
               recordFinding({ type: 'journey-step-failed', selector: 'journey', elementPath: 'journey', reason: `${state.name}: ${redactQaText(error, options.secrets).split('\n')[0]}` });
             } finally {
@@ -1547,9 +1601,15 @@ async function inspectVisualQa(options) {
     finally { await rm(captureDir, { recursive: true, force: true }); }
   }
   if (!screenshots.length) throw new Error('No captures produced; visual QA cannot pass without screenshots.');
+  const binding = builds.find(({ build, observedAssets }) => build.assets.index !== observedAssets.index || build.assets.main !== observedAssets.main) ?? builds[0];
+  if (binding && builds.some(({ build }) => JSON.stringify(build) !== JSON.stringify(binding.build))) {
+    throw new Error('The sweep loaded different build receipts; one report must cover one exact build.');
+  }
+  const wrongBuild = binding && (binding.build.assets.index !== binding.observedAssets.index || binding.build.assets.main !== binding.observedAssets.main);
   const result = redactQaValue({
-    status: findings.length ? 'FAIL' : 'PASS',
-    exitCode: findings.length && options.strict ? 1 : 0,
+    status: wrongBuild ? 'REFUSED' : findings.length ? 'FAIL' : 'PASS',
+    exitCode: wrongBuild ? 2 : findings.length && options.strict ? 1 : 0,
+    ...binding,
     // The close gate counts a claimed pass only from a strict run.
     strict: Boolean(options.strict),
     generatedAt: new Date().toISOString(),
@@ -1580,6 +1640,7 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--strict') options.strict = true;
+    else if (arg === '--require-build') options.requireBuild = true;
     else if (arg === '--artifact-dir') options.artifactDir = argv[++index];
     else if (arg === '--allowlist') options.allowlistPath = argv[++index];
     else if (arg === '--journey') options.journey = argv[++index];
@@ -1610,12 +1671,13 @@ if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[
     }
   } else if (options.help || (!options.urls.length && !options.journey)) {
     if (!options.help) console.error('No captures requested: at least one URL or journey is required.');
-    console.log('Usage: npm exec --yes --package=playwright -- node scripts/visual-qa.mjs [--strict] [--artifact-dir DIR] [--allowlist FILE] [--journey FILE] [--ready-selector CSS] [--ready-timeout-ms MS] [--scheme light|dark] [--viewport WIDTHxHEIGHT] [URL...]\n       Readiness: waits up to 5000 ms for a visible shell and content; loading/empty resting pages fail. Declared journey states may exercise loading.\n       node scripts/visual-qa.mjs --scrub-trace RAW.zip trace.zip   (extra literal secrets: QA_TRACE_SECRETS, newline-separated)');
+    console.log('Usage: npm exec --yes --package=playwright -- node scripts/visual-qa.mjs [--strict] [--require-build] [--artifact-dir DIR] [--allowlist FILE] [--journey FILE] [--ready-selector CSS] [--ready-timeout-ms MS] [--scheme light|dark] [--viewport WIDTHxHEIGHT] [URL...]\n       --require-build: verify same-origin RECEIPT.json against the document and main module Chromium loaded.\n       Readiness: waits up to 5000 ms for a visible shell and content; loading/empty resting pages fail. Declared journey states may exercise loading.\n       node scripts/visual-qa.mjs --scrub-trace RAW.zip trace.zip   (extra literal secrets: QA_TRACE_SECRETS, newline-separated)');
     process.exitCode = options.help ? 0 : 2;
   } else {
     try {
       const result = await runVisualQa(options);
-      if (result.status === 'PASS') console.log('PASS');
+      if (result.exitCode === 2) console.error('REFUSED: rendered entry asset digests differ from RECEIPT.json.');
+      else if (result.status === 'PASS') console.log('PASS');
       else for (const finding of result.findings) {
         if (finding.type === 'page-not-ready') {
           console.log(redactQaText(`FAIL page-not-ready ${finding.elementPath}\n  ${finding.reason}\n  Retry: node scripts/visual-qa.mjs --strict --ready-selector CSS URL`));

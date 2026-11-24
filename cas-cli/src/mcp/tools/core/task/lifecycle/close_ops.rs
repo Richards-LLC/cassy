@@ -9702,6 +9702,7 @@ impl CasCore {
         // merge queue runs the journeys once.
         let mut registry_upkeep_notices = Vec::new();
         let mut fast_lane_receipt_passed = false;
+        let mut visual_park_files = Vec::new();
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             && (has_delivery_to_measure(&task) || req.commit_receipt.is_some())
@@ -9842,7 +9843,7 @@ impl CasCore {
                     ) {
                         fast_lane_gate::ReceiptGate::Passed => {
                             fast_lane_receipt_passed = true;
-                            Some(Ok(Vec::new()))
+                            Some(Ok(super::qa_evidence_gate::DeliveryEvidence::default()))
                         }
                         // gate[G-54 close-after-merge as-of]: Fast-lane post-merge receipt (pending, failed, unreadable, revert needed, walk failed)
                         fast_lane_gate::ReceiptGate::Hold(message) => Some(Err(crate::gates::tag("G-54", message))),
@@ -9870,8 +9871,9 @@ impl CasCore {
                 attributed_paths.as_deref(),
                 qa_base.as_deref(),
             ).map_err(|message| crate::gates::tag("G-53", message))) {
-                Ok(notes) => {
-                    for note in notes {
+                Ok(evidence) => {
+                    visual_park_files = evidence.visual_files;
+                    for note in evidence.notes {
                         close_notes.record(&mut task, &note);
                     }
                 }
@@ -10191,9 +10193,10 @@ impl CasCore {
                     if gate_refusals.is_empty() {
                         let mut evidence_task = task.clone();
                         evidence_task.deliverables.parked_close_reason = req.reason.clone();
-                        if let Err(refusal) = crate::artifacts::proof::publish_routed_evidence(
+                        if let Err(refusal) = crate::artifacts::proof::publish_park_evidence(
                             &self.cas_root, &evidence_task,
                             worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
+                            &visual_park_files,
                         ) {
                             gate_refusals.push(refusal);
                         }

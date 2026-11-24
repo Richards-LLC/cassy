@@ -175,7 +175,7 @@ pub(crate) fn qa_evidence_close_gate(
         commit_receipt,
         None,
         None,
-    )
+    ).map(|pass| pass.notes)
 }
 
 fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
@@ -215,32 +215,45 @@ pub(crate) fn check_batch_visual_evidence(
     dir: &Path,
     repo: &Path,
     head: &str,
-) -> Result<(), String> {
+    base: Option<&str>,
+) -> Result<Vec<PathBuf>, String> {
     let not_before = crate::qa_evidence::committer_time(repo, head)
         .ok_or_else(|| format!("cannot measure the delivered commit time for {head}"))?;
-    let screenshots = crate::qa_evidence::batch_visual_screenshots(dir, not_before, head)?;
-    crate::qa_ledger::check_visual_capture(dir, task, &screenshots)
+    let base = base.and_then(|reference| resolve_branch_sha(repo, &format!("{reference}^{{commit}}")));
+    let (mut reports, screenshots) = crate::qa_evidence::batch_visual_evidence(dir, not_before, head, base.as_deref())?;
+    reports.extend(crate::qa_ledger::check_visual_capture(dir, task, &screenshots)?);
+    Ok(reports)
 }
 
-fn batch_visual_refusal(repo: &Path, dir: &Path, problem: String) -> String {
+fn batch_visual_refusal(repo: &Path, dir: &Path, task: &Task, head: &str, problem: String) -> String {
     let relative = "skills/cas-ui-craft/scripts/visual-qa.mjs";
-    let mut scripts: Vec<_> = [".claude", ".codex", ".grok", ".opencode", "cas-cli/src/builtins"]
-        .into_iter().map(|base| repo.join(base).join(relative)).collect();
+    let mut scripts = vec![repo.join("scripts/visual-qa.mjs")];
+    scripts.extend([".claude", ".codex", ".grok", ".opencode", "cas-cli/src/builtins"]
+        .into_iter().map(|base| repo.join(base).join(relative)));
     if let Some(home) = dirs::home_dir() {
-        scripts.extend([".cas/claude-base", ".cas/codex-base", ".claude", ".codex"]
+        scripts.extend([".cas/claude-base", ".cas/codex-base", ".claude", ".codex", ".grok", ".config/opencode", ".opencode"]
             .into_iter().map(|base| home.join(base).join(relative)));
     }
-    let script = scripts.iter().find(|path| path.is_file());
-    let script = script.map(|path| shell_words::quote(&path.to_string_lossy()).into_owned())
-        .unwrap_or_else(|| format!("\"$HOME/.claude/{relative}\""));
+    scripts.extend(["CLAUDE_CONFIG_DIR", "CODEX_HOME"].into_iter().filter_map(std::env::var_os)
+        .map(|base| PathBuf::from(base).join(relative)));
+    if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
+        scripts.push(PathBuf::from(config).join("opencode").join(relative));
+    }
     let sweep = dir.join("visual-qa");
     let sweep = sweep.to_string_lossy();
     let sweep = shell_words::quote(&sweep);
+    let command = scripts.iter().find(|path| path.is_file()).map(|path| {
+        let script = path.to_string_lossy();
+        let script = shell_words::quote(&script);
+        format!("printf 'Delivered local URL: '; IFS= read -r qa_url && npm exec --yes --package=playwright -- node {script} --strict --require-build --artifact-dir {sweep} \"$qa_url\"")
+    }).unwrap_or_else(|| "Install or refresh the cas-ui-craft skill to obtain the runnable visual-qa.mjs sweep.".into());
     // gate[G-171 park as-of]: Batch visual evidence for a rendered delivery
     crate::gates::tag("G-171", format!(
         "QA EVIDENCE REJECTED: {problem}. Serve the delivered build and run the strict sweep:\n\n\
-         printf 'Delivered local URL: '; IFS= read -r qa_url && npm exec --yes --package=playwright -- node {script} --strict --artifact-dir {sweep} \"$qa_url\"\n\n\
-         Use --journey for interaction states. If the sweep has existing findings, sweep the same pages on the base build into visual-qa-baseline. Cite a changed-state PNG from the delivered run in a PASS or FAIL row in LEDGER.md."
+         {command}\n\n\
+         Use --journey for interaction states. If the sweep has existing findings, sweep the same pages on the measured base into visual-qa-baseline. Cite the changed-state PNG in a PASS or FAIL row in LEDGER.md; use the URL path as the cell, followed by [state] for journey captures.\n\n\
+         If the sweep cannot be run, only a logged supervisor waiver is accepted: `{}verification action=qa_waive task_id={} head_sha={head} summary=\"<reason>\"`.",
+        crate::mcp::tools::core::guidance::caller_prefix(), task.id
     ))
 }
 
@@ -545,6 +558,12 @@ pub(super) fn approved_receipt_bundle(
     })
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct DeliveryEvidence {
+    pub notes: Vec<String>,
+    pub visual_files: Vec<PathBuf>,
+}
+
 /// [`qa_evidence_close_gate`] judged on `attributed_paths`: the paths this
 /// task's own delivery commits changed, as selected by the close path's task
 /// attribution (cas-bde8, GH #978).
@@ -565,7 +584,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     commit_receipt: Option<&str>,
     attributed_paths: Option<&[String]>,
     recorded_base: Option<&str>,
-) -> Result<Vec<String>, String> {
+) -> Result<DeliveryEvidence, String> {
     delivery_evidence_gate(
         cas_root, task, repo, target_branch, commit_receipt, attributed_paths, recorded_base, false,
     )
@@ -579,7 +598,7 @@ pub(super) fn fast_lane_visual_park_gate(
     commit_receipt: Option<&str>,
     attributed_paths: Option<&[String]>,
     recorded_base: Option<&str>,
-) -> Result<Vec<String>, String> {
+) -> Result<DeliveryEvidence, String> {
     delivery_evidence_gate(
         cas_root, task, repo, target_branch, commit_receipt, attributed_paths, recorded_base, true,
     )
@@ -612,14 +631,15 @@ fn delivery_evidence_gate(
     attributed_paths: Option<&[String]>,
     recorded_base: Option<&str>,
     fast_lane_visual_only: bool,
-) -> Result<Vec<String>, String> {
+) -> Result<DeliveryEvidence, String> {
+    let mut evidence = DeliveryEvidence::default();
     let Ok(config) = crate::config::Config::load(cas_root) else {
-        return Ok(Vec::new());
+        return Ok(evidence);
     };
     let qa = config.qa();
     let batch_mode = qa.mode == crate::config::QaMode::Batch;
     if fast_lane_visual_only && !batch_mode {
-        return Ok(Vec::new());
+        return Ok(evidence);
     }
     let deferred = !fast_lane_visual_only && cas_store::has_qa_batch_deferral(cas_root, &task.id)
         .map_err(|e| format!("QA EVIDENCE REJECTED: cannot read batch deferral: {e}"))?;
@@ -628,13 +648,13 @@ fn delivery_evidence_gate(
         || task.execution_note.as_deref() == Some("no-code"))
         && !deferred
     {
-        return Ok(Vec::new());
+        return Ok(evidence);
     }
     let Some(head) = delivered_head(task, repo, target_branch, commit_receipt) else {
         if deferred {
             return Err("QA EVIDENCE REJECTED: deferred batch delivery has no resolvable head; restore its delivery anchor and record a batch_receipt".into());
         }
-        return Ok(Vec::new());
+        return Ok(evidence);
     };
     let carried_bundle =
         approved_receipt_bundle(cas_root, task, repo, target_branch, commit_receipt);
@@ -710,7 +730,7 @@ fn delivery_evidence_gate(
         .is_some_and(|paths| requires_terminal_qa(paths, &qa));
     let tier = evidence_tier(&reasons, terminal_render);
     if fast_lane_visual_only && tier != EvidenceTier::Bundle {
-        return Ok(Vec::new());
+        return Ok(evidence);
     }
     let paths = crate::config::resolved_factory_artifact_paths(
         cas_root,
@@ -722,14 +742,16 @@ fn delivery_evidence_gate(
     {
         return Err("QA EVIDENCE REJECTED: task artifact directory aliases another project's namespace or escapes its configured base".into());
     }
-    let require_visual = || check_batch_visual_evidence(task, &artifacts_dir, repo, &head)
-        .map_err(|problem| batch_visual_refusal(repo, &artifacts_dir, problem));
+    let visual_base = recorded_base.or_else(|| range.as_ref().map(|(base, _)| base.as_str()));
+    let require_visual = || check_batch_visual_evidence(task, &artifacts_dir, repo, &head, visual_base)
+        .map_err(|problem| batch_visual_refusal(repo, &artifacts_dir, task, &head, problem));
     if fast_lane_visual_only {
         if let Some(waiver) = exact_qa_waiver(cas_root, &task.id, &head)? {
-            return Ok(vec![crate::gates::override_tag("G-171", waiver_note("batch visual evidence", &waiver))]);
+            evidence.notes.push(crate::gates::override_tag("G-171", waiver_note("batch visual evidence", &waiver)));
+            return Ok(evidence);
         }
-        require_visual()?;
-        return Ok(Vec::new());
+        evidence.visual_files = require_visual()?;
+        return Ok(evidence);
     }
     let markers: Vec<SkipMarker> = match (range.as_ref(), changed.as_deref()) {
         (Some((from, to)), Some(paths)) => delivery_test_diff(repo, from, to, paths)
@@ -856,7 +878,7 @@ fn delivery_evidence_gate(
             )
         })?;
         if batch_defer && tier == EvidenceTier::Bundle {
-            require_visual()?;
+            evidence.visual_files = require_visual()?;
         }
     }
     let mut pass = run_close_gate_with_write_dir(
@@ -956,7 +978,8 @@ fn delivery_evidence_gate(
             ));
         }
     }
-    Ok(pass.notes)
+    evidence.notes = pass.notes;
+    Ok(evidence)
 }
 
 #[cfg(test)]
@@ -1026,7 +1049,7 @@ mod tests {
                 assert_eq!(cas_store::has_qa_batch_deferral(&root, &task.id).unwrap(),
                     batch_park);
                 if batch_park {
-                    assert_eq!(crate::gates::override_codes_in(&result.unwrap().join("\n")), ["G-171"]);
+                    assert_eq!(crate::gates::override_codes_in(&result.unwrap().notes.join("\n")), ["G-171"]);
                     assert!(check().is_ok());
                     // Once integrated, recorded staging evidence remains due.
                     git(repo, &["branch", "-f", "main", &head]);
@@ -1062,67 +1085,71 @@ mod tests {
         let dir = task_evidence_dir(&root, &task).unwrap();
         let sweep = dir.join("visual-qa");
         std::fs::create_dir_all(&sweep).unwrap();
-        fn report(status: &str, urls: &str, findings: serde_json::Value, revision: &str, sha256: &str) -> serde_json::Value {
-            serde_json::json!({
-                "status": status, "strict": true, "generatedAt": chrono::Utc::now().to_rfc3339(),
-                "urls": [urls], "findings": findings,
-                "build": {"revision": revision, "sha256": "a".repeat(64)},
-                "screenshots": [{"path": "ranking.png", "url": urls, "state": "ranking", "sha256": sha256}]
-            })
+        macro_rules! captured {
+            ($path:literal) => { include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/visual-qa-fixtures/batch-park/", $path)) };
         }
-        let tip_report = sweep.join("visual-qa.json");
-        let url = "http://localhost:8180/ranking";
-        let capture = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/visual-qa-fixtures/ranking.after.png"));
-        let digest = |bytes: &[u8]| format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes));
-        let capture_digest = digest(capture);
-        let passing_run = |revision: &str, checksum: &str| {
-            std::fs::write(&tip_report, report("PASS", url, serde_json::json!([]), revision, checksum).to_string()).unwrap();
+        let install = |target: &Path, fixture: &[u8], revision: &str, shot: &[u8], update_digest: bool| {
+            let mut report: serde_json::Value = serde_json::from_slice(fixture).unwrap();
+            report["build"]["revision"] = revision.into();
+            report["generatedAt"] = chrono::Utc::now().to_rfc3339().into();
+            let capture = &mut report["screenshots"][1];
+            let name = capture["path"].as_str().unwrap().to_owned();
+            if update_digest {
+                capture["sha256"] = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(shot)).into();
+            }
+            std::fs::write(target.join(&name), shot).unwrap();
+            std::fs::write(target.join("visual-qa.json"), report.to_string()).unwrap();
+            name
         };
-        passing_run(&head, &capture_digest);
+        let pass = captured!("pass/visual-qa.json");
+        let capture = captured!("pass/127-0-0-1-52391-ranking-expanded-light-390x800.png");
+        let name = install(&sweep, pass, &head, capture, false);
         std::fs::write(dir.join("unrelated.png"), capture).unwrap();
 
         let ledger = dir.join("LEDGER.md");
-        let write_row = |verdict: &str, evidence: &str| {
+        let write_row = |verdict: &str, cell: &str, evidence: &str| {
             let passed = usize::from(verdict == "PASS");
             std::fs::write(&ledger, format!(
-                "cells=1; PASS={passed}; FAIL=0; NOT EXERCISED={}\nlabels: real-build=1\n{}\n| M01 | Ranking panel | Ranking visible | Ranking visible | {verdict} | real-build | {evidence} | - |\n",
+                "cells=1; PASS={passed}; FAIL=0; NOT EXERCISED={}\nlabels: real-build=1\n{}\n| M01 | {cell} | Ranking visible | Ranking visible | {verdict} | real-build | {evidence} | - |\n",
                 1 - passed, crate::qa_ledger::HEADER,
             )).unwrap();
         };
-        write_row("NOT EXERCISED: deferred to batch", "-");
+        let cell = "/ranking/ [expanded]";
+        let citation = |name: &str| format!("visual-qa/{name}");
+        write_row("NOT EXERCISED: deferred to batch", cell, "-");
         refused();
-        write_row("PASS", "unrelated.png");
+        write_row("PASS", cell, "unrelated.png");
         refused();
-        write_row("PASS", "visual-qa/visual-qa.json");
+        write_row("PASS", "/ranking/", &citation(&name));
         refused();
-        write_row("PASS", "visual-qa/ranking.png");
-        std::fs::write(sweep.join("ranking.png"), "not a screenshot").unwrap();
+        write_row("PASS", cell, &citation(&name));
+        std::fs::write(sweep.join(&name), captured!("pass/127-0-0-1-52391-ranking-light-390x800.png")).unwrap();
         refused();
         assert!(!cas_store::has_qa_batch_deferral(&root, &task.id).unwrap());
 
-        std::fs::write(sweep.join("ranking.png"), capture).unwrap();
+        std::fs::write(sweep.join(&name), capture).unwrap();
         assert!(park().is_ok());
         assert!(cas_store::has_qa_batch_deferral(&root, &task.id).unwrap());
 
         let gate_codes = || park().err().map(|error| crate::gates::codes_in(&error)).unwrap_or_default();
         let corrupt = b"\x89PNG\x0d\x0a\x1a\x0a\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x06IDATx\x9c\xff\xff\xff\xff\x1d\xca|\x9e\x00\x00\x00\x00IEND\xaeB\x60\x82";
-        std::fs::write(sweep.join("ranking.png"), corrupt).unwrap();
-        passing_run(&head, &digest(corrupt));
+        install(&sweep, pass, &head, corrupt, true);
         let corrupt_codes = gate_codes();
-        std::fs::write(sweep.join("ranking.png"), capture).unwrap();
-        passing_run(&base, &capture_digest);
+        install(&sweep, pass, &base, capture, false);
         let wrong_tip_codes = gate_codes();
+        let stale = install(&sweep, captured!("stale/visual-qa.json"), &head, captured!("stale/127-0-0-1-52573-ranking-expanded-light-390x800.png"), false);
+        write_row("PASS", cell, &citation(&stale));
+        let stale_build_codes = gate_codes();
 
         let baseline = dir.join("visual-qa-baseline");
         std::fs::create_dir_all(&baseline).unwrap();
-        let findings = serde_json::json!([{"type": "contrast", "selector": ".caption"}]);
+        let scoped = install(&sweep, captured!("scoped-tip/visual-qa.json"), &head, captured!("scoped-tip/127-0-0-1-52460-ranking-expanded-light-390x800.png"), false);
+        write_row("PASS", cell, &citation(&scoped));
         let baseline_run = |revision: &str| {
-            std::fs::write(baseline.join("visual-qa.json"), report("FAIL", "http://localhost:8181/ranking", findings.clone(), revision, &capture_digest).to_string()).unwrap();
+            install(&baseline, captured!("scoped-base/visual-qa.json"), revision, captured!("scoped-base/127-0-0-1-52519-ranking-expanded-light-390x800.png"), false);
         };
-        std::fs::write(baseline.join("ranking.png"), capture).unwrap();
-        std::fs::write(&tip_report, report("FAIL", url, findings.clone(), &head, &capture_digest).to_string()).unwrap();
         baseline_run(&base);
-        assert!(park().is_ok());
+        park().unwrap();
         baseline_run(&head);
         let wrong_base_codes = gate_codes();
 
@@ -1131,7 +1158,8 @@ mod tests {
         let api_task = Task::new("cas-0304-api".into(), "Ranking API".into());
         crate::store::open_task_store(&root).unwrap().add(&api_task).unwrap();
         assert!(qa_evidence_close_gate_for_paths(&root, &api_task, repo, "main", Some(&api_head), None, Some(&base)).is_ok());
-        assert_eq!((corrupt_codes, wrong_tip_codes, wrong_base_codes), (vec!["G-171"], vec!["G-171"], vec!["G-171"]));
+        assert_eq!((corrupt_codes, wrong_tip_codes, wrong_base_codes, stale_build_codes),
+            (vec!["G-171"], vec!["G-171"], vec!["G-171"], vec!["G-171"]));
     }
 
     #[test]

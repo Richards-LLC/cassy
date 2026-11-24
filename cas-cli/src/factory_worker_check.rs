@@ -6430,9 +6430,6 @@ PY"#);
                 fake_cargo(&repo.join("node_modules/.bin/jest"), &format!(r#"exec python3 - "$@" <<'JEST_PROBE'
 import json, os, pathlib, sys
 args = sys.argv[1:]
-if '--showConfig' in args:
-    print(json.dumps({{'globalConfig': {{'rootDir': os.getcwd()}}}}))
-    sys.exit(0)
 passed = os.environ.get('LEGAL_TEST_DATABASE_URL') == {}
 if passed:
     with open('target/database-runs', 'a') as out: out.write('1')

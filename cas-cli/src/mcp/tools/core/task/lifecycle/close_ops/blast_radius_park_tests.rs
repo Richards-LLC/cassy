@@ -1559,3 +1559,38 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     git(f._origin.path(), &["rev-parse", "--verify", &format!("refs/heads/fast-lane-revert/{ID}")]);
     }
 }
+
+/// cas-fcb1: a changed Rust test whose named capped selection runs zero tests
+/// is never an impossible demand. Through the real close handler: park names
+/// the changed test, the capped runner answers the zero-test selection with
+/// one run of the owning crate, and the next close parks on that receipt.
+#[cfg(unix)]
+#[tokio::test]
+async fn zero_test_rust_selection_parks_on_its_crate_run_cas_fcb1() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+    let f = fixture(&mut env);
+    std::fs::write(
+        f.worker_path.join("crates/widget/src/gear.rs"),
+        "pub fn turn() { let _ = 1; }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn turns() { super::turn(); }\n}\n",
+    ).unwrap();
+    git(&f.worker_path, &["commit", "-q", "-am", &format!("fix({ID}): test the gear")]);
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    let close = serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"});
+
+    let refused = call(&f.worker, close.clone()).await;
+    assert!(crate::gates::codes_in(&refused).contains(&"G-61"), "{refused}");
+    assert_eq!(f.task().status, TaskStatus::InProgress, "{refused}");
+
+    // nextest's own zero-selection status for the named run; the crate run passes.
+    let cargo = f.dir.path().join("fake-cargo");
+    std::fs::write(&cargo, "#!/bin/sh\ncase \" $* \" in\n  *' -E '*) echo '    Starting 0 tests across 1 binary (1 skipped)'; echo 'error: no tests to run'; exit 4;;\nesac\necho '        PASS [ 0.01s] (1/1) widget gear::tests::turns'\necho '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped'\n").unwrap();
+    std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let args = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(=gear::tests::turns)"].map(String::from);
+    crate::factory_worker_check::execute_at(&f.cas_dir(), &args, &f.worker_path, &cargo).unwrap();
+
+    let parked = call(&f.worker, close).await;
+    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
+    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+}

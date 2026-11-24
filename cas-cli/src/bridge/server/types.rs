@@ -318,7 +318,7 @@ pub(crate) struct WorkerRouteJson {
 }
 
 impl WorkerRouteJson {
-    /// Parses `worker_transport`: `gateway <endpoint>` or
+    /// Parses `worker_transport`: `gateway` (older workers recorded `gateway <endpoint>`) or
     /// `direct (gateway fallback: <reason>)`. No transport means the gateway
     /// was off, so the worker runs direct.
     pub(crate) fn from_transport(transport: Option<&str>) -> Self {

@@ -124,7 +124,12 @@ fn ready_hub_routes_the_worker_and_failed_readiness_starts_direct_on_the_same_ac
 
         write_config(&cas_root, &format!("enabled = true\nendpoint = \"{endpoint}/\"\nkey_file = \"{}\"\n", good.display()));
         let routed = build(cli, &cas_root, &account);
-        assert_eq!(transport(&routed), Some(format!("gateway {endpoint}").as_str()), "{cli:?}");
+        assert_eq!(transport(&routed), Some("gateway"), "{cli:?}");
+        // The recorded route (worker_transport, shown by worker_status) and the Codex MCP
+        // forward never carry the hub's host or port; only the request config does.
+        let address = endpoint.trim_start_matches("http://");
+        let forwarded = routed.args.iter().find(|arg| arg.contains(&format!("mcp_servers.cs.env.{TRANSPORT_ENV}=")));
+        assert!(transport(&routed).into_iter().chain(forwarded.map(String::as_str)).all(|value| !value.contains(address)), "{cli:?}");
         assert!(
             !routed.env.iter().any(|(_, v)| v.contains(KEY)) && !routed.args.iter().any(|a| a.contains(KEY)),
             "{cli:?}: the key must stay in its file until Pty::spawn"
@@ -248,7 +253,7 @@ fn a_cli_started_daemon_keeps_its_startup_route_after_the_project_setting_flips(
     write_config(&cas_root, &format!("enabled = {flipped}\n{hub_settings}"));
     for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
         let worker = build(cli, &cas_root, &account);
-        let routed = transport(&worker) == Some(format!("gateway {endpoint}").as_str());
+        let routed = transport(&worker) == Some("gateway");
         assert_eq!(routed, start == "true", "{cli:?}: startup route must hold after the flip");
     }
     std::fs::write(std::env::var(RAN).unwrap(), "").unwrap();

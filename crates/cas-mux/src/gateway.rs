@@ -63,7 +63,8 @@ fn apply_plan(config: &mut PtyConfig, cli: &str, worker: &str, plan: Plan) {
             format!("direct (gateway fallback: {reason})")
         }
         Plan::Gateway { endpoint, key_file } => {
-            tracing::info!(worker, cli, %endpoint, "factory worker gateway transport");
+            // The hub's address stays in the request config only: never logged or recorded (operator, 6:46 PM).
+            tracing::info!(worker, cli, "factory worker gateway transport");
             let client = format!("cassy/{worker}");
             config.env.push((GATEWAY_KEY_FILE_ENV.into(), key_file.to_string_lossy().into_owned()));
             if cli == "codex" {
@@ -84,7 +85,7 @@ fn apply_plan(config: &mut PtyConfig, cli: &str, worker: &str, plan: Plan) {
                 config.env.push(("ANTHROPIC_BASE_URL".into(), endpoint.clone()));
                 config.env.push(("CLAUDE_AGENT_SDK_CLIENT_APP".into(), client));
             }
-            format!("gateway {endpoint}")
+            "gateway".to_string()
         }
     };
     if cli == "codex" {

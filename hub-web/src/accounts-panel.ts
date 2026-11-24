@@ -40,6 +40,13 @@ function duplicateName(key: string, accounts: readonly AccountRow[]): string {
 const harnessLookalike = (row: AccountRow) => PROVIDERS.some(([id]) => id !== row.provider && id === row.display_name.trim().toLowerCase());
 /** Loading keeps the ledger's shape, so rows land without reflow. */
 const SKELETON = `<p role="status" class="sr-only">Loading accounts…</p><ul class="accounts-ledger accounts-skeleton" aria-hidden="true">${"<li class=\"accounts-row\"><div class=\"accounts-who\"><span class=\"skeleton-dot\"></span><span class=\"skeleton-name\"><span class=\"skeleton-line\"></span><span class=\"skeleton-line skeleton-short\"></span></span></div><div class=\"accounts-cell\"><span class=\"skeleton-line\"></span></div><div class=\"accounts-cell\"><span class=\"skeleton-line\"></span></div></li>".repeat(3)}</ul>`;
+/** "7:56 AM ET" today, else "Sep 30, 7:56 AM ET". */
+function readTime(instant: string, now = Date.now()): string {
+  const zone = { timeZone: "America/New_York" } as const;
+  const day = (at: number) => new Intl.DateTimeFormat("en-US", { ...zone, year: "numeric", month: "numeric", day: "numeric" }).format(at);
+  const full = accountTime(instant);
+  return day(Date.parse(instant)) === day(now) ? full.replace(/^[A-Z][a-z]{2} \d{1,2}, /, "") : full;
+}
 const CONFIRM_VERB: Partial<Record<AccountOperation, string>> = { remove: "remove", disable: "disable" };
 
 const HUB_STATE: Record<string, [string, string]> = { active: ["Active", "active"], disabled: ["Disabled", "idle"], unavailable: ["Unavailable", "blocked"] };
@@ -229,7 +236,7 @@ export class AccountsSheet {
     // Said once, above the ledger; each cell is a muted dash. The transport error stays on the machine.
     const unreachable = source?.state === "unreachable" ? `<p class="accounts-flag" data-testid="accounts-hub-unreachable" role="status">Hub unreachable. Usage is hidden until it answers.</p>` : "";
     const banner = cleanup.length ? `<div class="accounts-cleanup-banner" data-testid="accounts-cleanup-banner" role="note"><p><strong>${cleanup.length} to clean up</strong> · stale logins and duplicates</p><button type="button" data-cleanup data-machine="${escapeHtml(machine.id)}"${why ? ` disabled title="${escapeHtml(why)}"` : ""}>Clean up</button></div>` : "";
-    const summary = `<div class="accounts-summary" data-quota-source="${escapeHtml(source?.state ?? "off")}"><p class="accounts-quiet">${catalog.accounts.length} account${catalog.accounts.length === 1 ? "" : "s"}${from}${observed && source?.state !== "unreachable" ? ` · read ${escapeHtml(accountTime(observed))}` : ""}</p>${banner}${unreachable}</div>`;
+    const summary = `<div class="accounts-summary" data-quota-source="${escapeHtml(source?.state ?? "off")}"><p class="accounts-quiet">${catalog.accounts.length} account${catalog.accounts.length === 1 ? "" : "s"}${from}${observed && source?.state !== "unreachable" ? ` · <span class="accounts-nowrap">read ${escapeHtml(readTime(observed))}</span>` : ""}</p>${banner}${unreachable}</div>`;
     const groups = PROVIDERS.map(([provider, label]) => {
       const listed = catalog.accounts.filter(row => row.provider === provider);
       if (!listed.length) return "";
@@ -280,7 +287,7 @@ export class AccountsSheet {
     // With a hub configured, a number that isn't the hub's says whose it is.
     const local = checked && account.usage_source ? `<span class="accounts-sub" data-testid="account-local-read">${escapeHtml(machine.label)}'s own check</span>` : "";
     // The profile, not its folder: the folder repeats the email; the whole path is the tooltip.
-    const profile = account.name !== account.display_name ? `<code class="accounts-sub" title="${escapeHtml(account.location ?? account.key)} on ${escapeHtml(machine.label)}">${escapeHtml(account.name)}</code>` : "";
+    const profile = account.name !== account.display_name && account.provider !== "grok" ? `<code class="accounts-sub" title="${escapeHtml(account.location ?? account.key)} on ${escapeHtml(machine.label)}">${escapeHtml(account.name)}</code>` : "";
     const sub = [nextTag, account.is_default ? `<span class="accounts-tag">Default</span>` : "", account.disabled ? `<span class="accounts-tag">Disabled</span>` : "", lowTag, flag, local, profile, lives].filter(Boolean).join("");
     const operations = (Object.keys(ACTIONS) as AccountOperation[]).filter(op => op !== (account.disabled ? "disable" : "enable"));
     const button = (op: AccountOperation) => {

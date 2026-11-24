@@ -666,7 +666,7 @@ export class LaunchSheet {
     const offered = step.entry.profiles.filter((profile) => !notOffered(profile));
     const hidden = step.entry.profiles.filter(notOffered);
     const usage = (profile: LaunchProfile) => this.usageChecks.result(this.machineId!, `${this.cli}:${profile.name}`);
-    const candidates = offered.map((profile) => ({ name: profile.name, list: profileReadings(profile, usage(profile)), exclusion: profile.exclusion?.startsWith("resets later than ") ? undefined : profile.exclusion }));
+    const candidates = offered.map((profile) => ({ name: profile.name, list: profileReadings(profile, usage(profile)), exclusion: exclusionText(profile.exclusion) }));
     // An older hub sends no windows: its own reason is all there is.
     const reasonFor = (profile: LaunchProfile, index: number) => !profile.recommendation ? undefined
       : profile.windows || usage(profile) ? pickReason(candidates[index]!, candidates.filter((_, other) => other !== index)) : { text: profile.recommendation, low: false };
@@ -1116,6 +1116,21 @@ export function commandTokensMarkup(command: string): string {
     .join(" ");
 }
 
+/**
+ * An exclusion in the meters' own terms. The selector reports a threshold in
+ * used percent ("weekly at 87% (threshold 85%); resets …"); the row speaks
+ * percent left and leaves the reset to the meter, so nothing contradicts it.
+ * "resets later than …" only restates the meters and is dropped.
+ */
+export function exclusionText(exclusion: string | undefined): string | undefined {
+  if (!exclusion || exclusion.startsWith("resets later than ")) return undefined;
+  const threshold = /^(\S+) at (\d+)% \(threshold (\d+)%\)/.exec(exclusion);
+  if (!threshold) return exclusion;
+  const [, window, used, limit] = threshold;
+  const name = window === "weekly" ? "week" : window;
+  return `${100 - Number(used)}% ${name} left, under the ${100 - Number(limit)}% floor`;
+}
+
 /** The readings a profile's row draws: an explicit check's, else the listed ones. */
 export function profileReadings(profile: LaunchProfile, usage: CheckedAccountUsage | undefined): WindowReading[] {
   return readings(usage?.windows ?? profile.windows, usage ? usage.observed_at : profile.usage_observed_at, Date.now(), usage ? undefined : profile.usage_source);
@@ -1126,8 +1141,7 @@ function accountRowMarkup(profile: LaunchProfile, checked: boolean, checkMarkup:
   const name = escapeHtml(profile.name);
   const list = profileReadings(profile, usage);
   const pick = profile.recommendation ? '<small class="launch-account-pick" data-testid="account-recommended">Recommended</small>' : "";
-  // A "resets later than …" exclusion only restates the meters; other exclusions (threshold, unknown usage) are news.
-  const exclusion = profile.exclusion && !profile.exclusion.startsWith("resets later than ") ? profile.exclusion : undefined;
+  const exclusion = exclusionText(profile.exclusion);
   const why = reason ? `<small class="launch-account-why${reason.low ? " launch-account-low" : ""}" data-testid="account-pick-reason"${reason.reset ? ` data-reset="${reason.reset}"` : ""}${reason.soonest === undefined ? "" : ` data-soonest="${reason.soonest}"`}>${escapeHtml(reason.text)}</small>`
     : exclusion ? `<small class="launch-account-why">${escapeHtml(exclusion)}</small>` : "";
   const meters = !usage && profile.usage_source === "local" ? `<small class="launch-account-why" data-testid="account-local-read">${escapeHtml(localReadLine(list, profile.usage_observed_at))}</small>`

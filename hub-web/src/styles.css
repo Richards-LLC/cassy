@@ -2954,8 +2954,10 @@ button.chip:disabled { cursor: default; }
      neither is pushed under the sticky actions (cas-9666). */
   .launch-view[data-launch-view="form"] {
     grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
-    grid-template-areas: "plan plan" "project cli" "project account" "workers account" "route account" "invalid invalid" "actions actions";
-    column-gap: var(--space-6); row-gap: var(--space-3); align-items: start;
+    /* The filler row soaks up a tall account list, so the left column keeps one section gap. */
+    grid-template-areas: "plan plan" "project cli" "project account" "workers account" "route account" ". account" "invalid invalid" "actions actions";
+    grid-template-rows: auto auto auto auto auto 1fr auto auto;
+    column-gap: var(--space-6); row-gap: var(--space-4); align-items: start;
   }
   .launch-view[data-launch-view="form"] > .launch-plan { grid-area: plan; }
   .launch-view[data-launch-view="form"] > .launch-project { grid-area: project; }
@@ -3839,3 +3841,5 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 @media (prefers-reduced-motion: reduce) { .account-refresh { transition: none; } .account-refresh[aria-busy="true"] svg { animation: none; } }
 /* New session rows are narrow: the value says "77%", the column already means left. */
 .launch-meters .meter-unit { display: none; }
+/* The Start bar matches the dialog's rounding instead of a square inset slab. */
+.launch-sheet .launch-actions { border-radius: var(--radius-card); }

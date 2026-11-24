@@ -120,3 +120,4 @@ code.accounts-sub { font-family: var(--font-mono); }
 .accounts-duplicate button { min-height: var(--pill-action-height); padding: 0 var(--space-3); border: var(--line-width) solid var(--crit-bg); border-radius: var(--radius-pill); background: transparent; color: var(--crit-bg); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
 .accounts-duplicate button:disabled { border-style: dashed; color: var(--ink-mid); border-color: var(--line-strong); cursor: not-allowed; }
 .accounts-row .meter-value--none { color: var(--ink-mid); }
+.accounts-nowrap { white-space: nowrap; }

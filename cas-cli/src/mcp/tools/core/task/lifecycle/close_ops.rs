@@ -9781,8 +9781,9 @@ impl CasCore {
             if let Err(message) = super::qa_evidence_gate::ledger_preflight(&self.cas_root, &task, false) {
                 gate_refusals.push(message);
             }
-            // GH #2401: judged at park only; a parked delivery keeps its checklist.
-            if task.status == TaskStatus::InProgress
+            // GH #2401: judged at every park; a parked or merged delivery keeps its checklist.
+            if task.status != TaskStatus::AwaitingMerge
+                && task.deliverables.green_merge_commit.is_none()
                 && let Err(message) = ac_checklist::at_park(&self.cas_root, &task)
             {
                 gate_refusals.push(message);

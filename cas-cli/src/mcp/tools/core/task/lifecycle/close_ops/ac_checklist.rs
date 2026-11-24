@@ -69,12 +69,16 @@ fn snippet(text: &str) -> String {
 }
 
 /// `(id, what it covers)` for every row the checklist must hold. A decision
-/// naming an item approves that item and needs no row of its own.
+/// naming an existing item approves that item and needs no row of its own.
 fn items(task: &Task, decisions: &[String]) -> Vec<(String, String)> {
     let mut items: Vec<_> = criteria(&task.acceptance_criteria).into_iter().enumerate()
         .map(|(index, text)| (format!("AC{}", index + 1), text)).collect();
-    let rulings = decisions.iter().filter(|note| !ITEM_ID.is_match(note));
-    items.extend(rulings.enumerate().map(|(index, note)| (format!("D{}", index + 1), format!("supervisor decision: {note}"))));
+    for note in decisions {
+        if !items.iter().any(|(id, _)| names(note, id)) {
+            let id = format!("D{}", items.iter().filter(|(id, _)| id.starts_with('D')).count() + 1);
+            items.push((id, format!("supervisor decision: {note}")));
+        }
+    }
     items
 }
 

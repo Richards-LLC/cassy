@@ -36,7 +36,7 @@ only for an outstanding matching promise; release receipt recording settles the
 release. Outcomes link the immutable estimate event id and actual elapsed minutes.
 A hit means actual is at most p90. Early completion is a hit with
 `below_typical=true`; only exceeding p90 creates a friction event. Repeated
-completion/backfill never duplicates a fact. `cas ledger report` shows completed
+completion/backfill never duplicates a fact. `cas scorecard` shows completed
 estimates, hit rate, early completions, misses with recorded reason codes, and
 per-release history. Unexplained overruns are `above_p90`, not an invented cause.
 

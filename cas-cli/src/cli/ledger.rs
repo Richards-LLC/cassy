@@ -1,4 +1,4 @@
-//! `cas ledger`: north-star numbers and feature verdicts from `quality_events`.
+//! `cas scorecard` (alias `cas ledger report`) and `cas ledger`: north-star numbers and feature verdicts from `quality_events`.
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
@@ -18,6 +18,20 @@ mod sensors;
 #[path = "ledger_health.rs"]
 mod health;
 
+/// `cas scorecard`: the per-release report.
+#[derive(Args)]
+pub struct ScorecardArgs {
+    /// Release tag, vX.Y.Z. Omit for work since the last release.
+    #[arg(long)]
+    release: Option<String>,
+    /// Read local rows only; do not pull from Cloud first
+    #[arg(long)]
+    offline: bool,
+    /// Measurement deadline for cross-machine park visibility (never a gate).
+    #[arg(long, default_value_t = 10)]
+    park_visibility_minutes: u32,
+}
+
 #[derive(Args)]
 pub struct LedgerArgs {
     #[command(subcommand)]
@@ -26,7 +40,8 @@ pub struct LedgerArgs {
 
 #[derive(Subcommand)]
 enum LedgerCommand {
-    /// Print wakes, usage, interventions, speed, escapes, friction found and feature verdicts for a release
+    /// Alias of `cas scorecard`
+    #[command(hide = true)]
     Report {
         /// Release tag, vX.Y.Z. Omit for work since the last release.
         #[arg(long)]
@@ -72,24 +87,33 @@ enum LedgerCommand {
     },
 }
 
+pub fn execute_scorecard(args: &ScorecardArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
+    scorecard(args.release.as_deref(), args.offline, args.park_visibility_minutes, cli, cas_root)
+}
+
+fn scorecard(release: Option<&str>, offline: bool, park_visibility_minutes: u32, cli: &Cli, cas_root: &Path) -> Result<()> {
+    if !offline {
+        pull_before_report(cas_root);
+    }
+    let repo = cas_root.parent().unwrap_or(cas_root);
+    let mut report = build_report(cas_root, repo, release)?;
+    if park_visibility_minutes != 10 {
+        report.sensors = sensors::local(cas_root, report.from, report.to, park_visibility_minutes);
+    }
+    sensors::external(cas_root, report.from, report.to, offline, &mut report.sensors);
+    report.health = health::assess(&report);
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", render(&report));
+    }
+    Ok(())
+}
+
 pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
     match &args.command {
         LedgerCommand::Report { release, offline, park_visibility_minutes } => {
-            if !offline {
-                pull_before_report(cas_root);
-            }
-            let repo = cas_root.parent().unwrap_or(cas_root);
-            let mut report = build_report(cas_root, repo, release.as_deref())?;
-            if *park_visibility_minutes != 10 {
-                report.sensors = sensors::local(cas_root, report.from, report.to, *park_visibility_minutes);
-            }
-            sensors::external(cas_root, report.from, report.to, *offline, &mut report.sensors);
-            report.health = health::assess(&report);
-            if cli.json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print!("{}", render(&report));
-            }
+            scorecard(release.as_deref(), *offline, *park_visibility_minutes, cli, cas_root)?;
         }
         LedgerCommand::Backfill { days,sync } => {
             let since = Utc::now() - Duration::days(*days);
@@ -155,9 +179,9 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
 /// on a server without the route still leaves a correct local report.
 fn pull_before_report(cas_root: &Path) {
     match sync_ledger(cas_root) {
-        Ok(Some(summary)) if summary.deferred => eprintln!("ledger report: showing local rows; another cloud sync round is running, so fleet rows may be stale"),
+        Ok(Some(summary)) if summary.deferred => eprintln!("scorecard: showing local rows; another cloud sync round is running, so fleet rows may be stale"),
         Ok(_) => {}
-        Err(error) => tracing::warn!(%error,"ledger report: showing local rows; cloud sync failed"),
+        Err(error) => tracing::warn!(%error,"scorecard: showing local rows; cloud sync failed"),
     }
 }
 fn sync_ledger(cas_root:&Path)->Result<Option<crate::cloud::syncer::quality_events::QualitySyncSummary>> {
@@ -1401,7 +1425,7 @@ fn render(report: &LedgerReport) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let state = if report.published { "" } else { " (in progress)" };
-    let _ = writeln!(out, "Friction ledger: {}{state}", report.release);
+    let _ = writeln!(out, "Scorecard: {}{state}", report.release);
     let window = match (report.from, report.to) {
         (Some(from), Some(to)) => format!("{} to {}", when(from), when(to)),
         (Some(from), None) => format!("since {}", when(from)),
@@ -2285,5 +2309,16 @@ mod tests {
         assert_eq!(wake_gap_reason(&wake(""), Some(&[]), true), "actor_identity_not_retained");
         let here = [cas_types::Agent::new("agent-1".into(), "worker".into())];
         assert_eq!(wake_gap_reason(&wake(""), Some(&here), true), "notice_kind_not_recovered_from_retained_inputs");
+    }
+    #[test]
+    fn scorecard_and_the_old_ledger_report_name_read_the_same_release() {
+        use clap::Parser;
+        let release = |args: &[&str]| match super::super::Cli::try_parse_from(args).unwrap().command {
+            Some(super::super::Commands::Scorecard(a)) => a.release,
+            Some(super::super::Commands::Ledger(LedgerArgs { command: LedgerCommand::Report { release, .. } })) => release,
+            _ => panic!("not a report command: {args:?}"),
+        };
+        assert_eq!(release(&["cas", "scorecard", "--release", "v4.53.0"]).as_deref(), Some("v4.53.0"));
+        assert_eq!(release(&["cas", "ledger", "report", "--release", "v4.53.0"]).as_deref(), Some("v4.53.0"));
     }
 }

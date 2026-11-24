@@ -72,9 +72,9 @@ export function meterMarkup(reading: WindowReading, options: { labelled: boolean
   if (reading.kind === "live" || reading.kind === "stale") {
     const value = reading.kind === "stale" ? `≤ ${reading.left}%` : `${reading.left}%`;
     const when = reading.kind === "stale" ? `<span class="meter-age">${escapeHtml(reading.age ?? "")}</span>` : reading.resetsIn ? `<span class="meter-in">${escapeHtml(reading.resetsIn)}</span>` : "";
-    const at = !options.brief && reading.reset ? `<span class="meter-at">resets ${escapeHtml(reading.reset)}</span>` : "";
+    const at = !options.brief && reading.reset ? `<span class="meter-at">${when ? " · " : ""}resets ${escapeHtml(reading.reset)}</span>` : "";
     const aria = `${name}: ${reading.kind === "stale" ? "at most " : ""}${reading.left}% left${reading.reset ? `, resets ${reading.reset}` : ""}${reading.age ? `, ${reading.age}` : ""}`;
-    return `<div class="meter" data-testid="account-meter" data-window="${reading.slot}" data-state="${reading.kind}" data-left="${reading.left}" data-tone="${tone(reading.left)}" role="img" aria-label="${escapeHtml(aria)}">${label}<span class="meter-bar" aria-hidden="true"><span data-fill="${reading.left}"></span></span><span class="meter-value">${value}<span class="meter-unit"> left</span></span><span class="meter-when">${when}${when && at ? " · " : ""}${at}</span></div>`;
+    return `<div class="meter" data-testid="account-meter" data-window="${reading.slot}" data-state="${reading.kind}" data-left="${reading.left}" data-tone="${tone(reading.left)}" role="img" aria-label="${escapeHtml(aria)}">${label}<span class="meter-bar" aria-hidden="true"><span data-fill="${reading.left}"></span></span><span class="meter-value">${value}<span class="meter-unit"> left</span></span><span class="meter-when">${when}${at}</span></div>`;
   }
   const words = reading.kind === "reset" ? "Unknown · reset since last read" : reading.kind === "unknown" ? "Unknown" : reading.kind === "unreachable" ? "Hub unreachable" : "Not reported";
   return `<div class="meter" data-testid="account-meter" data-window="${reading.slot}" data-state="${reading.kind}" role="img" aria-label="${escapeHtml(`${name}: ${words}`)}">${label}<span class="meter-bar meter-bar--none" aria-hidden="true"></span><span class="meter-value meter-value--none">${words}</span></div>`;

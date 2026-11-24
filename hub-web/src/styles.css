@@ -3670,15 +3670,6 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .conversation-resume button:disabled { color: var(--ink-mid); cursor: default; }
 
 
-/* Explicit native account rechecks use the existing quiet action/evidence roles. */
-.account-usage-check { display: grid; justify-items: start; gap: var(--space-2); margin-block: var(--space-2); min-width: 0; }
-.account-usage-check button { min-height: var(--rail-item-min); padding: var(--space-1) var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--color-action); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); }
-.account-usage-check button:disabled { color: var(--ink-mid); cursor: wait; }
-.account-usage-check button:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--space-1); }
-.account-usage-result { color: var(--ink-mid); font-size: var(--fs-meta); overflow-wrap: anywhere; }
-.account-usage-result p { margin: 0; }
-.launch-account-entry { min-width: 0; }
-.launch-account-entry > .account-usage-check { margin-inline: var(--space-3); }
 @media print { .account-usage-check button { display: none; } }
 
 /* Live epics in Tasks & progress (cas-9b99): a three-line row grid (title and
@@ -3796,7 +3787,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .launch-plan-meta:empty { display: none; }
 @media (max-width: 40rem) { .launch-plan { grid-template-columns: minmax(0, 1fr); } .launch-plan p { white-space: normal; } }
 /* Account rows: radio · name and the server's reason · two brief meters · ↻. */
-.launch-account-entry { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-2); }
+.launch-account-entry { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-2); }
 .launch-account-entry > .account-usage-check { align-self: start; padding-top: var(--space-2); }
 .launch-account-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--space-2); min-width: 0; }
 .launch-account-pick { padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--bg-active); color: var(--color-verdict); font: var(--weight-semibold) var(--fs-xs)/20px var(--font-ui); white-space: nowrap; }
@@ -3824,3 +3815,5 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .account-usage-result.is-error { color: var(--state-warn); white-space: normal; }
 @media (max-width: 53rem) { .account-refresh { inline-size: var(--rail-item-min); block-size: var(--rail-item-min); } }
 @media (prefers-reduced-motion: reduce) { .account-refresh { transition: none; } .account-refresh[aria-busy="true"] svg { animation: none; } }
+/* New session rows are narrow: the value says "77%", the column already means left. */
+.launch-meters .meter-unit { display: none; }

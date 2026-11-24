@@ -672,7 +672,8 @@ export class LaunchSheet {
   private syncPlan(): void {
     const plan = this.dialog?.querySelector<HTMLElement>("[data-testid=launch-plan]");
     if (!plan) return;
-    const set = (part: string, selector: string, text: string) => { plan.querySelector<HTMLElement>(`[data-plan=${part}] ${selector}`)!.textContent = text; };
+    // Each line ellipsises; its title carries the whole text.
+    const set = (part: string, selector: string, text: string) => { const node = plan.querySelector<HTMLElement>(`[data-plan=${part}] ${selector}`)!; node.textContent = text; node.title = text; };
     set("project", ".launch-plan-v", this.selection?.name ?? "Choose a project");
     const profile = this.planProfile();
     set("supervisor", ".launch-plan-k", `Supervisor · ${supervisorCliLabel(this.cli)}`);

@@ -33,10 +33,10 @@ const PROVIDERS = [["claude", "Claude"], ["codex", "Codex"], ["grok", "Grok"]] a
 /** Removable stale logins and duplicates sort into one cleanup group per machine; protected accounts stay in their provider group. */
 const needsCleanup = (row: AccountRow) => row.provider !== "grok" && row.capabilities.remove === null && (row.duplicate_of !== null || row.login_state === "stale_login");
 /** The other account a duplicate copies, named for people: never its internal provider:key. */
-function duplicateName(key: string, accounts: readonly AccountRow[], machine: string): string {
+function duplicateName(key: string, accounts: readonly AccountRow[]): string {
   const other = accounts.find(row => row.key === key);
-  const name = other?.display_name ?? key.slice(key.indexOf(":") + 1);
-  return `<strong>${escapeHtml(name)}</strong>${other?.location ? ` in <code>${escapeHtml(other.location)}</code>` : ""} on ${escapeHtml(machine)}`;
+  // The copied login's folder: its name is usually this row's own name too.
+  return other?.location ? `<code title="${escapeHtml(other.location)}">${escapeHtml(other.location)}</code>` : `<strong>${escapeHtml(other?.display_name ?? key.slice(key.indexOf(":") + 1))}</strong>`;
 }
 /** A profile named like another harness (a Claude profile called "grok") says whose it is. */
 const harnessLookalike = (row: AccountRow) => PROVIDERS.some(([id]) => id !== row.provider && id === row.display_name.trim().toLowerCase());
@@ -226,9 +226,11 @@ export class AccountsSheet {
     const unreachable = source?.state === "unreachable" ? `<p class="accounts-flag" data-testid="accounts-hub-unreachable" role="status">Hub unreachable${source.reason ? `: ${escapeHtml(source.reason)}` : ""}. Usage is hidden until it answers, rather than showing this machine's own read.</p>` : "";
     const summary = `<div class="accounts-summary" data-quota-source="${escapeHtml(source?.state ?? "off")}"><p class="accounts-quiet">${catalog.accounts.length} account${catalog.accounts.length === 1 ? "" : "s"}${observed && source?.state !== "unreachable" ? ` · usage read ${escapeHtml(accountTime(observed))}` : ""}${from}</p>${unreachable}${cleanup.length ? `<div class="accounts-cleanup-banner" data-testid="accounts-cleanup-banner" role="note"><p><strong>${cleanup.length} to clean up</strong> · stale logins and duplicates</p><button type="button" data-cleanup data-machine="${escapeHtml(machine.id)}"${why ? ` disabled title="${escapeHtml(why)}"` : ""}>Clean up</button></div>` : ""}</div>`;
     const groups = PROVIDERS.map(([provider, label]) => {
-      const accounts = catalog.accounts.filter(row => row.provider === provider).sort((a, b) => Number(needsCleanup(a)) - Number(needsCleanup(b)) || headroom(b) - headroom(a));
-      if (!accounts.length) return "";
-      const next = nextLaunch(accounts);
+      const listed = catalog.accounts.filter(row => row.provider === provider);
+      if (!listed.length) return "";
+      const next = nextLaunch(listed);
+      // Next launch first, cleanup last, most headroom between.
+      const accounts = listed.sort((a, b) => Number(b === next) - Number(a === next) || Number(needsCleanup(a)) - Number(needsCleanup(b)) || headroom(b) - headroom(a));
       return `<section class="accounts-provider-group" aria-label="${label} on ${escapeHtml(machine.label)}"><h4 class="accounts-provider">${HARNESS_NAME[provider]} · ${accounts.length}</h4><ul class="accounts-ledger">${accounts.map(account => this.card(machine, account, manage, catalog.accounts, account === next)).join("")}</ul></section>`;
     }).join("");
     const cols = `<div class="accounts-cols" aria-hidden="true"><span>Account</span><span>5-hour window</span><span>Weekly window</span></div>`;
@@ -247,10 +249,10 @@ export class AccountsSheet {
     const grok = account.provider === "grok";
     const checked = this.usageChecks.result(machine.id, account.key);
     const lookalike = harnessLookalike(account) ? ` · ${HARNESS_NAME[account.provider]} profile` : "";
-    const flag = account.duplicate_of ? `<span class="accounts-flag" data-duplicate-of>Duplicate of ${duplicateName(account.duplicate_of, accounts, machine.label)}</span>` : account.login_state === "stale_login" ? `<span class="accounts-flag">Stale login</span>` : "";
+    const flag = account.duplicate_of ? `<span class="accounts-flag" data-duplicate-of>Duplicate of ${duplicateName(account.duplicate_of, accounts)}</span>` : account.login_state === "stale_login" ? `<span class="accounts-flag">Stale login</span>` : "";
     const shown = readings(checked?.windows ?? account.windows, checked ? checked.observed_at : account.usage_observed_at, Date.now(), checked ? undefined : account.usage_source);
     const low = next && account.recommendation ? lowPickNote(shown) : undefined;
-    const nextTag = next ? `<span class="accounts-next" data-testid="account-next" title="${escapeHtml(account.recommendation ?? "Default profile")}">Next launch</span><span class="accounts-sub">${escapeHtml(account.recommendation ?? "default profile")}</span>` : "";
+    const nextTag = next ? `<span class="accounts-next" data-testid="account-next" title="${escapeHtml(account.recommendation ?? "Default profile")}">Next launch</span><span class="accounts-sub" title="${escapeHtml(account.recommendation ?? "default profile")}">${escapeHtml(account.recommendation ?? "default profile")}</span>` : "";
     const lowTag = low ? `<span class="accounts-flag accounts-why" data-testid="account-low-pick">${escapeHtml(low)}</span>` : "";
     // With a hub configured, a number that isn't the hub's says whose it is.
     const local = (checked && account.usage_source) || account.usage_source === "local" ? `<span class="accounts-sub" data-testid="account-local-read">${escapeHtml(machine.label)}'s own read</span>` : "";
@@ -265,6 +267,8 @@ export class AccountsSheet {
     const loggedIn = account.login_state === "logged_in";
     const cells = grok ? `<div class="accounts-cell accounts-span"><p class="accounts-quiet" data-testid="accounts-readonly">Grok uses one account and doesn't report usage.</p></div>`
       : !loggedIn && !checked ? `<div class="accounts-cell accounts-span"><p class="accounts-quiet">Not read · ${account.login_state === "stale_login" ? "stale login" : "logged out"}</p><div class="accounts-login"><code>${escapeHtml(accountLoginCommand(account.provider, account.name))}</code><button type="button" ${attrs} data-login aria-label="Copy login command for ${escapeHtml(account.display_name)}">Copy</button></div></div>`
+      // An unreachable hub is said once in the summary; each row holds one quiet line, not two.
+      : shown.every(reading => reading.kind === "unreachable") ? `<div class="accounts-cell accounts-span" data-testid="account-meter" data-state="unreachable"><p class="accounts-quiet">No shared number while the hub is unreachable</p></div>`
       : shown.map(reading => `<div class="accounts-cell" data-col="${reading.slot}">${meterMarkup(reading, { labelled: true })}</div>`).join("");
     return `<li class="accounts-row${needsCleanup(account) ? " needs-cleanup" : ""}${next ? " is-next" : ""}" data-testid="account-row" data-account-key="${escapeHtml(account.key)}" data-login-state="${escapeHtml(account.login_state)}"><div class="accounts-who">${providerAvatarMarkup({ harness: account.provider, fallback: account.provider.slice(0, 2).toUpperCase(), size: "row" })}<div class="accounts-name"><strong title="${escapeHtml(account.key)}">${escapeHtml(account.display_name)}</strong><span class="sr-only"> (${escapeHtml(account.key)})${lookalike}</span><span class="accounts-subline">${sub}</span></div>${actions}</div>${cells}</li>`;
   }

@@ -113,14 +113,14 @@ it("groups by provider in headroom order, says where each lives, and cleans up s
   const { host, sheet } = setup(true, healthy);
   vi.mocked(host.list).mockResolvedValue({ accounts: [duplicate, tight, healthy, protectedMain] });
   sheet.open(); await settle();
-  // One ledger per provider: most headroom first, removable cleanup rows last.
+  // One ledger per provider: the next launch (here the first logged-in row) first, then most headroom, removable cleanup rows last.
   const groups = [...document.querySelectorAll(".accounts-provider-group")];
   expect(groups).toHaveLength(1);
-  expect([...groups[0]!.querySelectorAll<HTMLElement>(".accounts-name > strong")].map(name => name.title)).toEqual([healthy.key, tight.key, protectedMain.key, duplicate.key]);
+  expect([...groups[0]!.querySelectorAll<HTMLElement>(".accounts-name > strong")].map(name => name.title)).toEqual([tight.key, healthy.key, protectedMain.key, duplicate.key]);
   for (const line of document.querySelectorAll("[data-duplicate-of]")) expect(line.textContent).not.toContain(healthy.key);
   expect(groups[0]!.querySelector('[data-testid="account-meter"][data-tone="crit"]')).not.toBeNull();
   expect(groups[0]!.textContent).toContain("~/.claude-work");
-  expect(groups[0]!.querySelector('[data-testid="account-meter"][data-window="week"]')!.getAttribute("data-left")).toBe("62");
+  expect(groups[0]!.querySelector(`[data-account-key="${healthy.key}"] [data-testid="account-meter"][data-window="week"]`)!.getAttribute("data-left")).toBe("62");
   click("[data-cleanup]");
   // The shared dialog form is a zero-intrinsic-width grid container; inside the banner's flex row it was squeezed to a sliver.
   const editor = document.querySelector(".accounts-editor")!;
@@ -212,6 +212,6 @@ it("an unreachable hub shows no capacity number, and a recommended account under
   await settle();
   expect(document.querySelector('[data-testid="accounts-hub-unreachable"]')).not.toBeNull();
   const meters = [...document.querySelectorAll<HTMLElement>('[data-testid="account-meter"]')];
-  expect(meters.map(meter => meter.dataset.state)).toEqual(["unreachable", "unreachable"]);
+  expect(meters.map(meter => meter.dataset.state)).toEqual(["unreachable"]);
   expect(meters.some(meter => meter.hasAttribute("data-left"))).toBe(false);
 });

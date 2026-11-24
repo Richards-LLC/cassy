@@ -1189,6 +1189,9 @@ pub struct FactoryApp {
     /// cas-207e: lane CI of parked deliveries by (branch, tip). A settled
     /// result is final for its tip; a pending one is re-read after a minute.
     lane_ci_pending: delivery_evidence::LaneCiCache,
+    /// cas-8c4f: the supervisor's live Cassy MCP build and when it loaded,
+    /// refreshed off the render path; the status bar shows it until a reload.
+    pub(crate) supervisor_cassy_badge: Option<String>,
     merge_alert_retries: merge_alert::Retries,
     /// Cached full epic-status containment, keyed by delivery and target tips.
     delivery_containment: delivery_evidence::DeliveryContainmentCache,

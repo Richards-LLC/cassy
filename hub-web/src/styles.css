@@ -3845,3 +3845,12 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .meter[data-state="local"] .meter-when { white-space: normal; }
 /* New session: a check's result lands on the row's meters; only a failure needs words beside ↻. */
 .launch-account-entry .account-usage-result:not(.is-error) { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+/* cas-8c4f: Reload Cassy's wait. Three soft dots breathe in turn in the action ink; reduced motion keeps them still. */
+.reload-wait { display: inline-flex; gap: 3px; margin-inline-end: var(--space-1); vertical-align: middle; }
+.reload-wait i { width: 5px; height: 5px; border-radius: 50%; background: var(--color-action); opacity: 0.35; animation: reload-wait-breathe 1.2s ease-in-out infinite; }
+.reload-wait i:nth-child(2) { animation-delay: 0.2s; }
+.reload-wait i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes reload-wait-breathe { 0%, 100% { opacity: 0.35; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-2px); } }
+@media (prefers-reduced-motion: reduce) { .reload-wait i { animation: none; opacity: 0.7; } }
+@media (forced-colors: active) { .reload-wait i { background: CanvasText; } }
+.conversation-cassy-label { font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-mono); color: var(--ink-mid); white-space: nowrap; }

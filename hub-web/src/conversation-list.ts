@@ -5,8 +5,8 @@ import { joinSpoken } from "./spoken-names";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 import { plainTextMarkdown } from "./markdown-renderer";
 import { providerAvatarMarkup } from "./provider-mark";
-import { supervisorVersion } from "./machine-version";
-import type { CommandReceipt } from "./supervisor-commands";
+import { cassyLoaded, cassyLoadedBadge, supervisorVersion } from "./machine-version";
+import { CODEX_RELOAD_CONFIRM, reloadWaitNode, type CommandReceipt } from "./supervisor-commands";
 import type { ProjectStatusLine } from "./progress-model";
 
 export interface ConversationRow {
@@ -60,6 +60,8 @@ export interface ConversationRow {
   projectName?: string;
   machine_online?: boolean;
   mcp_version?: string;
+  /** When that MCP process loaded its build (cas-8c4f). */
+  mcp_loaded_at?: string;
   installed_version?: string;
   reloadReceipt?: CommandReceipt;
   reloadPending?: boolean;
@@ -296,7 +298,10 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const marks = count || flag ? `<span class="conversation-marks">${count}${flag}</span>` : "";
   const version = rowVersion(row);
   const standby = row.standby ? `<span class="conversation-standby" title="Workers stopped; resume to bring them back">Standby</span>` : "";
-  const badge = standby + (version?.update ? `<span class="supervisor-version update-available" data-testid="supervisor-version" title="${escapeHtml(version.description)}">${escapeHtml(version.version)} <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span></span>` : "");
+  // cas-8c4f: a current supervisor keeps its loaded build and Eastern load time on the card until the next reload.
+  const loaded = version && !version.update ? cassyLoaded(row.mcp_version, row.mcp_loaded_at) : undefined;
+  const badge = standby + (version?.update ? `<span class="supervisor-version update-available" data-testid="supervisor-version" title="${escapeHtml(version.description)}">${escapeHtml(version.version)} <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span></span>`
+    : loaded ? `<span class="supervisor-version loaded" data-testid="supervisor-version" title="${escapeHtml(cassyLoadedBadge(row.mcp_version, row.mcp_loaded_at)!)}">${escapeHtml(loaded.version)} · ${escapeHtml(loaded.time)}</span>` : "");
   // Two sessions of one project on one machine read apart by their codename.
   // cas-6faf: such siblings reserve the same Most recent slot; inactive slots have no spoken name.
   const mark = row.showCodename && row.group ? `<span class="conversation-session-slot"${row.group.active ? "" : ' aria-hidden="true"'}><span class="conversation-session-mark" data-testid="conversation-session-mark">Most recent</span></span>` : "";
@@ -362,6 +367,8 @@ export class ConversationList {
    * conversation opens, and repainting into that detached list emptied the
    * live one until the next catalog poll.
    */
+  /** Codex rows whose Reload Cassy is waiting for its restart confirmation. */
+  private readonly reloadConfirming = new Set<string>();
   private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: (row: ConversationRow, event?: MouseEvent) => void; end?: (row: ConversationRow) => Promise<void>; reload?: (row: ConversationRow) => void; resume?: (row: ConversationRow) => void };
   /**
    * cas-f60a: the session that just ended, said where its row was and through
@@ -448,22 +455,33 @@ export class ConversationList {
           const node = document.createElement("div"); node.className = "conversation-reload";
           // Secondary actions stay in the existing conversation-header menu.
           // Ordinary rows must keep their height and one navigation Tab stop.
-          node.innerHTML = '<button type="button" tabindex="-1" data-reload-cassy="direct">Reload Cassy</button><p class="conversation-reload-receipt" role="status"></p>';
+          node.innerHTML = '<button type="button" tabindex="-1" data-reload-cassy="direct">Reload Cassy</button><button type="button" tabindex="-1" data-reload-cassy="confirm" hidden>Restart and reload</button><p class="conversation-reload-receipt" role="status"></p>';
           return node;
         });
         const receipt = row.reloadReceipt;
         const pending = row.reloadPending || receipt?.phase === "queued" || receipt?.phase === "submitted";
-        const unavailable = row.harness !== "claude" ? `Reload Cassy requires Claude Code; this supervisor uses ${row.harness ?? "an unknown harness"}.`
+        const unavailable = row.harness !== "claude" && row.harness !== "codex" ? `Reload Cassy requires Claude Code or Codex; this supervisor uses ${row.harness ?? "an unknown harness"}.`
           : row.reloadUnavailable ?? (row.machine_online === false ? "Reconnect this machine to reload Cassy." : undefined);
+        // Codex reloads by restarting its supervisor: say so before it happens (cas-8c4f).
+        const confirming = row.harness === "codex" && this.reloadConfirming.has(row.key) && !pending && !unavailable;
+        if (!confirming) this.reloadConfirming.delete(row.key);
         const direct = control.querySelector<HTMLButtonElement>('[data-reload-cassy="direct"]')!;
+        const confirm = control.querySelector<HTMLButtonElement>('[data-reload-cassy="confirm"]')!;
         direct.hidden = !rowVersion(row)?.update;
-        for (const action of control.querySelectorAll<HTMLButtonElement>("button")) {
-          action.disabled = Boolean(unavailable || pending);
-          action.onclick = () => reload(row);
-        }
+        confirm.hidden = !confirming;
+        direct.textContent = confirming ? "Cancel" : "Reload Cassy";
+        for (const action of [direct, confirm]) action.disabled = Boolean(unavailable || pending);
+        direct.onclick = () => {
+          if (confirming) { this.reloadConfirming.delete(row.key); this.repaint(); return; }
+          if (row.harness === "codex") { this.reloadConfirming.add(row.key); this.repaint(); return; }
+          reload(row);
+        };
+        confirm.onclick = () => { this.reloadConfirming.delete(row.key); reload(row); };
         control.setAttribute("aria-label", `Cassy controls for ${row.supervisor} on ${machineName(row.host)}`);
         const status = control.querySelector<HTMLElement>(".conversation-reload-receipt")!;
-        status.textContent = receipt ? `${receipt.phase === "observed" ? "" : `${receipt.phase}: `}${receipt.detail}` : row.reloadPending ? "Connecting to reload Cassy…" : !direct.hidden ? unavailable ?? "" : "";
+        status.textContent = confirming ? CODEX_RELOAD_CONFIRM
+          : receipt ? `${receipt.phase === "observed" ? "" : `${receipt.phase}: `}${receipt.detail}` : row.reloadPending ? "Connecting to reload Cassy…" : !direct.hidden ? unavailable ?? "" : "";
+        if (pending) status.prepend(reloadWaitNode(document));
         status.hidden = !status.textContent;
         control.hidden = direct.hidden && status.hidden;
         ordered.push(control);

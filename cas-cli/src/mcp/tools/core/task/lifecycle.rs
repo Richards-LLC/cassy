@@ -3939,7 +3939,10 @@ impl CasCore {
         }
         task.deliverables.split_takeover = None;
         if let Some(start) = factory_branch_start {
-            task.deliverables.factory_branch_start = Some(start);
+            let actor = task.assignee.clone().unwrap_or_default();
+            super::rebind::rebind_start(
+                &mut task, start, &actor, "task start", super::rebind::StartAudit::Note,
+            );
         }
         let automatic_rebind = reassigned_branch.and_then(|(checkout, worker, branch)| {
             super::rebind::reassigned_branch_start(
@@ -3947,7 +3950,11 @@ impl CasCore {
             )
         });
         if let Some((start, _)) = automatic_rebind.as_ref() {
-            task.deliverables.factory_branch_start = Some(start.clone());
+            let actor = task.assignee.clone().unwrap_or_default();
+            super::rebind::rebind_start(
+                &mut task, start.clone(), &actor, "reassigned start",
+                super::rebind::StartAudit::Recorded,
+            );
         }
         task.updated_at = chrono::Utc::now();
 

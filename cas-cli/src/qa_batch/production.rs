@@ -46,7 +46,9 @@ pub(super) fn recording_candidate(
     root: &Path, repo: &Path, task: &Task, anchor: &str, head: &str,
 ) -> Result<Option<(ProductionCandidate, Vec<String>)>, String> {
     let Some(branch) = branch(root, repo) else { return Ok(None) };
-    if !cas_store::has_qa_batch_deferral(root, &task.id).map_err(|error| error.to_string())? {
+    if !cas_store::has_qa_batch_deferral(root, &task.id).map_err(|error| error.to_string())?
+        || super::integration_state(repo, anchor, &branch) == Some(true)
+    {
         return Ok(None);
     }
     let unresolved = || format!("PRODUCTION_BATCH_QA_CANDIDATE_UNRESOLVED candidate_sha={head}");

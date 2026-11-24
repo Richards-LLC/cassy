@@ -346,8 +346,6 @@ fn request_with_retry(
     }
 }
 
-/// An owning supervisor's retry may release only a positively dead local child.
-/// The store fences the liveness observation against registration/claim races.
 pub(super) fn recover_expired_claim(core: &CasCore, dispatch: &VerificationDispatch) -> Result<VerificationDispatch, String> {
     recover_expired_claim_with_probes(core, dispatch,
         crate::mcp::daemon::pid_alive, crate::mcp::daemon::read_pid_starttime)
@@ -376,8 +374,6 @@ pub(super) fn recover_expired_claim_with_probes(
     if !local {
         return Ok(dispatch.clone());
     }
-    // Daemon liveness treats unreadable fingerprints as suspicious. Revoking
-    // review authority needs positive death evidence, not that ambiguity.
     let stalled = daemon_owned
         && !crate::factory_review_scratch::verifier_progressing(&core.cas_root, dispatch, Some(&child), now);
     let confirmed_dead = stalled || child.status == cas_types::AgentStatus::Shutdown
@@ -1158,14 +1154,15 @@ mod tests {
         task.deliverables.factory_branch_anchor = Some(source);
         task.deliverables.parked_branch = Some("factory/worker".into());
         core.open_task_store().unwrap().add(&task).unwrap();
-        // The factory daemon's control socket: count each launch request.
         let socket = gui_socket_path("gh-2023");
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         listener.set_nonblocking(true).unwrap();
         let (launched, launches) = std::sync::mpsc::channel();
+        let daemon_root = root.clone();
         std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let mut attempts = 0;
             while std::time::Instant::now() < deadline {
                 let Ok((mut client, _)) = listener.accept() else {
                     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -1187,57 +1184,63 @@ mod tests {
                 else {
                     panic!("unexpected factory control");
                 };
-                client.write_all(&encode_message(&DaemonMessage::VerifierLaunched {
-                    dispatch_id: dispatch_id.clone(),
+                attempts += 1;
+                let harness_fails = case == "harness-failure" && attempts == 1;
+                let output = daemon_root.join("verification-runs").join(&dispatch_id)
+                    .join(format!("attempt-{attempts}")).join("verdict.json");
+                std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+                let (resume, provider_held) = std::sync::mpsc::channel::<()>();
+                let started = super::factory_launch::launch_with(&daemon_root, "gh-2023", &dispatch_id,
+                    |core, task, dispatch| launch_with_preparation(core, task, dispatch, output, move |_| {
+                        if harness_fails {
+                            let mut harness = Command::new("sh");
+                            harness.args(["-c", "exit 1"]);
+                            return Ok((harness, None));
+                        }
+                        provider_held.recv().ok();
+                        Err("provider released".into())
+                    }));
+                client.write_all(&encode_message(&match &started {
+                    Ok(_) => DaemonMessage::VerifierLaunched { dispatch_id: dispatch_id.clone() },
+                    Err(message) => DaemonMessage::Error {
+                        message: message.clone(), client_ref: Some(dispatch_id.clone()),
+                    },
                 }).unwrap()).unwrap();
-                let _ = launched.send(dispatch_id);
+                let _ = launched.send((dispatch_id, started.map(|review| review.map(|review| (review, resume)))));
             }
         });
         let wait = std::time::Duration::from_secs(10);
 
         assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").is_err());
         let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
-        assert_eq!(launches.recv_timeout(wait).unwrap(), dispatch.id);
-        // The attempt's harness fails; its claim is released for one retry.
-        let directory = root.join("verification-runs").join(&dispatch.id);
-        std::fs::create_dir_all(&directory).unwrap();
-        let mut failing = Command::new("sh");
-        failing.args(["-c", "exit 1"]);
-        let (resume, stall) = std::sync::mpsc::channel::<()>();
-        let attempt = launch_with_preparation(&core, &task, &dispatch, directory.join("verdict.json"),
-            move |_| {
-                if case == "harness-failure" { return Ok((failing, None)); }
-                stall.recv().ok();
-                Err("stalled provider".into())
-            })
-            .unwrap()
-            .unwrap();
-        let agents = core.open_agent_store().unwrap();
-        let attempt = if case == "harness-failure" {
-            attempt.join().unwrap();
+        let (requested, first) = launches.recv_timeout(wait).unwrap();
+        assert_eq!(requested, dispatch.id);
+        let (first, resume_first) = first.unwrap().expect("the first request claims the dispatch");
+        let stalled = if case == "harness-failure" {
+            first.join().unwrap();
             None
         } else {
             let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
             assert_eq!(claimed.state, cas_types::VerificationDispatchState::Claimed);
             assert!(owns(&root, &claimed));
             age_claim(&root, &claimed, chrono::Duration::minutes(11));
-            let child = claimed.verifier_agent_id.clone().unwrap();
+            let child = claimed.verifier_agent_id.unwrap();
             match case {
                 "legacy-stalled" => {
                     rusqlite::Connection::open(root.join("cas.db")).unwrap()
                         .execute("UPDATE agents SET machine_id=NULL WHERE id=?1", [&child]).unwrap();
                 }
-                "heartbeat" => agents.heartbeat(&child).unwrap(),
+                "heartbeat" => core.open_agent_store().unwrap().heartbeat(&child).unwrap(),
                 "lane" => drop(crate::factory_review_scratch::create(
                     &root, repo, &task.id, Some(&dispatch.id),
                     &dispatch.repository.as_ref().unwrap().head_commit,
                 ).unwrap()),
                 _ => {}
             }
-            Some((attempt, child))
+            Some(first)
         };
         let before = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
-        assert_eq!(before.state, if attempt.is_some() {
+        assert_eq!(before.state, if stalled.is_some() {
             cas_types::VerificationDispatchState::Claimed
         } else {
             cas_types::VerificationDispatchState::Pending
@@ -1248,49 +1251,43 @@ mod tests {
             .err()
             .expect("an unreviewed delivery stays held");
 
+        let (requested, second) = launches.recv_timeout(wait).unwrap();
+        assert_eq!(requested, dispatch.id, "{case}");
+        let second = second.unwrap();
         let after = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
-        let recoveries: i64 = rusqlite::Connection::open(root.join("cas.db")).unwrap().query_row(
-            "SELECT COUNT(*) FROM events WHERE json_extract(metadata,'$.code')='expired_verifier_claim_recovered' AND json_extract(metadata,'$.dispatch_id')=?1",
-            [&dispatch.id], |row| row.get(0),
-        ).unwrap();
+        let count = |sql: &str| -> i64 {
+            rusqlite::Connection::open(root.join("cas.db")).unwrap()
+                .query_row(sql, [&dispatch.id], |row| row.get(0)).unwrap()
+        };
+        let recoveries = count("SELECT COUNT(*) FROM events WHERE json_extract(metadata,'$.code')='expired_verifier_claim_recovered' AND json_extract(metadata,'$.dispatch_id')=?1");
+        let claims = count("SELECT COUNT(*) FROM verification_capabilities WHERE dispatch_id=?1 AND verifier_agent_id IS NOT NULL");
         if matches!(case, "heartbeat" | "lane") {
+            assert!(second.is_none(), "{case}");
             assert_eq!(serde_json::to_value(&after).unwrap(), serde_json::to_value(&before).unwrap(), "{case}");
-            assert_eq!(recoveries, 0, "{case}");
+            assert_eq!((recoveries, claims), (0, 1), "{case}");
             assert!(held.data.is_none(), "{case}: {held:?}");
-        } else {
-            assert_eq!(
-                held.data.as_ref().map(|data| data["reason"].clone()),
-                Some(serde_json::json!("verifier_replacement_scheduled")),
-                "{case}: {held:?}"
-            );
-            assert_eq!((&after.id, &after.repository), (&dispatch.id, &dispatch.repository), "{case}");
-            assert_eq!(after.state, cas_types::VerificationDispatchState::Pending, "{case}");
-            assert_eq!(recoveries, i64::from(attempt.is_some()), "{case}");
-            assert_eq!(launches.recv_timeout(wait).unwrap(), dispatch.id, "{case}");
-            assert!(launches.recv_timeout(std::time::Duration::from_secs(2)).is_err(), "{case}");
+            drop(resume_first);
+            stalled.unwrap().join().unwrap();
+            return;
         }
-        let Some((stalled, child)) = attempt else { return };
-        if after.state == cas_types::VerificationDispatchState::Pending {
-            let (finish, review) = std::sync::mpsc::channel::<()>();
-            let replacement = launch_with_preparation(&core, &task, &after, directory.join("replacement.json"),
-                move |_| {
-                    review.recv().ok();
-                    Err("replacement stopped".into())
-                })
-                .unwrap()
-                .expect("the released dispatch admits its replacement");
-            resume.send(()).unwrap();
+        assert_eq!(
+            held.data.as_ref().map(|data| data["reason"].clone()),
+            Some(serde_json::json!("verifier_replacement_scheduled")),
+            "{case}: {held:?}"
+        );
+        let (replacement, finish) = second.expect("the retry's request claims the released dispatch");
+        assert_eq!((&after.id, &after.repository), (&dispatch.id, &dispatch.repository), "{case}");
+        assert_eq!(after.state, cas_types::VerificationDispatchState::Claimed, "{case}");
+        assert!(after.verifier_agent_id.is_some() && after.verifier_agent_id != before.verifier_agent_id, "{case}");
+        assert_eq!((recoveries, claims), (i64::from(stalled.is_some()), 2), "{case}");
+        if let Some(stalled) = stalled {
+            drop(resume_first);
             stalled.join().unwrap();
-            let replaced = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
-            assert_eq!(replaced.state, cas_types::VerificationDispatchState::Claimed, "{case}");
-            assert_eq!(replaced.repository, dispatch.repository, "{case}");
-            assert!(replaced.verifier_agent_id.as_ref().is_some_and(|id| *id != child), "{case}");
-            finish.send(()).unwrap();
-            replacement.join().unwrap();
-        } else {
-            resume.send(()).unwrap();
-            stalled.join().unwrap();
+            let kept = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+            assert_eq!(serde_json::to_value(&kept).unwrap(), serde_json::to_value(&after).unwrap(), "{case}");
         }
+        drop(finish);
+        replacement.join().unwrap();
     }
 
     #[test]

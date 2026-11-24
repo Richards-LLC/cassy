@@ -1916,9 +1916,6 @@ pub fn release_failed_verifier_dispatch(
 
 pub const AUTOMATIC_PREMERGE_OWNER_KEY: &str = "automatic_premerge_dispatch";
 
-/// Retry an expired review after the caller positively established local child
-/// death. Compare the observed owner and child incarnations under the verdict
-/// lock before revoking authority; a revival, replacement or verdict wins.
 pub fn recover_expired_dead_verifier_dispatch(
     cas_dir: &Path,
     dispatch_id: &str,
@@ -1979,7 +1976,7 @@ pub fn recover_expired_dead_verifier_dispatch(
     )?;
     record_event_with_conn(&tx, &Event::new(
         EventType::VerificationStarted, EventEntityType::Task, &dispatch.task_id,
-        "Expired verifier claim released after confirmed local child death",
+        "Expired verifier claim released: its local verifier is dead or no longer progressing",
     ).with_metadata(serde_json::json!({
         "code":"expired_verifier_claim_recovered", "dispatch_id":dispatch_id,
         "owner":owner.id, "previous_verifier":dead_child.id,

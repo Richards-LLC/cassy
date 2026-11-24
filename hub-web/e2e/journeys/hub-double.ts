@@ -313,6 +313,7 @@ export class HubDouble {
   private readonly releasedLeases = new Set<string>();
   /** One lease read can be held at the wire boundary to exercise stale-cache races. */
   private readonly leaseReadGates = new Map<string, { wait: Promise<void>; started: () => void }>();
+  private readonly leaseTakeGates = new Map<string, { wait: Promise<void>; started: () => void }>();
   /** POST /v1/sessions/<s>/lease calls, in order, with whether they forced. */
   readonly leaseTakes: Array<{ machine: string; session: string; force: boolean; status: number }> = [];
   /** Turns pushed live, replayed in history like a real hub after a reload. */
@@ -386,6 +387,7 @@ export class HubDouble {
 
   /** Another device (named `label`) holds control of the session until a take overrides it. */
   holdLease(session: string, label: string): void { this.leaseHolders.set(session, label); }
+  releaseOwnLease(session: string): void { this.releasedLeases.add(session); }
 
   /**
    * The session's stream gains a work event (cas-ff22). A live daemon then
@@ -402,11 +404,19 @@ export class HubDouble {
 
   /** Hold the next GET lease response until released, and expose when it reaches the hub. */
   holdNextLeaseRead(session: string): { started: Promise<void>; release: () => void } {
+    return this.holdLeaseResponse(this.leaseReadGates, session);
+  }
+
+  holdNextLeaseTake(session: string): { started: Promise<void>; release: () => void } {
+    return this.holdLeaseResponse(this.leaseTakeGates, session);
+  }
+
+  private holdLeaseResponse(gates: typeof this.leaseReadGates, session: string): { started: Promise<void>; release: () => void } {
     let begin!: () => void;
     let release!: () => void;
     const started = new Promise<void>((resolve) => { begin = resolve; });
     const wait = new Promise<void>((resolve) => { release = resolve; });
-    this.leaseReadGates.set(session, { wait, started: begin });
+    gates.set(session, { wait, started: begin });
     return { started, release };
   }
 
@@ -1176,6 +1186,12 @@ export class HubDouble {
         const status = !holder ? 200 : !force ? 409 : this.scopesFor(machineId).includes("hub-admin") ? 200 : 403;
         this.leaseTakes.push({ machine: machineId, session, force, status });
         this.observed();
+        const gate = this.leaseTakeGates.get(session);
+        if (gate) {
+          this.leaseTakeGates.delete(session);
+          gate.started();
+          await gate.wait;
+        }
         if (status === 409) return route.fulfill({ status, json: { error: "lease_unavailable" } });
         if (status === 403) return route.fulfill({ status, json: { error: "scope_denied", required_scope: "hub:admin" } });
         this.leaseHolders.delete(session);

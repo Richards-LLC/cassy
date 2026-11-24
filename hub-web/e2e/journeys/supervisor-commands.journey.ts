@@ -339,11 +339,27 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await captureReload(page, "codex-mismatch", viewport.width);
         expect(hub.sends).toHaveLength(0);
       });
+      const reload = page.locator('[data-command-confirm="mcp"]');
+      if (phone) await journey.stage("Back and the header toggle dismiss a header confirmation", async () => {
+        const openReload = async () => { await openCommands(page); await commandButton(page, "mcp").click(); };
+        await openReload();
+        await expect(reload).toBeVisible();
+        await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
+        await expect(reload).toHaveCount(0);
+        await conversationRow(page).click();
+        await openReload();
+        await page.getByRole("button", { name: "More conversation actions", exact: true }).press("Enter");
+        await page.getByRole("button", { name: "Supervisor commands", exact: true }).click();
+        await expect(reload).toHaveCount(0);
+        expect(mutations()).toHaveLength(1);
+      });
       await journey.stage("Typed Reload Cassy keeps its focused action when the session list changes", async () => {
+        hub.releaseOwnLease(PELICAN);
+        await page.reload();
         const input = composer(page);
         await input.fill("/reload-cassy");
+        await expect(commandButton(page, "mcp")).toBeVisible();
         await input.press("Enter");
-        const reload = page.locator('[data-command-confirm="mcp"]');
         await expect(reload).toBeVisible();
         await page.keyboard.press("ArrowRight");
         await expect(reload).toBeFocused();
@@ -362,11 +378,34 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await hub.announceCatalog(machine.id, { added: [arriving.name] });
         await expect(navigation.getByRole("button", { name: /^arriving-project on /, includeHidden: true })).toHaveCount(1);
         expect(mutations()).toHaveLength(1);
-        await page.mouse.up();
+        const leaseTake = hub.holdNextLeaseTake(PELICAN);
+        try {
+          await page.mouse.up();
+          await leaseTake.started;
+          const incoming = { ...peer, name: "settled-swift-4", supervisor: "settled-swift-4", project_dir: "/projects/incoming-project", ws_port: 48104, started_at: journeyStamp() };
+          machine.sessions.push(incoming);
+          await hub.announceCatalog(machine.id, { added: [incoming.name] });
+          await expect(navigation.getByRole("button", { name: /^incoming-project on /, includeHidden: true })).toHaveCount(1);
+        } finally {
+          leaseTake.release();
+        }
         await expect.poll(() => mutations().length).toBe(2);
         expect(mutations()[1].body).toMatchObject({ command: "mcp", confirmed: true });
         await expect(input).toHaveValue("");
+        await expect(input).toBeFocused();
         expect(hub.sends).toHaveLength(0);
+      });
+      await journey.stage("A refused take names the pane controller without sending Reload", async () => {
+        hub.holdLease(PELICAN, "Studio iPad");
+        await page.reload();
+        const input = composer(page);
+        await input.fill("/reload-cassy");
+        await expect(commandButton(page, "mcp")).toBeVisible();
+        await input.press("Enter");
+        await reload.click();
+        await expect(commandPalette(page).getByRole("status")).toContainText("Studio iPad");
+        await expect(input).toHaveValue("/reload-cassy");
+        expect(mutations()).toHaveLength(2);
       });
     });
     test("HUB-J27 dismiss reload refusal and resolve a later observed receipt", journeyPart, async ({ page, journey }) => {

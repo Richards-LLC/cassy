@@ -519,6 +519,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     // cas-f60a: a double-click on End session opens the confirmation and
     // nothing more. Its destructive button is never where the pointer was.
     const ask = end.getByRole("button", { name: "End session noble-cheetah-84 on Atlas" });
+    await expect(ask).toBeVisible();
     const box = (await ask.boundingBox())!;
     const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
     await ask.dblclick();
@@ -687,6 +688,9 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
       })).toBe(true);
       // cas-be27: every card row, provider-mark avatars included, starts its name clear of the avatar.
       for (const row of await allRows().all()) {
+        // cas-6e27: a loaded lane can read the box before the chip is laid out; wait for it first.
+        await expect(row.getByTestId("conversation-role")).toBeVisible();
+        await expect(row.getByTestId("conversation-avatar")).toBeVisible();
         const role = (await row.getByTestId("conversation-role").boundingBox())!;
         const avatar = (await row.getByTestId("conversation-avatar").boundingBox())!;
         expect(role.x - (avatar.x + avatar.width)).toBeGreaterThanOrEqual(0);

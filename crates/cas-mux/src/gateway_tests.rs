@@ -216,16 +216,20 @@ fn session_pin_overrides_the_project_setting_in_both_directions() {
 #[test]
 fn a_cli_started_daemon_keeps_its_startup_route_after_the_project_setting_flips() {
     const CHILD: &str = "CAS_TEST_GATEWAY_PIN_CHILD";
+    const RAN: &str = "CAS_TEST_GATEWAY_PIN_RAN";
     let Ok(start) = std::env::var(CHILD) else {
         for start in ["true", "false"] {
+            let marker = tempfile::tempdir().unwrap();
+            let ran = marker.path().join("ran");
             let out = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "gateway::tests::a_cli_started_daemon_keeps_its_startup_route_after_the_project_setting_flips", "--nocapture"])
                 .env(CHILD, start)
+                .env(RAN, &ran)
                 .env_remove(ROUTE_ENV)
                 .output()
                 .unwrap();
             assert!(out.status.success(), "start={start}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-            assert!(String::from_utf8_lossy(&out.stdout).contains("1 passed"), "start={start}: child ran no test");
+            assert!(ran.exists(), "start={start}: the child must run the test body");
         }
         return;
     };
@@ -247,4 +251,5 @@ fn a_cli_started_daemon_keeps_its_startup_route_after_the_project_setting_flips(
         let routed = transport(&worker) == Some(format!("gateway {endpoint}").as_str());
         assert_eq!(routed, start == "true", "{cli:?}: startup route must hold after the flip");
     }
+    std::fs::write(std::env::var(RAN).unwrap(), "").unwrap();
 }

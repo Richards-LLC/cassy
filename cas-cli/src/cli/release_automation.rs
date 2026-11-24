@@ -1317,6 +1317,7 @@ pub(super) mod tests {
             recorder_agent_id: "supervisor".into(), recorded_at: chrono::Utc::now().to_rfc3339(),
             release_tag: None, ledger_author_id: Some("reviewer".into()),
             ledger_author_role: Some("sub_agent".into()), author_overrides: Default::default(), imported: true,
+            production_candidate: None,
         }).unwrap();
         let first = crate::release_reconcile::reconcile_release(
             &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Backfill,
@@ -1511,6 +1512,7 @@ pub(super) mod tests {
                     release_tag: is_tag.then(|| "v9.99.2".into()),
                     ledger_author_id: None,
                     ledger_author_role: None,
+                    production_candidate: None,
                     author_overrides: Default::default(),
                     imported: false,
                 },

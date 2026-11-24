@@ -27,6 +27,13 @@ pub const RELEASE_VERDICT_SCHEMA: u32 = 2;
 pub const RELEASE_TAG_VERDICT_SCHEMA: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductionCandidate {
+    pub source_sha: String,
+    pub base_sha: String,
+    pub tree: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QaBatchReceipt {
     pub schema_version: u32,
     pub id: String,
@@ -36,6 +43,8 @@ pub struct QaBatchReceipt {
     pub ledger_sha256: String,
     pub ledger_size_bytes: u64,
     pub staging_sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_candidate: Option<ProductionCandidate>,
     /// Only PASS tasks, each bound to its own delivery anchor.
     pub task_heads: BTreeMap<String, String>,
     pub recorder_agent_id: String,
@@ -354,6 +363,7 @@ mod tests {
             ledger_sha256: "a".repeat(64),
             ledger_size_bytes: 4,
             staging_sha: "b".repeat(40),
+            production_candidate: None,
             recorder_agent_id: "supervisor".into(),
             recorded_at: Utc::now().to_rfc3339(),
             release_tag: None,

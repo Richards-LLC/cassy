@@ -1,5 +1,6 @@
 //! Validation shared by batch recording and close. No process or polling work.
 pub(crate) mod release_close;
+mod production;
 use crate::mcp::tools::core::task::lifecycle::close_ops::{
     TaskCommitReceiptWindow, squash_receipt_qa_anchor,
 };
@@ -947,7 +948,7 @@ pub(crate) fn prepare_receipt(
     // A QA receipt is only as good as the ledger the close gate will read, so
     // run that gate's validator (`cas qa ledger check --task <owner>`) first and
     // refuse with its diagnostics before anything is recorded.
-    if schema == cas_store::QA_BATCH_RECEIPT_SCHEMA {
+    let batch_report = if schema == cas_store::QA_BATCH_RECEIPT_SCHEMA {
         let owner = crate::store::open_task_store(root)
             .map_err(|e| e.to_string())?
             .get(&artifact.task_id)
@@ -965,7 +966,10 @@ pub(crate) fn prepare_receipt(
         if !failed.is_empty() {
             return Err(format!("ledger records FAIL cells, so it cannot back a PASS receipt: {}", failed.join(", ")));
         }
-    }
+        Some(report)
+    } else {
+        None
+    };
     if schema == cas_store::RELEASE_VERDICT_SCHEMA {
         if let Some(id) = task_ids.iter().find(|id| !report_names(&body, id)) {
             return Err(format!("the published report does not name {id}; one verdict must name every delivery it covers"));
@@ -981,6 +985,7 @@ pub(crate) fn prepare_receipt(
         };
     let mut heads = BTreeMap::new();
     let mut overrides = BTreeMap::new();
+    let mut production_candidate = None;
     for id in task_ids {
         let task = tasks.get(id).map_err(|e| format!("task {id}: {e}"))?;
         if !crate::mcp::tools::core::task::task_owned_by_project(&task, root, Some(&project)) {
@@ -1014,6 +1019,16 @@ pub(crate) fn prepare_receipt(
                 "task {id} delivery anchor is not an ancestor of staging_sha"
             ));
         }
+        if let Some(report) = &batch_report
+            && let Some(candidate) = production::recording_candidate(
+                root, &repo, &task, &anchor, &staging, &body, &ledger, report,
+            )?
+        {
+            if production_candidate.as_ref().is_some_and(|existing| existing != &candidate) {
+                return Err(format!("PRODUCTION_BATCH_QA_BUILD_MISMATCH candidate_sha={staging}"));
+            }
+            production_candidate = Some(candidate);
+        }
         heads.insert(id.clone(), anchor);
     }
     Ok(QaBatchReceipt {
@@ -1025,6 +1040,7 @@ pub(crate) fn prepare_receipt(
         ledger_sha256: artifact.sha256,
         ledger_size_bytes: artifact.size_bytes,
         staging_sha: staging.to_ascii_lowercase(),
+        production_candidate,
         task_heads: heads,
         recorder_agent_id: recorder.id.clone(),
         recorded_at: chrono::Utc::now().to_rfc3339(),
@@ -1091,6 +1107,7 @@ pub(crate) fn prepare_release_tag_receipt(
         recorder_agent_id: "release-automation".into(),
         recorded_at: chrono::Utc::now().to_rfc3339(),
         release_tag: Some(tag.to_string()),
+        production_candidate: None,
         ledger_author_id: None,
         ledger_author_role: None,
         author_overrides: BTreeMap::new(),

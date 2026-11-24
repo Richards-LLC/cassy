@@ -2318,7 +2318,7 @@ mod tests {
             Some(super::super::Commands::Ledger(LedgerArgs { command: LedgerCommand::Report { release, .. } })) => release,
             _ => panic!("not a report command: {args:?}"),
         };
-        assert_eq!(release(&["cas", "scorecard", "--release", "v4.53.0"]).as_deref(), Some("v4.53.0"));
-        assert_eq!(release(&["cas", "ledger", "report", "--release", "v4.53.0"]).as_deref(), Some("v4.53.0"));
+        assert_eq!(release(&["cas", "scorecard", "--release", "v9.99.0"]).as_deref(), Some("v9.99.0"));
+        assert_eq!(release(&["cas", "ledger", "report", "--release", "v9.99.0"]).as_deref(), Some("v9.99.0"));
     }
 }

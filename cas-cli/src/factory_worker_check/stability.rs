@@ -17,11 +17,16 @@ pub(crate) struct Identity {
     /// and `$field` placeholders match each runtime row's interpolated name.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub parameterized: bool,
+    /// GH #2223: registered through an environment condition
+    /// (`env ? it : it.skip`, `skipIf`/`runIf`), so a run where that
+    /// condition is off reports the case skipped by design.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub environment_gated: bool,
 }
 
 impl Identity {
     pub(crate) fn exact(path: impl Into<String>, name: impl Into<String>) -> Self {
-        Self { path: path.into(), name: name.into(), parameterized: false }
+        Self { path: path.into(), name: name.into(), parameterized: false, environment_gated: false }
     }
 
     /// The runtime-name regex body (unanchored) this identity selects.
@@ -78,6 +83,10 @@ pub(crate) struct Proof {
     pub tests: Vec<Identity>,
     pub consecutive_passes: u32,
     pub elapsed_ms: u128,
+    /// Changed environment-gated tests every repeat reported skipped by their
+    /// own registration condition: dispositioned, never counted as passing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inactive: Vec<Identity>,
 }
 
 fn serialize_changed_tests<S: serde::Serializer>(tests: &[Identity], serializer: S) -> std::result::Result<S::Ok, S::Error> {
@@ -94,6 +103,7 @@ pub(super) fn valid(proof: &Proof) -> bool {
     matches!(proof.runner.as_str(), "nextest" | "vitest" | "jest" | "playwright" | "node")
         && proof.consecutive_passes >= REQUIRED_PASSES
         && !proof.tests.is_empty()
+        && proof.inactive.iter().all(|test| test.environment_gated)
         && proof.tests.iter().all(|test| !test.name.is_empty()
             && !test.path.is_empty() && !Path::new(&test.path).is_absolute()
             && Path::new(&test.path).components().all(|part|
@@ -124,7 +134,7 @@ pub(crate) fn missing(passing: &PassingTests<'_>, tests: &[Identity]) -> Vec<Ide
     if tests.is_empty() { return Vec::new(); }
     let covered = passing.records().iter()
         .filter_map(|(_, _, test)| test.stability.as_ref())
-        .filter(|proof| valid(proof)).flat_map(|proof| &proof.tests).collect::<BTreeSet<_>>();
+        .filter(|proof| valid(proof)).flat_map(|proof| proof.tests.iter().chain(&proof.inactive)).collect::<BTreeSet<_>>();
     tests.iter().filter(|test| !covered.contains(*test)).cloned().collect()
 }
 
@@ -313,10 +323,11 @@ pub(crate) fn invalidate(cas_root: &Path, repo: &Path, head: &str, tests: &[Iden
     if tests.is_empty() { return Ok(()); }
     for (path, record) in records(cas_root, repo, head)? {
         let Some(proof) = record.test.and_then(|test| test.stability) else { continue };
-        if !proof.tests.iter().any(|test| tests.contains(test)) { continue; }
+        if !proof.tests.iter().chain(&proof.inactive).any(|test| tests.contains(test)) { continue; }
         std::fs::remove_file(path)?;
         let mut kept = proof;
         kept.tests.retain(|test| !tests.contains(test));
+        kept.inactive.retain(|test| !tests.contains(test));
         if valid(&kept) { persist(cas_root, &record.repo, &record.head, kept)?; }
     }
     Ok(())

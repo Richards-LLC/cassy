@@ -281,7 +281,7 @@ async fn g61_gate_family_ends_runnable_or_accepted_cas_fcb1() {
                     }
                     stability::record(cas, repo, head, stability::Proof {
                         runner: "playwright".into(), consecutive_passes: stability::REQUIRED_PASSES, elapsed_ms: 1,
-                        tests: vec![stability::Identity::exact(journey, "pairs a device")],
+                        tests: vec![stability::Identity::exact(journey, "pairs a device")], inactive: Vec::new(),
                     }).unwrap();
                 }
                 "rust" | "harness" => {

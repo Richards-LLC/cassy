@@ -3822,7 +3822,8 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .launch-not-offered .launch-account-out { display: grid; gap: var(--space-1); padding-inline: var(--space-3); }
 .launch-not-offered .launch-login { padding-inline-start: 0; }
 .launch-account-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--space-2); min-width: 0; }
-.launch-account-pick { padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--bg-active); color: var(--color-verdict); font: var(--weight-semibold) var(--fs-xs)/20px var(--font-ui); white-space: nowrap; }
+/* Ink, not the accent: the pill sits on a checked row's own active fill, where the accent drops under 4.5:1 (cas-448f). */
+.launch-account-pick { padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--bg-active); color: var(--ink); font: var(--weight-semibold) var(--fs-xs)/20px var(--font-ui); white-space: nowrap; }
 .launch-account-why { color: var(--text-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }
 .launch-account-low { color: var(--state-warn); }
 .launch-meters { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--space-1) var(--space-4); margin-top: var(--space-1); }

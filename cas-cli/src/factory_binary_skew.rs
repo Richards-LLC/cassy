@@ -498,6 +498,18 @@ mod tests {
         (dir, root, worker, child)
     }
 
+    /// cas-724e: the installed identity is the version and the build hash
+    /// `cas --version` prints after it, so two builds of 4.52.0 differ.
+    #[test]
+    fn installed_identity_reads_the_build_hash_after_the_version() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("cas");
+        std::fs::write(&program, "#!/bin/sh\nprintf 'cas 4.52.0 (f28538f-dirty 2026-11-24)\\n'\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(installed_identity_of(program.as_os_str()), Some(("4.52.0".into(), Some("f28538f-dirty".into()))));
+    }
+
     #[test]
     fn confirmed_front_reports_backend_version_and_rejects_reused_pid_cas_81c4() {
         let (_dir, root, mut worker, child) = fixture();

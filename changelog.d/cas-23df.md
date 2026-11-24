@@ -1,0 +1,3 @@
+### Added — Factory delivery
+
+- **Park requires an acceptance-criteria checklist and refuses an unapproved narrowing** — Was: a worker could park a narrower slice than its brief, sometimes recording the narrowing only in a doc, and the verifier found it one round later. Now: park requires `AC-CHECKLIST.md` in the task artifacts with one row per acceptance criterion (`AC1`, `AC2`, …) and per supervisor decision note (`D1`, …). Each row is `MET` with a `file:line` and a receipt, or `NOT MET`/`NARROWED` with a reason. A `NOT MET` or `NARROWED` row parks only after a supervisor decision note names its item; a worker's own decision note does not count. One refusal lists every failing row and the rows to add, and task start names the rows park will require.

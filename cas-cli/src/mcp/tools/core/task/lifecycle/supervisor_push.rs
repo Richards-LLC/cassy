@@ -1393,7 +1393,12 @@ pub(crate) fn reconcile_blocked_task_alert(
             && now >= dispatch.resolved_at.unwrap_or(dispatch.requested_at)
                 + chrono::Duration::minutes(5)
         {
-            let reason = if task.deliverables.no_delivery_close_intent.as_ref()
+            // GH #2383: a held automatic close names the gate it recorded.
+            let held = super::merge_close::no_delivery_close_hold(&task.notes, &dispatch.id)
+                .map(|gate| format!("Verification was approved, but Cassy's automatic no-delivery close is held by: {gate} Resolve that gate, then finish its close."));
+            let reason = if let Some(held) = held.as_deref() {
+                held
+            } else if task.deliverables.no_delivery_close_intent.as_ref()
                 .is_some_and(|intent| intent.dispatch_id == dispatch.id)
             {
                 "Verification was approved, but automatic no-delivery close is still held after five minutes; inspect the live assignment and holds, then finish its close."
@@ -2360,6 +2365,10 @@ mod tests {
         // pin: no-delivery approval finishes close automatically; a hold requires supervisor repair, never a worker retry.
         assert!(alerts[0].prompt.contains("no-delivery") && !alerts[0].prompt.contains("worker has not retried close"),
             "held auto-close must name the action its supervisor owns: {}", alerts[0].prompt);
+        // GH #2383: the alert relays the exact gate the held close recorded.
+        let notes = tasks.get(&task.id).unwrap().notes;
+        let gate = super::super::merge_close::no_delivery_close_hold(&notes, &dispatch.id).expect("held close records its gate");
+        assert!(alerts[0].prompt.contains(gate), "{}", alerts[0].prompt);
     }
 
     #[test]

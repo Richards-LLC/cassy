@@ -1132,6 +1132,10 @@ async fn park_requires_red_first_evidence_gh_2422() {
     let unrelated = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(=gear::unrelated)"];
     let check = ["-p", "widget", "--tests"];
     let node = ["node", "--test", "gear.test.mjs"];
+    let outer = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(park_requires_red_first_evidence_gh_2422)"];
+    let signal = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(queued_task_starts_after_close_or_park_cas_8488)"];
+    let nested_log = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/selected-tests-RRaNXe.log"));
+    let signal_log = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/red-89c0f99c-stack-overflow.log"));
     let gear = |turn: &str, regression: &str| format!(
         "pub fn turn() -> u8 {{ {turn} }}\n#[test]\nfn regression() {{ {regression} }}\n#[test]\nfn unrelated() {{ assert_eq!(turn(), 0); }}\n"
     );
@@ -1149,8 +1153,12 @@ async fn park_requires_red_first_evidence_gh_2422() {
         ("unrelated failure at base", Some("test-first"), Some(("main", &unrelated[..])), false),
         ("node file setup failure", Some("test-first"), Some(("HEAD^", &node[..])), false),
         ("node before hook failure", Some("test-first"), Some(("HEAD^", &node[..])), false),
+        ("node abort signal", Some("test-first"), Some(("HEAD^", &node[..])), false),
         ("node regression failure", Some("test-first"), Some(("HEAD^", &node[..])), true),
         ("node inactive regression", Some("test-first"), Some(("HEAD^", &node[..])), false),
+        ("captured outer Nextest failure", Some("test-first"), Some(("HEAD^", &outer[..])), false),
+        ("captured nested Nextest failure", Some("test-first"), Some(("HEAD^", &nextest[..])), false),
+        ("captured Nextest signal", Some("test-first"), Some(("HEAD^", &signal[..])), false),
         ("nextest timeout", Some("test-first"), Some(("HEAD^", &nextest[..])), true),
         ("parameterized Rust failure", Some("test-first"), Some(("HEAD^", &versioned[..])), true),
         ("test at tip", Some("test-first"), Some(("HEAD", &nextest[..])), false),
@@ -1204,6 +1212,10 @@ async fn park_requires_red_first_evidence_gh_2422() {
                     "import { before, describe } from 'node:test';\nbefore(() => { throw Error('setup failed'); });\ntest('gear node regression', () => { throw Error('direct body ran'); });\ndescribe('gear', () => { test('nested regression', () => { throw Error('nested body ran'); }); });\n",
                     "import { describe } from 'node:test';\ntest('gear node regression', () => {});\ndescribe('gear', () => { test('nested regression', () => {}); });\n",
                 ),
+                "node abort signal" => (
+                    "test('gear node regression', { signal: AbortSignal.abort() }, () => {});\n",
+                    "test('gear node regression', () => {});\n",
+                ),
                 _ => (
                     "test('gear node regression', () => { throw Error('gear is stuck'); });\n",
                     "test('gear node regression', () => {});\n",
@@ -1235,12 +1247,21 @@ async fn park_requires_red_first_evidence_gh_2422() {
                 &f.worker_path
             };
             if revision == "HEAD" { env.set("CI", "fixture-red-tip"); }
-            assert!(run(checkout, args).is_err(), "{case}");
+            if let Some(capture) = match case {
+                "captured outer Nextest failure" | "captured nested Nextest failure" => Some(nested_log),
+                "captured Nextest signal" => Some(signal_log),
+                _ => None,
+            } {
+                let head = git(checkout, &["rev-parse", "HEAD"]);
+                crate::factory_worker_check::replay_rust_red_first_failure(&f.cas_dir(), checkout, &head, ID, args, capture).unwrap();
+            } else {
+                assert!(run(checkout, args).is_err(), "{case}");
+            }
             if revision == "HEAD" { env.set("CI", "true"); }
             let written = std::fs::read_dir(f.cas_dir().join("worker-checks")).into_iter().flatten()
                 .flatten().filter_map(|directory| std::fs::read_dir(directory.path()).ok()).flatten().flatten()
                 .any(|entry| entry.file_name().to_string_lossy().contains("-red-"));
-            if written != !matches!(case, "node file setup failure" | "node before hook failure") {
+            if written != !matches!(case, "node file setup failure" | "node before hook failure" | "node abort signal" | "captured nested Nextest failure") {
                 violations.push(format!("{case}: unexpected red receipt presence {written}"));
             }
             if checkout == &linked {

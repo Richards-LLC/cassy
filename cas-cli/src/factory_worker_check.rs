@@ -1244,6 +1244,18 @@ fn record_red_first_failure(cas_root: &Path, repo: &Path, head: &str, task: &str
     Ok(true)
 }
 
+#[cfg(test)]
+pub(crate) fn replay_rust_red_first_failure(
+    cas_root: &Path, repo: &Path, head: &str, task: &str, args: &[&str], capture: &str,
+) -> Result<bool> {
+    let log = tempfile::NamedTempFile::new()?;
+    std::fs::write(log.path(), capture)?;
+    let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+    let test = targeted_test(&args);
+    let Some(failure) = rust_red_first_failure(test.as_ref(), Some(100), log.path()) else { return Ok(false); };
+    record_red_first_failure(cas_root, repo, head, task, failure, worker_check_command(&args))
+}
+
 impl PassingTests<'_> {
 pub(crate) fn has_red_first_evidence(&self, task: &str, start_base: Option<&str>,
     ranges: &[(String, String)], delivered: &[stability::Identity]) -> bool {

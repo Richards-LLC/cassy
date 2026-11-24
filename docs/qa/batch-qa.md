@@ -9,7 +9,13 @@ config still reports its error. The setting is operator-owned. No background
 process is added.
 
 In batch mode, an implementer's pre-merge close still checks added test skip
-and focus markers, then parks the delivery with evidence deferred. Cassy does
+and focus markers. For a rendered delivery, park requires a strict sweep in the
+task evidence directory (`visual-qa/visual-qa.json`) and a PASS or FAIL row in
+`LEDGER.md` citing a changed-state PNG from that run. A strict sweep with findings
+can be compared with a separate strict base sweep (`visual-qa-baseline/visual-qa.json`)
+over the same pages. API-only and demo-only deliveries do not need this evidence.
+A logged supervisor waiver can waive the park requirement. Cassy defers the
+journey walk, not the visual sweep, and does
 not automatically dispatch a per-task QA pass. Resolved batch mode owns park
 proof even when target refs are unavailable; unavailable ancestry does not
 require an implementer's per-task bundle. Proven integrated deliveries retain

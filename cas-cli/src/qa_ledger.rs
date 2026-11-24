@@ -537,6 +537,44 @@ pub fn check_for_task(path: &Path, task: &cas_types::Task) -> Report {
     report
 }
 
+pub(crate) fn check_visual_capture(
+    dir: &Path,
+    task: &cas_types::Task,
+    screenshots: &[std::path::PathBuf],
+) -> Result<(), String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let dir = dir.canonicalize().map_err(|error| error.to_string())?;
+    let ledger = crate::qa_evidence::resolve_bundle_file(&dir, "ledger", "LEDGER.md")
+        .map_err(|refusal| refusal.problem)?;
+    let report = check_for_task(&ledger, task);
+    if !report.ok {
+        return Err(report.refusal());
+    }
+    let has_capture = report.rows.iter().any(|row| {
+        matches!(row.verdict, Verdict::Pass | Verdict::Fail)
+            && evidence_cell_path(&dir, &row.evidence_path).is_some_and(|capture| {
+                if !screenshots.contains(&capture) || !capture.is_file() {
+                    return false;
+                }
+                let mut header = [0; 24];
+                let mut end = [0; 12];
+                std::fs::File::open(capture).is_ok_and(|mut file| {
+                    file.read_exact(&mut header).is_ok()
+                        && &header[..16] == b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"
+                        && header[16..20] != [0; 4]
+                        && header[20..24] != [0; 4]
+                        && file.seek(SeekFrom::End(-12)).is_ok_and(|offset| offset > 24)
+                        && file.read_exact(&mut end).is_ok()
+                        && end == *b"\0\0\0\0IEND\xaeB`\x82"
+                })
+            })
+    });
+    has_capture.then_some(()).ok_or_else(|| {
+        "LEDGER.md needs a PASS or FAIL row citing a readable screenshot of the changed state from the delivered run".into()
+    })
+}
+
 /// The same parser plus safe readable PASS captures, relative to the ledger.
 pub fn check(path: &Path, min_rows: usize) -> Report {
     let body = match std::fs::read_to_string(path) {

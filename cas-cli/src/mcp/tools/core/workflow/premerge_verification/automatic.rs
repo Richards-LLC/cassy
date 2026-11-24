@@ -33,8 +33,25 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
         }));
     }
     artifacts.extend(materialize_parent_plan_artifacts(&core.cas_root, task)?);
-    let inherited = candidate_for_dispatch(&core.cas_root, dispatch)?
-        .and_then(|candidate| candidate.inherited_supervisor_call);
+    let candidate = candidate_for_dispatch(&core.cas_root, dispatch)?;
+    let inherited = candidate.as_ref().and_then(|candidate| candidate.inherited_supervisor_call.as_ref());
+    use crate::mcp::tools::core::task::lifecycle::qa_evidence_gate as evidence_gate;
+    let evidence_dir = evidence_gate::task_evidence_dir(&core.cas_root, task)?;
+    let config = core.load_config();
+    let qa = config.qa();
+    let rendered_surface = candidate.as_ref().and_then(|candidate| {
+        let repo = &candidate.repository;
+        let head = &candidate.source_sha;
+        let (base, tip) = crate::qa_evidence::delivery_range(repo, head, &candidate.target_sha, None)?;
+        let paths = crate::qa_evidence::range_paths(repo, &base, &tip)?;
+        let journeys = crate::qa_pass::catalog_journeys_for(repo, Some(head), &paths);
+        let reasons = crate::qa_pass::user_facing_reasons(task, &qa, Some(&paths), &journeys).reasons;
+        Some(evidence_gate::evidence_tier(&reasons, false) == crate::qa_evidence::EvidenceTier::Bundle)
+    });
+    let visual_evidence_present = qa.mode == crate::config::QaMode::Batch
+        && candidate.as_ref().is_some_and(|candidate| {
+            evidence_gate::check_batch_visual_evidence(task, &evidence_dir, &candidate.repository, &candidate.source_sha).is_ok()
+        });
     let supervisor_calls = core.open_verification_store().map_err(|e| e.to_string())?
         .get_for_task(&task.id).map_err(|e| e.to_string())?.into_iter()
         .filter(|call| call.dispatch_id.as_deref() == Some(dispatch.id.as_str())
@@ -43,7 +60,7 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
     let inputs = serde_json::json!({
         "task": task, "parent": parent, "dispatch": dispatch,
         "inherited_supervisor_call": inherited,
-        "qa": {"mode": core.load_config().qa().mode},
+        "qa": {"mode": qa.mode, "rendered_surface": rendered_surface, "visual_evidence_present": visual_evidence_present},
         "supervisor_calls": supervisor_calls,
         "artifacts": artifacts,
     });
@@ -59,16 +76,12 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
         input = serde_json::json!({"review_input_file": path}).to_string();
     }
     let body = format!(
-        "{}\n\n{}\n\nDaemon-owned task-verifier invocation. The task and parent below include acceptance criteria, receipts and supervisor adversarial notes. Review the bound candidate using read-only filesystem commands. Do not edit, register, close, spawn agents, or call MCP. Return exactly one JSON object containing the arguments to verification action=add: status (approved, rejected, supervisor_call, or error), summary, confidence, files_reviewed (comma-separated), issues (JSON-encoded array). Omit task_id, dispatch_id and verifier_capability: the daemon supplies the immutable dispatch identity and records your verdict through the existing sealed handoff. This daemon-owned transport replaces the MCP identity check and recording steps above; the daemon authenticates your distinct child and exact dispatch. Use qa.mode in the structured review context below. In batch mode, approve when the only open evidence is a NOT EXERCISED journey assigned solely to release batch QA and every other criterion is VERIFIED; record each deferred row and its owner. Other missing evidence, per_task unexercised journeys and any question beyond that policy still require supervisor_call. Never waive rejection conditions or treat a deferred walk as PASS.\nAn inherited supervisor call is present only when inherited_supervisor_call is not null. It carries a prior answer for an unchanged delivery and must be applied only to that exact NOT EXERCISED row/question. Cite that inherited answer in your verdict; if the current question is different, make a new supervisor_call.\nTask evidence directory (LEDGER.md, logs and captures; read this exact path instead of deriving <project-key>): {}. If evidence is absent there, name this absolute path in the verdict.\nReview inputs:\n{}\nIf review_input_file is set, read that exact JSON file before reviewing; it contains the complete task, parent, dispatch, inherited answer and review context. Read large histories in sections as needed. The file replaces inline context, without dropping criteria or proof.\n",
+        "{}\n\n{}\n\nDaemon-owned task-verifier invocation. The task and parent below include acceptance criteria, receipts and supervisor adversarial notes. Review the bound candidate using read-only filesystem commands. Do not edit, register, close, spawn agents, or call MCP. Return exactly one JSON object containing the arguments to verification action=add: status (approved, rejected, supervisor_call, or error), summary, confidence, files_reviewed (comma-separated), issues (JSON-encoded array). Omit task_id, dispatch_id and verifier_capability: the daemon supplies the immutable dispatch identity and records your verdict through the existing sealed handoff. This daemon-owned transport replaces the MCP identity check and recording steps above; the daemon authenticates your distinct child and exact dispatch. Use qa.mode in the structured review context below. In batch mode, only the NOT EXERCISED journey walk may be assigned solely to release batch QA. Before approving, verify every other criterion and record each deferred row and its owner. A rendered delivery requires qa.visual_evidence_present or an existing logged supervisor waiver for the delivery; a null qa.rendered_surface means scope was not measured, not that the delivery is non-rendered. Other missing evidence, per_task unexercised journeys and any question beyond that policy still require supervisor_call. Never waive rejection conditions or treat a deferred walk as PASS.\nAn inherited supervisor call is present only when inherited_supervisor_call is not null. It carries a prior answer for an unchanged delivery and must be applied only to that exact NOT EXERCISED row/question. Cite that inherited answer in your verdict; if the current question is different, make a new supervisor_call.\nTask evidence directory (LEDGER.md, logs and captures; read this exact path instead of deriving <project-key>): {}. If evidence is absent there, name this absolute path in the verdict.\nReview inputs:\n{}\nIf review_input_file is set, read that exact JSON file before reviewing; it contains the complete task, parent, dispatch, inherited answer and review context. Read large histories in sections as needed. The file replaces inline context, without dropping criteria or proof.\n",
         include_str!("../../../../../builtins/agents/task-verifier.body.md"),
         include_str!(
             "../../../../../builtins/skills/cas-qa-craft/references/verifier-evidence-gate.md"
         ),
-        crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(
-            &core.cas_root,
-            task,
-        )?
-        .display(),
+        evidence_dir.display(),
         input,
     );
     Ok(format!("{body}\nThe supervisor_calls array is this dispatch's persisted questions and answers. Apply supervisor_direct answers as scope context, then independently review and return the final verdict; an answer is not an approval.\n"))

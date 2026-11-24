@@ -1200,10 +1200,46 @@ struct VisualQaRun {
     valid_renders: Option<usize>,
     #[serde(default)]
     renders: Vec<VisualQaRender>,
+    #[serde(default)]
+    screenshots: Vec<VisualQaScreenshot>,
     /// Older canonical reports omit this field, so only an explicit `false`
     /// is refused there. A single-source report must record `true`.
     #[serde(default)]
     strict: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VisualQaScreenshot {
+    path: String,
+}
+
+pub(crate) fn batch_visual_screenshots(
+    dir: &Path,
+    not_before: i64,
+    head: &str,
+) -> Result<Vec<PathBuf>, String> {
+    let dir = dir.canonicalize().map_err(|error| error.to_string())?;
+    let report = resolve_bundle_file(&dir, "visual_qa_json", "visual-qa/visual-qa.json")
+        .map_err(|refusal| refusal.problem)?;
+    let run = read_visual_qa_run(&report, "Batch visual QA")?;
+    if run.strict != Some(true) {
+        return Err("the visual report was not recorded with --strict".into());
+    }
+    if let Err(pass_error) = check_visual_qa_run_at(&report, not_before, head, None) {
+        let baseline = resolve_bundle_file(&dir, "visual_qa_baseline_json", "visual-qa-baseline/visual-qa.json")
+            .map_err(|_| pass_error)?;
+        if baseline == report {
+            return Err("the scoped baseline must be a separate run of the base build".into());
+        }
+        if read_visual_qa_run(&baseline, "Batch visual QA baseline")?.strict != Some(true) {
+            return Err("the visual baseline was not recorded with --strict".into());
+        }
+        check_visual_qa_scoped_at(&report, &baseline, not_before, head, None)?;
+    }
+    let sweep_dir = report.parent().ok_or("visual report has no parent directory")?;
+    Ok(run.screenshots.iter().filter_map(|shot| {
+        resolve_bundle_file(sweep_dir, "visual screenshot", &shot.path).ok()
+    }).collect())
 }
 
 #[derive(Debug, Deserialize)]

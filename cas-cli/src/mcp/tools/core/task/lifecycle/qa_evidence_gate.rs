@@ -5,7 +5,7 @@
 //! A user-facing delivery can then neither park for merge (and so never gets
 //! an independent reviewer spawned, cas-619f) nor finish its post-merge
 //! re-close without valid implementer evidence for the delivered head. The
-//! batch mode defers that evidence to the staging receipt. The
+//! batch mode requires visual evidence at park and defers the journey walk to the staging receipt. The
 //! same check refuses any delivery that adds test skip/focus markers without
 //! a `cas-allow-skip:` reason.
 //!
@@ -208,6 +208,40 @@ pub(crate) fn task_evidence_dir(cas_root: &Path, task: &Task) -> Result<PathBuf,
         config.factory().artifacts_root.as_deref(),
     );
     Ok(task_qa_artifacts_dir(cas_root, &paths.base, task))
+}
+
+pub(crate) fn check_batch_visual_evidence(
+    task: &Task,
+    dir: &Path,
+    repo: &Path,
+    head: &str,
+) -> Result<(), String> {
+    let not_before = crate::qa_evidence::committer_time(repo, head)
+        .ok_or_else(|| format!("cannot measure the delivered commit time for {head}"))?;
+    let screenshots = crate::qa_evidence::batch_visual_screenshots(dir, not_before, head)?;
+    crate::qa_ledger::check_visual_capture(dir, task, &screenshots)
+}
+
+fn batch_visual_refusal(repo: &Path, dir: &Path, problem: String) -> String {
+    let relative = "skills/cas-ui-craft/scripts/visual-qa.mjs";
+    let mut scripts: Vec<_> = [".claude", ".codex", ".grok", ".opencode", "cas-cli/src/builtins"]
+        .into_iter().map(|base| repo.join(base).join(relative)).collect();
+    if let Some(home) = dirs::home_dir() {
+        scripts.extend([".cas/claude-base", ".cas/codex-base", ".claude", ".codex"]
+            .into_iter().map(|base| home.join(base).join(relative)));
+    }
+    let script = scripts.iter().find(|path| path.is_file());
+    let script = script.map(|path| shell_words::quote(&path.to_string_lossy()).into_owned())
+        .unwrap_or_else(|| format!("\"$HOME/.claude/{relative}\""));
+    let sweep = dir.join("visual-qa");
+    let sweep = sweep.to_string_lossy();
+    let sweep = shell_words::quote(&sweep);
+    // gate[G-171 park as-of]: Batch visual evidence for a rendered delivery
+    crate::gates::tag("G-171", format!(
+        "QA EVIDENCE REJECTED: {problem}. Serve the delivered build and run the strict sweep:\n\n\
+         printf 'Delivered local URL: '; IFS= read -r qa_url && npm exec --yes --package=playwright -- node {script} --strict --artifact-dir {sweep} \"$qa_url\"\n\n\
+         Use --journey for interaction states. If the sweep has existing findings, sweep the same pages on the base build into visual-qa-baseline. Cite a changed-state PNG from the delivered run in a PASS or FAIL row in LEDGER.md."
+    ))
 }
 
 /// Format preflight before either verification-dispatch path mutates state.
@@ -762,6 +796,10 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
                 refusal.problem, refusal.command
             )
         })?;
+        if batch_defer && tier == EvidenceTier::Bundle {
+            check_batch_visual_evidence(task, &artifacts_dir, repo, &head)
+                .map_err(|problem| batch_visual_refusal(repo, &artifacts_dir, problem))?;
+        }
     }
     let mut pass = run_close_gate_with_write_dir(
         &ctx,
@@ -970,7 +1008,6 @@ mod tests {
         let url = "http://localhost:8180/ranking";
         std::fs::write(&tip_report, report("PASS", url, serde_json::json!([])).to_string()).unwrap();
         let capture = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/visual-qa-fixtures/ranking.after.png"));
-        std::fs::write(sweep.join("ranking.png"), capture).unwrap();
         std::fs::write(dir.join("unrelated.png"), capture).unwrap();
 
         let ledger = dir.join("LEDGER.md");
@@ -987,9 +1024,12 @@ mod tests {
         refused();
         write_row("PASS", "visual-qa/visual-qa.json");
         refused();
+        write_row("PASS", "visual-qa/ranking.png");
+        std::fs::write(sweep.join("ranking.png"), "not a screenshot").unwrap();
+        refused();
         assert!(!cas_store::has_qa_batch_deferral(&root, &task.id).unwrap());
 
-        write_row("PASS", "visual-qa/ranking.png");
+        std::fs::write(sweep.join("ranking.png"), capture).unwrap();
         assert!(park().is_ok());
         assert!(cas_store::has_qa_batch_deferral(&root, &task.id).unwrap());
 

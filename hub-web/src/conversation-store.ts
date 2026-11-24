@@ -376,7 +376,6 @@ export function validCachedSession(raw: unknown): HubSession | undefined {
     if (value !== undefined) session[key] = value;
   }
   if (typeof row.ws_port === "number" && Number.isInteger(row.ws_port)) session.ws_port = row.ws_port;
-  if (typeof row.mcp_reload_needed === "boolean") session.mcp_reload_needed = row.mcp_reload_needed;
   if (row.dormant === true) session.dormant = true;
   if (row.standby === true) session.standby = true;
   return session;

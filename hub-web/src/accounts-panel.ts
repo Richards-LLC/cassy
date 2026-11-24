@@ -287,7 +287,10 @@ export class AccountsSheet {
     // With a hub configured, a number that isn't the hub's says whose it is.
     // The profile, not its folder: the folder repeats the email; the whole path is the tooltip.
     const profile = account.name !== account.display_name && account.provider !== "grok" ? `<code class="accounts-sub" title="${escapeHtml(account.location ?? account.key)} on ${escapeHtml(machine.label)}">${escapeHtml(account.name)}</code>` : "";
-    const sub = [nextTag, account.is_default ? `<span class="accounts-tag">Default</span>` : "", account.disabled ? `<span class="accounts-tag">Disabled</span>` : "", lowTag, flag, profile, lives].filter(Boolean).join("");
+    // Why the recommender skips this login, in the same words New session uses.
+    const skipped = !next && account.login_state === "logged_in" ? exclusionText(account.exclusion) : undefined;
+    const skip = skipped && !account.duplicate_of ? `<span class="accounts-sub accounts-why" data-testid="account-exclusion">${escapeHtml(skipped)}</span>` : "";
+    const sub = [nextTag, account.is_default ? `<span class="accounts-tag">Default</span>` : "", account.disabled ? `<span class="accounts-tag">Disabled</span>` : "", lowTag, skip, flag, profile, lives].filter(Boolean).join("");
     const operations = (Object.keys(ACTIONS) as AccountOperation[]).filter(op => op !== (account.disabled ? "disable" : "enable"));
     const button = (op: AccountOperation) => {
       const reason = !manage ? "Needs manage access on this machine" : account.capabilities[op];

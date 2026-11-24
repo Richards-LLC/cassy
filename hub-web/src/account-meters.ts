@@ -154,7 +154,7 @@ export function capacityLine(list: readonly WindowReading[]): string {
   const known = list.filter((reading): reading is Known => "left" in reading && Boolean(reading.resetsIn));
   const soonest = known.sort((a, b) => Date.parse(a.resetAt ?? "") - Date.parse(b.resetAt ?? ""))[0];
   const local = list.find((reading): reading is Known => reading.kind === "local");
-  return `${parts.join(" · ")}${soonest?.resetsIn ? ` · ${SLOT_LABEL[soonest.slot]} resets ${soonest.resetsIn}` : ""}${local?.age ? ` · ${local.age}` : ""}`;
+  return `${parts.join(" · ")}${soonest?.resetsIn ? ` · ${SLOT_LABEL[soonest.slot].toLowerCase()} resets ${soonest.resetsIn}` : ""}${local?.age ? ` · ${local.age}` : ""}`;
 }
 
 /** Bar widths go through CSSOM: the hub's style-src refuses inline style attributes. */

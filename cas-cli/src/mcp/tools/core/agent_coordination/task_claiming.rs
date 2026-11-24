@@ -120,6 +120,7 @@ impl CasCore {
         // Auto-assign to supervisor if task is unassigned (epics or orphaned tasks)
         let mut task = task;
         if task.assignee.is_none() && is_supervisor {
+            super::super::task::repeat_review::require_review(&self.cas_root, &task.id)?;
             task.assignee = Some(agent_name.clone());
             let _ = task_store.update(&task);
         }
@@ -162,6 +163,7 @@ impl CasCore {
                         .unwrap_or(true);
 
                 if can_reclaim {
+                    super::super::task::repeat_review::require_review(&self.cas_root, &task.id)?;
                     // Re-assign orphaned task to supervisor
                     task.assignee = Some(agent_name.clone());
                     task.updated_at = chrono::Utc::now();
@@ -1229,6 +1231,10 @@ impl CasCore {
                 )),
                 data: None,
             });
+        }
+
+        if !super::super::task::task_assignee_matches_agent(agent_store.as_ref(), task.assignee.as_deref(), &target_agent) {
+            crate::mcp::tools::core::task::repeat_review::require_review(&self.cas_root, &task.id)?;
         }
 
         // Validate/copy the branch before releasing a lease or changing the

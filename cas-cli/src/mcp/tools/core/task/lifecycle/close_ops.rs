@@ -8186,6 +8186,12 @@ impl CasCore {
             data: None,
         })?;
 
+        if super::super::repeat_review::detach_from_train(&self.cas_root, task_store.as_ref(), &task, None)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+        {
+            task = task_store.get(&req.id).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        }
+
         // gate-audit[train_target]: G-100 Reject a dead integration target before
         // receipts, test-shape, lane CI, hooks or verifier dispatch. Published
         // ancestry is bookkeeping, and check_cut_merge retains red repairs.
@@ -14325,12 +14331,6 @@ impl CasCore {
             }
             return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
         }
-        // cas-bc25: a decline over recorded failing tests must name their class.
-        let mut effective_class: Option<String> = None;
-        if !grant_only {
-            effective_class = crate::mcp::tools::core::task::repair_class::require_class(task_store.as_ref(), &task.id, class_audit)
-                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, format!("task request_changes rejected: {message}")))?;
-        }
         let supervisor_id = if source_commits.is_empty() {
             self.get_agent_id().map_err(|error| {
                 Self::error(ErrorCode::INVALID_PARAMS,
@@ -14388,6 +14388,12 @@ impl CasCore {
             )));
         }
 
+        let review = super::super::repeat_review::require_review(&self.cas_root, &task.id)?;
+        let reason = review.as_ref().map(|id| format!("{}\nWhole-flow mismatch list: {id}", req.reason.trim()));
+        let reason = reason.as_deref().unwrap_or(&req.reason);
+        let effective_class = crate::mcp::tools::core::task::repair_class::require_class(task_store.as_ref(), &task.id, class_audit)
+            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, format!("task request_changes rejected: {message}")))?;
+
         // Persist exactly the selector in force; never clear a stored one, and before the
         // transition so a failed write cannot drop the obligation.
         if let Some(class) = &effective_class {
@@ -14404,7 +14410,7 @@ impl CasCore {
             &self.cas_root,
             &task.id,
             &supervisor_id,
-            &req.reason,
+            reason,
             &source_commits,
         )
         .map_err(|error| {
@@ -14427,7 +14433,7 @@ impl CasCore {
                 super::supervisor_push::queue_request_changes_notice(
                     &self.cas_root,
                     &reopened,
-                    req.reason.trim(),
+                    reason.trim(),
                     &outcome.branch_handling,
                 )
             });

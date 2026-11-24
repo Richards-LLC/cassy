@@ -817,7 +817,11 @@ impl CasCore {
                     // The verdict may have committed while the best-effort
                     // post-commit wake failed. An identical supervisor retry
                     // repairs that wake without recording a second verdict.
-                    let retry_note = if existing.status == VerificationStatus::SupervisorCall
+                    let retry_note = if let Some(hold) = crate::mcp::tools::core::task::repeat_review::hold_repeated_rejection(
+                        &self.cas_root, task_store.as_ref(), &task, &existing, &proof_dispatch.owner_agent_id,
+                    ) {
+                        hold
+                    } else if existing.status == VerificationStatus::SupervisorCall
                         && proof_dispatch.state == cas_types::VerificationDispatchState::Pending
                     {
                         self.emit_premerge_review_handoff(&task, &proof_dispatch)?;
@@ -1255,7 +1259,11 @@ impl CasCore {
         let peer_guidance = crate::cloud::peer_mailbox::verification_answers::publish(
             &self.cas_root, &task, &proof_dispatch, &verification,
         ).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
-        let close_retry = if resume_verifier {
+        let close_retry = if let Some(hold) = crate::mcp::tools::core::task::repeat_review::hold_repeated_rejection(
+            &self.cas_root, task_store.as_ref(), &task, &verification, &proof_dispatch.owner_agent_id,
+        ) {
+            hold
+        } else if resume_verifier {
             let current = cas_store::get_verification_dispatch(&self.cas_root, &requested_dispatch_id)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
             self.emit_premerge_review_handoff(&task, &current)?;

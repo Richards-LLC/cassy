@@ -1045,6 +1045,11 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        if let Some(assignee) = req.assignee.as_deref().and_then(normalize_assignee_update_value)
+            && task.assignee.as_deref() != Some(assignee.as_str())
+        {
+            super::repeat_review::require_review(&self.cas_root, &task.id)?;
+        }
         let review_dispatch_update = req.review_dispatch_id.as_deref()
             .map(|value| self.normalize_review_dispatch_id(Some(value))).transpose()?;
         self.ensure_review_assignee(

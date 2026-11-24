@@ -1873,6 +1873,13 @@ pub(crate) fn assign_task_to_new_worker(
         return false;
     }
 
+    if task.assignee.as_deref() != Some(worker_name)
+        && let Err(error) = crate::mcp::tools::core::task::repeat_review::require_review(cas_dir, &task.id)
+    {
+        tracing::warn!(task_id, %error, "refused repair assignment");
+        return false;
+    }
+
     if let Some(ref existing) = task.assignee {
         if existing == worker_name {
             // Early-assign already pinned this worker (cas-7a94 isolate path).

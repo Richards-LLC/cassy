@@ -2996,6 +2996,9 @@ impl CasCore {
             .get(&agent_id)
             .map(|a| a.role == cas_types::AgentRole::Worker)
             .unwrap_or(false);
+        if task.assignee.is_none() {
+            super::repeat_review::require_review(&self.cas_root, &task.id)?;
+        }
 
         // Anchors identify prior work; they must not bypass the foreign-commit
         // check when an Open task resumes after review.

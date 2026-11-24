@@ -448,9 +448,13 @@ async fn repeat_rejection_requires_whole_flow_review_gh2373() {
     env.set("CAS_AGENT_ROLE", "supervisor");
     reject_repeat_review_gh2373(&f, id, "The abort transition is unreachable").await;
     reject_repeat_review_gh2373(&f, id, "A stale queue can claim the successor").await;
+    open_agent_store(&f.cas_dir()).unwrap().register(&Agent::new_with_role(
+        "replacement-session".into(), "replacement".into(), AgentRole::Worker,
+    )).unwrap();
     let request = serde_json::json!({"action":"request_changes", "id":id, "reason":"Correct the mismatches"});
     let assignment = serde_json::json!({"action":"update", "id":id, "assignee":"replacement"});
-    for attempt in [&request, &assignment] {
+    let transfer = serde_json::json!({"action":"transfer", "id":id, "to_agent":"replacement", "supervisor_override":true});
+    for attempt in [&request, &assignment, &transfer] {
         let refusal = f.supervisor.task(Parameters(serde_json::from_value((*attempt).clone()).unwrap()))
             .await.unwrap_err();
         assert!(crate::gates::codes_in(&refusal.message).contains(&"G-170"), "{refusal:?}");
@@ -476,9 +480,6 @@ async fn repeat_rejection_requires_whole_flow_review_gh2373() {
         "notes":format!("whole-flow review: {}", review.id)})).await;
     call(&f.supervisor, request).await;
     assert_eq!(f.task(id).status, TaskStatus::Open);
-    open_agent_store(&f.cas_dir()).unwrap().register(&Agent::new_with_role(
-        "replacement-session".into(), "replacement".into(), AgentRole::Worker,
-    )).unwrap();
     call(&f.supervisor, assignment).await;
     let returned = f.task(id);
     assert_eq!(returned.assignee.as_deref(), Some("replacement"));

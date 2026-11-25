@@ -1853,6 +1853,28 @@ mod worker_attention_tests {
         agents.register(&supervisor).unwrap();
     }
 
+    fn record_bound_rejection(root: &Path, task_id: &str, verdict_id: &str) {
+        let owner = "supervisor-id";
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            root, task_id, owner, owner, &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        let mut verdict = cas_types::Verification::new(verdict_id.into(), task_id.into());
+        verdict.status = cas_types::VerificationStatus::Rejected;
+        verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+        verdict.agent_id = Some(owner.into());
+        verdict.issuer_agent_id = Some(owner.into());
+        verdict.dispatch_id = Some(dispatch.id.clone());
+        let connection = cas_store::shared_db::shared_connection(&root.join("cas.db")).unwrap();
+        let mut connection = cas_store::shared_db::lock_connection(&connection).unwrap();
+        let transaction = connection.transaction().unwrap();
+        cas_store::add_verification_with_conn(&transaction, &verdict).unwrap();
+        assert!(cas_store::resolve_verification_dispatch_with_conn(
+            &transaction, &dispatch.id, owner, None, true,
+        ).unwrap().is_some());
+        transaction.commit().unwrap();
+    }
+
     #[test]
     fn ct2_p2_second_idle_episode_relays() {
         use crate::ui::factory::director::{
@@ -2217,7 +2239,7 @@ mod worker_attention_tests {
 
     #[test]
     fn sweep_recovers_daemon_repeat_notice_once_gh2373() {
-        use cas_types::{Dependency, DependencyType, Task, TaskStatus, TaskType, Verification, VerificationProvenance, VerificationStatus, WorkTarget};
+        use cas_types::{Dependency, DependencyType, Task, TaskStatus, TaskType, WorkTarget};
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_FACTORY_SESSION", "repeat-review-sweep");
         let temp = tempfile::tempdir().unwrap();
@@ -2236,14 +2258,9 @@ mod worker_attention_tests {
         task.deliverables.work_target = Some(WorkTarget { repo_selector: "project:fixture".into(), target_branch: "epic/release-train".into() });
         tasks.add(&task).unwrap();
         tasks.add_dependency(&Dependency::new(task.id.clone(), train.id, DependencyType::ParentChild)).unwrap();
-        let mut latest = String::new();
-        for id in ["ver-first", "ver-second"] {
-            let mut verdict = Verification::new(id.into(), task.id.clone());
-            verdict.status = VerificationStatus::Rejected;
-            verdict.provenance = VerificationProvenance::System;
-            cas_store::add_system_verification(&root, &verdict).unwrap();
-            latest = verdict.id;
-        }
+        let latest = "ver-second";
+        record_bound_rejection(&root, &task.id, "ver-first");
+        record_bound_rejection(&root, &task.id, latest);
         let notices = crate::store::open_supervisor_queue_store(&root).unwrap();
         let key = format!("repeat-review:{}:{latest}", task.id);
         assert!(notices.get_by_transition_key(&key).unwrap().is_none());
@@ -3522,6 +3539,37 @@ mod worker_attention_tests {
         }
         assert_eq!(crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap().len(), 2,
             "late run evidence must not duplicate the already delivered relay");
+    }
+
+    #[test]
+    fn merge_queue_ejection_with_repeat_hold_finishes_without_worker_return_gh2373() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "repeat-review-ejection");
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        register_supervisor(&root, "repeat-review-ejection");
+        let mut worker = Agent::new_with_role("worker-id".into(), "held-worker".into(), AgentRole::Worker);
+        worker.factory_session = Some("repeat-review-ejection".into());
+        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        let tasks = crate::store::open_task_store_cached(&root).unwrap();
+        let mut task = cas_types::Task::new("cas-2373-eject".into(), "Parked delivery".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.assignee = Some(worker.name.clone());
+        task.deliverables.factory_branch_anchor = Some("1111aaaa".into());
+        tasks.add(&task).unwrap();
+        record_bound_rejection(&root, &task.id, "ver-first");
+        record_bound_rejection(&root, &task.id, "ver-second");
+
+        let outcome = enqueue_merge_queue_ejection_relay(
+            &root, &task.id, &worker.name, 556, Some(601),
+            "queue-exit:2026-11-05T23:30:00Z", Some("Fast Validation"),
+            MergeQueueExit { head_sha: "1111aaaa", group_mate_failed: false },
+        );
+        assert!(matches!(outcome, WorkerAttentionRelayOutcome::Persisted { .. }));
+        assert_eq!(tasks.get(&task.id).unwrap().status, cas_types::TaskStatus::AwaitingMerge);
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+        assert!(rows.iter().any(|row| row.target == "supervisor"
+            && crate::gates::codes_in(&row.prompt).contains(&"G-170")));
+        assert!(!rows.iter().any(|row| row.target == worker.name));
     }
 
     #[test]

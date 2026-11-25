@@ -112,7 +112,7 @@ fn ref_exists(repo: &Path, refname: &str) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
+pub(super) fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
     std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -156,7 +156,7 @@ fn publish_train_branch(repo: &Path, lane: &str, integration: &str) -> Result<()
 }
 
 /// Prefer shared origin history over a machine's possibly stale local branch.
-fn branch_tip(repo: &Path, branch: &str) -> Option<String> {
+pub(super) fn branch_tip(repo: &Path, branch: &str) -> Option<String> {
     [format!("refs/remotes/origin/{branch}"), format!("refs/heads/{branch}")]
         .iter()
         .find_map(|reference| {
@@ -349,7 +349,12 @@ fn rollover_children(root: &Path, repo: &Path, store: &dyn cas_store::TaskStore,
         let tip = anchor.or_else(|| child.deliverables.factory_branch_start.as_ref().and_then(|start| branch_tip(repo, &start.branch)));
         let was_parked = child.status == TaskStatus::AwaitingMerge;
         let requires_merge = tip.as_deref().map_or(was_parked, |tip| !is_ancestor(repo, &base, tip));
-        if was_parked && requires_merge { child.status = TaskStatus::Open; }
+        let repair_hold = if was_parked && requires_merge {
+            match super::repeat_review::admit_repair(root, &child.id) {
+                Ok(_) => { child.status = TaskStatus::Open; None }
+                Err(error) => Some(error.message),
+            }
+        } else { None };
         let mut target = child.deliverables.work_target.clone().or_else(|| next.deliverables.work_target.clone()).ok_or("child has no repository target")?;
         target.target_branch = lane.into();
         child.deliverables.work_target = Some(target.clone());
@@ -370,7 +375,8 @@ fn rollover_children(root: &Path, repo: &Path, store: &dyn cas_store::TaskStore,
         if let Some(assignee) = child.assignee.as_deref() {
             let worker = agents.iter().filter(|agent| agent.name == assignee || agent.id == assignee).max_by_key(|agent| agent.registered_at);
             let recipient = worker.map_or(assignee, |worker| worker.name.as_str());
-            let action = if requires_merge { "Merge the successor into your source branch before tests or CI, then re-park." }
+            let action = if let Some(hold) = repair_hold.as_deref() { hold }
+                else if requires_merge { "Merge the successor into your source branch before tests or CI, then re-park." }
                 else if tip.is_some() { "Your source contains the successor base; keep its existing proof." }
                 else { "Start your source from the successor before tests or CI." };
             let payload = serde_json::json!({"task_id":child.id,"target_train":next.id,"target_branch":lane,"requires_target_merge":requires_merge});

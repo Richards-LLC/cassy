@@ -1262,7 +1262,7 @@ impl CasCore {
                 cas_store::auto_return_premerge_rejection(&self.cas_root, &task.id,
                     &dispatch.owner_agent_id, brief,
                     &dispatch.id, &candidate.source_sha, reviewed)
-                    .map_err(|error| crate::mcp::tools::core::task::repeat_review::transition_error(&task.id, error))
+                    .map_err(|error| crate::mcp::tools::core::task::repeat_review::transition_error(&self.cas_root, &task.id, error))
             },
         )?;
         if outcome.is_none() {

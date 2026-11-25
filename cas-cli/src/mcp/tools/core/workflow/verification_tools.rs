@@ -817,9 +817,12 @@ impl CasCore {
                     // The verdict may have committed while the best-effort
                     // post-commit wake failed. An identical supervisor retry
                     // repairs that wake without recording a second verdict.
-                    let retry_note = if let Some(hold) = crate::mcp::tools::core::task::repeat_review::hold_repeated_rejection(
-                        &self.cas_root, task_store.as_ref(), &task, &existing, &proof_dispatch.owner_agent_id,
-                    ) {
+                    let hold = if existing.status == VerificationStatus::Rejected {
+                        crate::mcp::tools::core::task::repeat_review::settle(&self.cas_root, &task.id)
+                    } else { Ok(None) };
+                    let retry_note = if let Err(error) = &hold {
+                        format!("\nVerdict recorded; repeat-review action incomplete: {error}. Repair remains held; retry this exact verdict.")
+                    } else if let Ok(Some(hold)) = hold {
                         hold.detail
                     } else if existing.status == VerificationStatus::SupervisorCall
                         && proof_dispatch.state == cas_types::VerificationDispatchState::Pending
@@ -1259,11 +1262,14 @@ impl CasCore {
         let peer_guidance = crate::cloud::peer_mailbox::verification_answers::publish(
             &self.cas_root, &task, &proof_dispatch, &verification,
         ).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
-        let repeat_hold = crate::mcp::tools::core::task::repeat_review::hold_repeated_rejection(
-            &self.cas_root, task_store.as_ref(), &task, &verification, &proof_dispatch.owner_agent_id,
-        );
-        let repeat_notice_queued = repeat_hold.as_ref().is_some_and(|hold| hold.notice_queued);
-        let close_retry = if let Some(hold) = repeat_hold {
+        let repeat_hold = if verification.status == VerificationStatus::Rejected {
+            crate::mcp::tools::core::task::repeat_review::settle(&self.cas_root, &task.id)
+        } else { Ok(None) };
+        let repeat_notice_queued = matches!(&repeat_hold, Ok(Some(_)));
+        let repeat_review_held = repeat_hold.is_err() || repeat_notice_queued;
+        let close_retry = if let Err(error) = &repeat_hold {
+            format!("\nVerdict recorded; repeat-review action incomplete: {error}. Repair remains held; retry this exact verdict.")
+        } else if let Ok(Some(hold)) = repeat_hold {
             hold.detail
         } else if resume_verifier {
             let current = cas_store::get_verification_dispatch(&self.cas_root, &requested_dispatch_id)
@@ -1347,8 +1353,11 @@ impl CasCore {
             verification_receipt_summary(&verification),
             format!("{close_retry}{}", if candidate.is_some() { peer_guidance.map(|guidance| format!("\n{guidance}")).unwrap_or_default() } else { String::new() })
         ));
-        if repeat_notice_queued {
-            result.structured_content = Some(serde_json::json!({"repeat_review_notice_queued": true}));
+        if repeat_review_held {
+            result.structured_content = Some(serde_json::json!({
+                "repeat_review_held": true,
+                "repeat_review_notice_queued": repeat_notice_queued,
+            }));
         }
         Ok(result)
     }

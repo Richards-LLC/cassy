@@ -317,9 +317,21 @@ pub struct SqliteVerificationStore {
 }
 
 impl SqliteVerificationStore {
-    pub fn latest_repeated_rejection(&self, task_id: &str) -> Result<Option<(String, DateTime<Utc>)>> {
+    pub fn latest_repeated_rejection(&self, task_id: &str) -> Result<Option<(String, DateTime<Utc>, u64)>> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         latest_repeated_rejection_with_conn(&conn, task_id)
+    }
+
+    pub fn tasks_with_repeated_rejections(&self, now: DateTime<Utc>) -> Result<Vec<String>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut query = conn.prepare_cached(
+            "SELECT verifications.task_id FROM verifications JOIN tasks ON tasks.id = verifications.task_id
+             WHERE verifications.status = 'rejected' AND verifications.created_at <= ?1
+               AND tasks.status NOT IN ('closed', 'cancelled')
+             GROUP BY verifications.task_id HAVING COUNT(*) >= 2",
+        )?;
+        let rows = query.query_map(params![now.to_rfc3339()], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Open or create a SQLite verification store
@@ -2788,8 +2800,21 @@ pub fn request_changes_for_reviewed_delivery(
     reviewed_rejection: Option<&str>,
 ) -> Result<RequestChangesOutcome> {
     request_changes_for_parked_delivery_impl(
-        cas_dir, task_id, supervisor_agent_id, reason, source_commits, None, reviewed_rejection,
+        cas_dir, task_id, supervisor_agent_id, reason, source_commits, None, None, reviewed_rejection,
     ).map(|outcome| outcome.expect("manual request-changes has no repair budget"))
+}
+
+pub fn request_changes_for_observed_delivery(
+    cas_dir: &Path,
+    task_id: &str,
+    supervisor_agent_id: &str,
+    reason: &str,
+    observed: (&str, &str, &str),
+    reviewed_rejection: Option<&str>,
+) -> Result<RequestChangesOutcome> {
+    request_changes_for_parked_delivery_impl(
+        cas_dir, task_id, supervisor_agent_id, reason, &[], None, Some(observed), reviewed_rejection,
+    ).map(|outcome| outcome.expect("an observed delivery has no automatic repair budget"))
 }
 
 /// Atomically consume one automatic repair with the existing decline transition.
@@ -2804,26 +2829,27 @@ pub fn auto_return_premerge_rejection(
     reviewed_rejection: Option<&str>,
 ) -> Result<Option<RequestChangesOutcome>> {
     request_changes_for_parked_delivery_impl(
-        cas_dir, task_id, owner_id, reason, &[], Some((dispatch_id, rejected_anchor)), reviewed_rejection,
+        cas_dir, task_id, owner_id, reason, &[], Some((dispatch_id, rejected_anchor)), None, reviewed_rejection,
     )
 }
 
 pub const REPEAT_REVIEW_REQUIRED: &str = "repeat_review_admission_required";
 
-fn latest_repeated_rejection_with_conn(conn: &Connection, task_id: &str) -> Result<Option<(String, DateTime<Utc>)>> {
+fn latest_repeated_rejection_with_conn(conn: &Connection, task_id: &str) -> Result<Option<(String, DateTime<Utc>, u64)>> {
     let mut query = conn.prepare_cached(
-        "SELECT id, created_at FROM verifications WHERE task_id = ?1 AND status = 'rejected'
-         ORDER BY created_at DESC, rowid DESC LIMIT 2",
+        "SELECT id, created_at, COUNT(*) OVER () FROM verifications WHERE task_id = ?1 AND status = 'rejected'
+         ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )?;
     let mut rows = query.query([task_id])?;
     let Some(latest) = rows.next()? else { return Ok(None) };
     let id = latest.get(0)?;
     let created_at: String = latest.get(1)?;
-    if rows.next()?.is_none() { return Ok(None); }
+    let count = latest.get(2)?;
+    if count < 2 { return Ok(None); }
     let created_at = DateTime::parse_from_rfc3339(&created_at)
         .map_err(|error| StoreError::Parse(format!("invalid rejection timestamp: {error}")))?
         .with_timezone(&Utc);
-    Ok(Some((id, created_at)))
+    Ok(Some((id, created_at, count)))
 }
 
 fn request_changes_for_parked_delivery_impl(
@@ -2833,6 +2859,7 @@ fn request_changes_for_parked_delivery_impl(
     reason: &str,
     source_commits: &[String],
     automatic_repair: Option<(&str, &str)>,
+    observed: Option<(&str, &str, &str)>,
     reviewed_rejection: Option<&str>,
 ) -> Result<Option<RequestChangesOutcome>> {
     let reason = reason.trim();
@@ -2943,9 +2970,12 @@ fn request_changes_for_parked_delivery_impl(
         if !rejected { return Ok(None); }
     }
     if latest_repeated_rejection_with_conn(&tx, task_id)?
-        .is_some_and(|(id, _)| Some(id.as_str()) != reviewed_rejection)
+        .is_some_and(|(id, _, _)| Some(id.as_str()) != reviewed_rejection)
     {
         return Err(StoreError::Parse(REPEAT_REVIEW_REQUIRED.into()));
+    }
+    if let Some((branch, target, anchor)) = observed {
+        crate::delivery_store::clear_pending_observed_delivery_merge_with_conn(&tx, task_id, branch, target, anchor)?;
     }
     // Typed grants come only from the supervisor adapter, never review prose.
     for source in source_commits {

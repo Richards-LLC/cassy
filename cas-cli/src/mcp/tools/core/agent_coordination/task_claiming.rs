@@ -16,6 +16,9 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        let open_repair = (task.status == TaskStatus::Open)
+            .then(|| super::super::task::repeat_review::admit_repair(&self.cas_root, &task.id))
+            .transpose()?;
 
         // Only start consumes a worker-bound takeover. Refuse before claim's
         // auto-assignment/adoption paths can mutate a peer's task.
@@ -120,7 +123,9 @@ impl CasCore {
         // Auto-assign to supervisor if task is unassigned (epics or orphaned tasks)
         let mut task = task;
         if task.assignee.is_none() && is_supervisor {
-            super::super::task::repeat_review::require_review(&self.cas_root, &task.id)?;
+            if open_repair.is_none() {
+                super::super::task::repeat_review::require_review(&self.cas_root, &task.id)?;
+            }
             task.assignee = Some(agent_name.clone());
             let _ = task_store.update(&task);
         }
@@ -163,7 +168,9 @@ impl CasCore {
                         .unwrap_or(true);
 
                 if can_reclaim {
-                    super::super::task::repeat_review::require_review(&self.cas_root, &task.id)?;
+                    if open_repair.is_none() {
+                        super::super::task::repeat_review::require_review(&self.cas_root, &task.id)?;
+                    }
                     // Re-assign orphaned task to supervisor
                     task.assignee = Some(agent_name.clone());
                     task.updated_at = chrono::Utc::now();

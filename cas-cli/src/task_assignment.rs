@@ -193,6 +193,11 @@ fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option
         text = format!("You have been assigned a new task:\nTask ID: {}\nTitle: {}\n\nCassy started this task automatically from your queue. Branch: {branch}. No assignment ACK is needed.\n\nView full details: {prefix}task action=show id={}\n\n{}\n\nWhile working, post progress notes with {prefix}task action=notes id={}.", task.id, task.title, task.id, WORKER_ASSIGNMENT_TEST_POLICY, task.id);
     }
     text.push_str(&crate::finding_triage::focus_brief(cas_dir));
+    let repair_brief = if occurrence.is_some() {
+        crate::mcp::tools::core::task::repeat_review::admit_repair(cas_dir, &task.id)
+            .map_err(|error| crate::error::CasError::Other(error.message.into_owned()))?.brief()
+    } else { String::new() };
+    text.push_str(&repair_brief);
     if occurrence.is_some() && task.status == TaskStatus::InProgress {
         text = crate::prompt_revalidation::attach_queue_continuation(&text, &task.id);
     }
@@ -225,7 +230,7 @@ fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option
         let branch = task.deliverables.factory_branch_start.as_ref()
             .map(|start| start.branch.as_str()).unwrap_or("see task details");
         let continued = crate::prompt_revalidation::attach_queue_continuation(
-            &format!("{}\n\nCassy started this task automatically from your queue. Branch: {branch}. No assignment ACK is needed.",
+            &format!("{}\n\nCassy started this task automatically from your queue. Branch: {branch}. No assignment ACK is needed.{repair_brief}",
                 crate::prompt_revalidation::strip_assignment_envelopes(&row.prompt)), &task.id,
         );
         upgraded = queue.rewrite_pending(id, &continued, Some(&format!("Assigned task: {}", task.id)))?;

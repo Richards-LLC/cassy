@@ -2699,11 +2699,6 @@ impl CasCore {
                     crate::gates::tag("G-09", "The worker has a reserved queue task; resolve or start that task before starting another")));
             }
         }
-        if queued_start {
-            let worker = worker.as_ref().ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS,
-                crate::gates::tag("G-09", "Queued start requires its registered worker")))?;
-            crate::worker_task_queue::ensure_owned_queue_checkout(&self.cas_root, worker, Some(&req.id))?;
-        }
         let task_store = self.open_task_store()?;
 
         if queue_enabled && let Some(worker) = worker.as_ref() {
@@ -2746,6 +2741,25 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+
+        let repeat_admission = if !task.is_terminal()
+            && (task.status != TaskStatus::AwaitingMerge || task.deliverables.merge_conflicted)
+            && !(task.status == TaskStatus::InProgress
+                && agents.get(&agent_id).ok().is_some_and(|caller|
+                    super::task_assignee_matches_agent(agents.as_ref(), task.assignee.as_deref(), &caller))
+                && agents.get_lease(&task.id).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                    .is_some_and(|lease| lease.agent_id == agent_id && lease.status == cas_types::LeaseStatus::Active
+                        && lease.expires_at > chrono::Utc::now()))
+        {
+            super::repeat_review::admit_repair(&self.cas_root, &task.id)?
+        } else {
+            super::repeat_review::RepairAdmission::default()
+        };
+        if queued_start {
+            let worker = worker.as_ref().ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS,
+                crate::gates::tag("G-09", "Queued start requires its registered worker")))?;
+            crate::worker_task_queue::ensure_owned_queue_checkout(&self.cas_root, worker, Some(&req.id))?;
+        }
 
         crate::task_assignment::ensure_review_assignment(
             task.review_dispatch_id.as_deref(),
@@ -2996,10 +3010,6 @@ impl CasCore {
             .get(&agent_id)
             .map(|a| a.role == cas_types::AgentRole::Worker)
             .unwrap_or(false);
-        if task.assignee.is_none() {
-            super::repeat_review::require_review(&self.cas_root, &task.id)?;
-        }
-
         // Anchors identify prior work; they must not bypass the foreign-commit
         // check when an Open task resumes after review.
         let mut factory_branch_start = None;
@@ -4195,6 +4205,7 @@ impl CasCore {
             ));
         }
 
+        let repair_brief = repeat_admission.brief();
         if brief {
             // Keep scope, resume state and recent evidence within 2000 bytes.
             // Complete fields remain available through show/notes full or pages.
@@ -4237,7 +4248,7 @@ impl CasCore {
             let durable_recall = self.related_recall_context(
                 &task_recall_query(&task.title, &task.labels, &task.description), Some(&task.id), false,
             ).unwrap_or_default();
-            let context = format!("{peer_notes}{advisory}{predicted_impact}{durable_recall}{cited_issues}");
+            let context = format!("{peer_notes}{repair_brief}{advisory}{predicted_impact}{durable_recall}{cited_issues}");
             let context = cas_store::task_note_markers::neutralize_new_markers(&context, None);
             let read_saved = || task_store.get(&task.id).map_err(|error| {
                 Self::error(
@@ -4310,7 +4321,7 @@ impl CasCore {
             // Reserve peer ownership warnings before budgeting bulky guidance.
             // Remote assignees and peer holds must stay visible at task start.
             let prefix = format!(
-                "Started task: {} - {}\nDelivery mode: {}{}{}{}",
+                "Started task: {} - {}\nDelivery mode: {}{}{}{}{repair_brief}",
                 task.id,
                 clipping.excerpt(&task.title, 60),
                 task.delivery_mode,
@@ -4345,7 +4356,7 @@ impl CasCore {
         };
 
         Ok(Self::success(format!(
-            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            "Started task: {} - {}\nDelivery mode: {}{}{}{repair_brief}{}{}{}{}{}{}{}{}{}{}{}{}",
             req.id,
             task.title,
             task.delivery_mode,

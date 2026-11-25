@@ -273,6 +273,9 @@ pub(super) fn escalate_expired_verification_dispatches(
     /// New relays written per sweep; the sweep runs every 60 s.
     const RELAYS_PER_SWEEP: usize = 20;
     const KIND: &str = "verification_dispatch_expired";
+    if let Err(error) = crate::mcp::tools::core::task::repeat_review::settle_repeated_rejections(cas_dir, now) {
+        tracing::warn!(%error, "repeat-review notice sweep unsuccessful");
+    }
     extend_progressing_verification_dispatches(cas_dir, now);
     let since = now - chrono::Duration::hours(
         crate::mcp::tools::core::task::lifecycle::supervisor_push::EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS,
@@ -2264,8 +2267,9 @@ mod worker_attention_tests {
         for at in [now, now + chrono::Duration::seconds(60)] {
             escalate_expired_verification_dispatches(&root, at);
         }
-        let notice = notices.get_by_transition_key(&key).unwrap().unwrap();
-        assert_eq!(notices.poll(&notice.supervisor_id, 10).unwrap().len(), 1);
+        let count = notices.poll("supervisor-id", 10).unwrap().into_iter()
+            .filter(|notice| notice.transition_key.as_deref() == Some(key.as_str())).count();
+        assert_eq!(count, 1, "the sweep must recover exactly one notice for {key}");
         assert!(tasks.get_parent_epic(&task.id).unwrap().is_none());
         assert_eq!(tasks.get(&task.id).unwrap().deliverables.work_target.unwrap().target_branch, "main");
         let verifications = cas_store::SqliteVerificationStore::open(&root).unwrap();

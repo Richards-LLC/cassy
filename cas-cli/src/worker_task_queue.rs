@@ -341,6 +341,7 @@ impl CasCore {
                 let task = tasks.get(id).map_err(error)?;
                 crate::task_assignment::ensure_review_assignment(task.review_dispatch_id.as_deref(), Some(worker.role))
                     .map_err(error)?;
+                crate::mcp::tools::core::task::repeat_review::admit_repair(&self.cas_root, id)?;
             }
             for id in &ids {
                 if id.trim().is_empty() || !unique.insert(id.clone()) {
@@ -731,12 +732,18 @@ impl CasCore {
                 None
             };
             queue.context_reset_request = None;
+            if let Some(id) = &selected {
+                crate::mcp::tools::core::task::repeat_review::admit_repair(&self.cas_root, id)?;
+            }
             queues
                 .save(session, &worker.name, &mut queue)
                 .map_err(error)?;
             selected
         };
         let Some(id) = selected else { return Ok(None) };
+        if retrying && tasks.get(&id).is_ok_and(|task| task.status == TaskStatus::Open) {
+            crate::mcp::tools::core::task::repeat_review::admit_repair(&self.cas_root, &id)?;
+        }
         let selected_task = match tasks.get(&id) {
             Ok(task) => Some(task),
             Err(cas_store::StoreError::NotFound(_) | cas_store::StoreError::TaskNotFound(_)) => {

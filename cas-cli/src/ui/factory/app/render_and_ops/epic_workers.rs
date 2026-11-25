@@ -1880,11 +1880,11 @@ pub(crate) fn assign_task_to_new_worker_with_review(
         return Err(error.to_string());
     }
 
-    let review = crate::mcp::tools::core::task::repeat_review::require_review(cas_dir, &task.id);
+    let review = crate::mcp::tools::core::task::repeat_review::require_review(cas_dir, &task.id)
+        .map_err(|error| error.message.into_owned())?;
     if task.assignee.as_deref() == Some(worker_name) {
-        return Ok(review.ok().flatten());
+        return Ok(review);
     }
-    let review = review.map_err(|error| error.message.into_owned())?;
 
     let task = if let Some(ref existing) = task.assignee {
         if let Err(reason) = reset_stale_preassign_holder(cas_dir, &task, existing) {

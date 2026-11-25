@@ -1044,8 +1044,8 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
-        let assignment_changes = req.assignee.as_deref().and_then(normalize_assignee_update_value)
-            .is_some_and(|assignee| {
+        let assignment_changes = req.assignee.as_deref().is_some_and(|raw| {
+                let Some(assignee) = normalize_assignee_update_value(raw) else { return task.assignee.is_some() };
                 if let Some((agents, next)) = self.open_agent_store().ok().and_then(|store| {
                     let agents = store.list(None).ok()?;
                     let next = assignment_agent(&agents, &assignee)?.0.clone();
@@ -1055,9 +1055,12 @@ impl CasCore {
                 }
                 task.assignee.as_deref() != Some(assignee.as_str())
             });
-        let repair_review = if assignment_changes {
-            super::repeat_review::require_review(&self.cas_root, &task.id)?
-        } else { None };
+        let status_reentry = req.status.as_deref().and_then(|value| value.parse::<TaskStatus>().ok())
+            .is_some_and(|status| status != task.status && (status == TaskStatus::InProgress
+                || status == TaskStatus::Open && task.assignee.is_some()));
+        let repair_review = if assignment_changes || status_reentry || proof_scope_fix {
+            super::repeat_review::admit_repair(&self.cas_root, &task.id)?
+        } else { super::repeat_review::RepairAdmission::default() };
         let review_dispatch_update = req.review_dispatch_id.as_deref()
             .map(|value| self.normalize_review_dispatch_id(Some(value))).transpose()?;
         self.ensure_review_assignee(
@@ -2304,8 +2307,8 @@ impl CasCore {
                             .record_handoff_branch(&format!("factory/{prior}"));
                     }
                     task.assignee = Some(canonical_assignee);
-                    if let Some(review) = &repair_review {
-                        task.notes.push_str(&super::repeat_review::mismatch_brief(review));
+                    if repair_review.artifact_id.is_some() {
+                        task.notes.push_str(&repair_review.brief());
                         changes.push("notes");
                     }
                     task.deliverables.split_takeover = split_takeover.clone();

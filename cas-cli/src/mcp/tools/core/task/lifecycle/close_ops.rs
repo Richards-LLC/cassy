@@ -8186,8 +8186,8 @@ impl CasCore {
             data: None,
         })?;
 
-        if super::super::repeat_review::detach_at_park(&self.cas_root, task_store.as_ref(), &task)
-            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+        if super::super::repeat_review::settle(&self.cas_root, &task.id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?.is_some()
         {
             task = task_store.get(&req.id).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         }
@@ -14045,6 +14045,7 @@ impl CasCore {
                     "task reopen rejected: a non-empty reason is required to preserve the terminal-state audit trail",
                 )
             })?;
+        super::super::repeat_review::admit_repair(&self.cas_root, &task.id)?;
         let clear_blocked_hold = old_status == TaskStatus::Blocked;
         task.deliverables.no_delivery_close_intent = None;
         task.status = TaskStatus::Open;
@@ -14399,7 +14400,7 @@ impl CasCore {
                 }
                 cas_store::request_changes_for_reviewed_delivery(
                     &self.cas_root, &task.id, &supervisor_id, reason, &source_commits, reviewed,
-                ).map_err(|error| super::super::repeat_review::transition_error(&task.id, error))
+                ).map_err(|error| super::super::repeat_review::transition_error(&self.cas_root, &task.id, error))
             },
         )?;
         let sync = crate::store::publish_direct_task_write(&self.cas_root, &task.id)

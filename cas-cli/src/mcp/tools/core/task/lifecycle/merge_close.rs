@@ -295,10 +295,8 @@ pub(crate) fn return_merged_delivery_for_source_fix(
         // Retire the old auto-close intent before the worker may start a
         // correction, so recovery cannot re-park the already declined tip.
         let (_, reason) = super::super::repeat_review::repair_transition(cas_root, &task.id, &reason, |reason, reviewed| {
-            cas_store::clear_pending_observed_delivery_merge(cas_root, &task.id, branch, target, anchor)
-                .map_err(|error| McpError::new(ErrorCode::INTERNAL_ERROR, error.to_string(), None))?;
-            cas_store::request_changes_for_reviewed_delivery(cas_root, &task.id, actor, reason, &[], reviewed)
-                .map_err(|error| super::super::repeat_review::transition_error(&task.id, error))
+            cas_store::request_changes_for_observed_delivery(cas_root, &task.id, actor, reason, (branch, target, anchor), reviewed)
+                .map_err(|error| super::super::repeat_review::transition_error(cas_root, &task.id, error))
         }).map_err(|error| error.message.into_owned())?;
         let _ = crate::store::publish_direct_task_write(cas_root, &task.id);
         let returned = store.get(&task.id).map_err(|error| error.to_string())?;

@@ -382,25 +382,26 @@ export class HubDouble {
    * (connection.ts consumeEvents) with no deadline; waiting for the 5 s
    * heartbeat instead, whose fetch aborts after 3 s, is what timed out on a
    * loaded CI host. A heartbeat fetch that lands first resolves this too.
-   *
-   * `session_added` and `pane_removed` are what the hub sends when sessions
-   * come and go; a `session_removed` would also file an Attention item,
-   * which these scaffolding changes must not leave behind.
    */
   async announceCatalog(machineId: string, change: { added?: string[]; removed?: string[] } = {}): Promise<void> {
     const before = this.catalogFetchCount(machineId);
-    for (const session of change.added ?? []) await this.emitMachineEvent(machineId, "session_added", session);
-    for (const session of change.removed ?? []) await this.emitMachineEvent(machineId, "pane_removed", session, "supervisor");
-    if (!change.added?.length && !change.removed?.length) {
-      await this.emitMachineEvent(machineId, "session_added", this.machine(machineId).sessions[0]?.name ?? null);
+    const added = (change.added ?? []).filter(Boolean);
+    for (const session of added) await this.emitMachineEvent(machineId, "session_added", session);
+    const synthetic = (change.removed ?? []).map(session => ({ kind: "pane_removed", session }));
+    if (!added.length && !synthetic.length) synthetic.push({ kind: "session_added", session: "" });
+    for (const event of synthetic) {
+      await this.page.evaluate(
+        ([host, data]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number }).__journeyMachineEvent(host, data),
+        [`${machineId}.test`, JSON.stringify(event)] as const,
+      );
     }
     await this.waitFor(() => this.catalogFetchCount(machineId) > before);
   }
 
-  private async emitMachineEvent(machineId: string, kind: "session_added" | "pane_removed" | "fleet_changed", session: string | null, paneId: string | null = null): Promise<void> {
+  private async emitMachineEvent(machineId: string, kind: "session_added" | "fleet_changed", session: string): Promise<void> {
     const sequence = (this.eventSequences.get(machineId) ?? 0) + 1;
     this.eventSequences.set(machineId, sequence);
-    const event = { sequence, revision: 0, kind, session, pane_id: paneId, at: this.stamp() };
+    const event = { sequence, revision: 0, kind, session, pane_id: null, at: this.stamp() };
     const frame = `id: ${sequence}.${event.revision}\nevent: ${kind.replaceAll("_", "")}\ndata: ${JSON.stringify(event)}\n\n`;
     await this.page.evaluate(
       ([host, data]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string, framed: boolean) => number }).__journeyMachineEvent(host, data, true),
@@ -1112,7 +1113,7 @@ export class HubDouble {
     if (path === "/v1/sessions") {
       this.tickBooting(machineId);
       const sessions = this.sessionsFor(machineId);
-      await route.fulfill({ json: { freshness_threshold_secs: 30, sessions } });
+      await route.fulfill({ json: { schema_version: 1, freshness_threshold_secs: 30, sessions, stopped_sessions: [] } });
       // Counted once the page has the answer, so a waiter that resumes on it
       // never races the response it is waiting for.
       this.catalogFetches.set(machineId, (this.catalogFetches.get(machineId) ?? 0) + 1);

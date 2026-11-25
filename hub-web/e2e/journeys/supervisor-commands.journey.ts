@@ -313,7 +313,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       });
     });
     test("HUB-J27 reload Cassy on a Codex supervisor only after confirming its restart", journeyPart, async ({ page, journey }) => {
-      const machine = { ...ATLAS, sessions: [{ ...ATLAS.sessions[0]!, harness: "codex" as const, mcp_version: "9.99.2", installed_version: "9.99.2", mcp_reload_needed: true, ws_port: 48101, started_at: journeyStamp(-60_000) }] };
+      const machine = { ...ATLAS, sessions: [{ ...ATLAS.sessions[0]!, harness: "codex" as const, mcp_version: "9.99.2", installed_version: "9.99.2", mcp_reload_needed: true, epic_id: null, ws_port: 48101, dormant: false, standby: false, dismissed: false, started_at: journeyStamp(-60_000) }] };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
       const mutations = () => hub.frames.filter(frame => frame.kind === "SupervisorCommand");
       await journey.stage("The Codex card names the restart before anything is sent", async () => {

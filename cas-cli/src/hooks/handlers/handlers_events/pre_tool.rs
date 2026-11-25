@@ -13871,6 +13871,21 @@ printf '}'
         let opaque = lookup_failure(&graphql_opaque);
         let opaque_options_first = lookup_failure(&graphql_opaque_options_first);
         let opaque_stdin = lookup_failure(&graphql_opaque_stdin);
+        let unrelated_stdin = denial_for("worker", &format!(r#"{graphql} <<< '{{"query":"{{viewer{{login}}}}"}}'"#));
+        let nested_holds = [
+            format!("nice {graphql_unresolved}"),
+            format!("ssh fixture-host {}", shell_words::quote(graphql_unresolved)),
+            format!("bash -o pipefail -c {}", shell_words::quote(graphql_unresolved)),
+            format!("sh -c {}", shell_words::quote(graphql_unresolved)),
+            format!("python3 -c {}", shell_words::quote(&format!("import os; os.system({})", serde_json::to_string(graphql_unresolved).unwrap()))),
+        ].map(|command| unresolved_code(denial_for("worker", &command)));
+        let opaque_values = [
+            "gh api graphql -F query=@fixture.json",
+            "gh api graphql -f query=\"$FIXTURE_QUERY\"",
+            "gh api graphql -f query=\"$(cat fixture.json)\"",
+            "curl https://api.github.com/graphql -d @fixture.json",
+            "curl https://api.github.com/graphql --data-binary @-",
+        ].map(lookup_failure);
         let multi_denial = denial_for("worker", graphql_multi);
         let (wrapped_denial, wrapped_reads) = probe("worker", &graphql_wrapped);
         let (enqueue_denial, enqueue_reads) = probe("worker", graphql_enqueue);
@@ -13963,6 +13978,10 @@ printf '}'
             ((true, 1, 0), (true, 0, 1), (true, 0, 1)),
         );
         assert_eq!((rejected(escaped_json_denial), opaque_stdin), (true, (true, 0, 1)));
+        assert_eq!(
+            (rejected(unrelated_stdin), nested_holds, opaque_values),
+            (true, [true; 5], [(true, 0, 1); 5]),
+        );
         assert_eq!(
             (rejected(multi_denial), rejected(wrapped_denial), rejected(enqueue_denial), rejected(large_denial), recorded_fork_denial.is_none(), repaired_fork_denial.is_none(), approved_wrapped.is_none(), wrapped_reads, enqueue_reads, approved_wrapped_reads, empty_discovery_failures, broken_discovery_failures),
             (true, true, true, true, true, true, true, 1, 1, 1, 0, 1),

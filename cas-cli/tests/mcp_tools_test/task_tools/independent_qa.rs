@@ -2754,7 +2754,8 @@ async fn raw_github_merges_with_status_lookup(lookup_fails: bool) {
 
     let command = concat!("gh api graphql -f query='mutation($id: ID!) { mergePull", "Request(input: {pullRequestId: $id}) { clientMutationId } }' -F id=@-");
     assert!(
-        cas::qa_pass::github_merge_refusal(&cas_dir, &repo, command).is_some(),
+        cas::qa_pass::github_merge_refusal(&cas_dir, &repo, command)
+            .is_some_and(|denial| denial.contains("PR_VERIFIER_UNRESOLVED")),
         "unmapped merge allowed: {command}"
     );
 

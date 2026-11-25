@@ -2862,6 +2862,24 @@ bug_families:
     tasks: [cas-71bf, cas-4c2b]
     invariants: []
     journeys: [FACTORY-SUPERVISE]
+  no-code-report-closed-without-verdict:
+    title: No-code report closed without a current independent verdict
+    statement: A no-code spike or demo deliverable closes only on an approved verdict whose dispatch recorded the report inventory still current at close, at any depth; the verifier is shown that recorded inventory.
+    tasks: [cas-0ff6]
+    journeys: [FACTORY-CLOSE, FACTORY-MERGE]
+  peer-replacement-hidden-by-old-park:
+    title: An earlier park hides a peer worker replacement
+    tasks: [cas-e27d]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
+  test-first-park-evidence:
+    title: Test-first park requires a recorded red run
+    tasks: [cas-8a96]
+    journeys: [FACTORY-CLOSE]
+  typed-reload-confirmation-persistence:
+    title: Composer and catalog updates preserve the typed Reload Cassy confirmation without blocking chat
+    tasks: [cas-75ce]
+    invariants: [HUB-J27-CONFIRM-SHEET, HUB-J27-RELOAD-PROOF]
+    journeys: [HUB-J5, HUB-J27]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

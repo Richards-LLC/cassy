@@ -7,6 +7,53 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.56.0] - 2026-11-25
+
+### Fixed — Factory
+
+- **A no-code spike's or demo's report always gets an independent review** — Was:
+  a no-code spike whose report landed as docs in the repository was classed as a
+  docs-only delivery, and a supervisor's ordinary close accepted it with no
+  reviewer and no verdict. Light depth, a rapid-response window, a release tag
+  containing the delivery, `supervisor_override` and `task update status=closed`
+  each skipped the review as well. Now: one gate runs before every exemption on
+  close, `task update status=closed`, pre-merge review and release close. A
+  no-code spike, or a no-code task with a demo statement, closes or merges only
+  on an approved verdict whose dispatch recorded the proof reference and the id
+  and SHA-256 of every committed artifact (migration m302), and only while that
+  record still equals the report. A task stays covered once a review has
+  recorded its proof, even if its fields are edited in the same request. The
+  verifier is handed the recorded reference and artifacts, never a later
+  listing. A changed, republished or revoked report retires the stale dispatch,
+  on release apply as well, and the next close or merge requests a new review;
+  a temporary download failure retries the same dispatch. A revocation Cloud reports is recorded
+  locally, so that new review leaves the artifact out. The approval is checked
+  again just before the final write of close, `task update status=closed` and
+  release apply, and at merge admission; that recheck refuses when it finds the
+  report edited, republished or revoked. A release preview changes nothing. The
+  review is required whenever the project has verification on, including on
+  an OpenCode lane. An
+  unreadable inventory, dispatch or verdict refuses with G-68. `supervisor_override` and the shipped-timeout
+  waiver no longer close a report: a supervisor records a verdict on the
+  dispatch instead. Negative-result, evidence-only and decision closes, the
+  operator recovery decision and turning verification off are unchanged, as are
+  mechanical no-code chores.
+- **Park checks test-first evidence** — A passing run alone no longer parks a test-first task. Cassy requires a capped failing test at the start base or a committed red checkpoint, or a capped `cargo check --tests` failure at the start base.
+- **Repeated rejections require a whole-flow review** — Was: a task could cycle through narrow repairs and hold its release train. Now: after two all-time verifier rejections, Cassy requires a linked whole-flow review before another repair, assignment, or start and detaches the task unless a supervisor records why it should stay. Detachment preserves the recorded source branch, and the daemon recovers missed notices.
+- **Peer worker replacement syncs to the train owner** — When a peer replaces a stale worker, Cassy now records the reset in the form Cloud sync recognizes. The train owner receives the reassignment and rebound branch without waiting for another task edit.
+
+### Fixed — Coordination
+
+- **Peer reply errors identify the invalid reply ID** — Sending to a peer with a local supervisor notice as `in_reply_to` now reports the invalid reply ID instead of saying the peer does not exist.
+
+### Fixed — CLI
+
+- **Readable `cas-update` warnings** — Was: warning markers faded on light terminals, `NO_COLOR` still emitted styling, and the install target could run past 80 columns. Now: markers have stronger contrast, `NO_COLOR` disables styling, and the target path appears on its own indented line.
+
+### Fixed — Commander
+
+- **Reload Cassy confirmation stays open** — Session list updates no longer interrupt a pressed confirmation or lose a reload that's waiting for pane control. Commander clears the command draft after sending, or keeps it and shows who controls the pane if the request is refused.
+
 ## [4.55.0] - 2026-11-25
 
 ### Fixed — Developer Tooling

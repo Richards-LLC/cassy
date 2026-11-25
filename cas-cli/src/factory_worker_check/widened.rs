@@ -462,17 +462,20 @@ mod tests {
         let helper = "hub-web/e2e/journeys/hub-double.ts";
         let journey = "hub-web/e2e/journeys/supervisor-commands.journey.ts";
         let preview = "hub-web/preview/browser-page.test.ts";
+        let globals = "hub-web/preview/globals.test.ts";
         let real = "hub-web/e2e/real/real-hub.journey.ts";
         for (path, contents) in [
             (".gitignore", "node_modules/\n"),
             ("hub-web/package.json", r#"{"devDependencies":{"@playwright/test":"1","vitest":"3"}}"#),
             ("hub-web/playwright.config.js", "module.exports = { testDir: 'e2e/journeys', testMatch: '**/*.journey.ts', webServer: { command: 'fixture-local', port: 3000 } };"),
             ("hub-web/playwright.real.config.js", "module.exports = { testDir: 'e2e/real', testMatch: '**/*.journey.ts' };"),
+            ("hub-web/vitest.config.ts", "export default { test: { globals: true } };"),
             ("docs/qa/journeys.yaml", "journeys:\n  - id: HUB-J11\n    status: live\n    spec: hub-web/e2e/journeys/supervisor-commands.journey.ts\n    additional_specs:\n      - hub-web/e2e/real/real-hub.journey.ts\n"),
             (helper, "import type { Page } from '@playwright/test'; export class HubDouble {}"),
             (journey, "import { test } from '@playwright/test'; import './hub-double';\ntest('journey', () => {});"),
             (real, "import { test } from '@playwright/test'; import '../journeys/hub-double';\ntest('real', () => {});"),
             (preview, "import { test } from 'vitest'; import '../e2e/journeys/hub-double'; test('preview', () => {});"),
+            (globals, "import '../e2e/journeys/hub-double'; test('globals', () => {});"),
         ] {
             let file = repo.join(path);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -492,9 +495,10 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "-qm", "delivery"]);
         let head = git(&["rev-parse", "HEAD"]);
+        let unit_specs = vec![preview.to_owned(), globals.to_owned()];
         assert_eq!(deployed_journey_specs(cas_root, repo, &head), BTreeSet::from([real.into()]));
         assert_eq!(javascript::related_specs(repo, helper), BTreeMap::from([
-            ("playwright", vec![journey.into(), real.into()]), ("vitest", vec![preview.into()]),
+            ("playwright", vec![journey.into(), real.into()]), ("vitest", unit_specs.clone()),
         ]));
         let paths = [helper.into()];
         let plans = || commands(&PassingTests::new(cas_root, repo, &head), &paths, &scopes, &Default::default())
@@ -503,14 +507,16 @@ mod tests {
                 let run = javascript::invocation(&args).unwrap();
                 (run.runner, run.files)
             }).collect::<Vec<_>>();
-        assert_eq!(plans(), [("playwright", vec![journey.to_owned()]), ("vitest", vec![preview.to_owned()])]);
+        assert_eq!(plans(), [("playwright", vec![journey.to_owned()]), ("vitest", unit_specs.clone())]);
         javascript::execute(cas_root, &["playwright".into(), helper.into()], repo, &[]).unwrap();
         let proof_missing = || missing(&PassingTests::new(cas_root, repo, &head), &scopes, &Default::default());
         assert_eq!(proof_missing(), scopes);
-        assert_eq!(plans(), [("vitest", vec![preview.to_owned()])]);
-        record(cas_root, repo, &head, Proof {
-            runner: "vitest".into(), scope: Scope::File(preview.into()), reason: String::new(), configs: Default::default(),
-        }, 1).unwrap();
+        assert_eq!(plans(), [("vitest", unit_specs.clone())]);
+        for spec in unit_specs {
+            record(cas_root, repo, &head, Proof {
+                runner: "vitest".into(), scope: Scope::File(spec), reason: String::new(), configs: Default::default(),
+            }, 1).unwrap();
+        }
         assert!(proof_missing().is_empty());
         assert!(plans().is_empty());
     }

@@ -8821,7 +8821,9 @@ fn cleanup_target_cache_report(
         crate::factory_target_cache::cleanup_selected_with_opt_in(cas_root, &mut report, policy, live, unknown)?;
     }
     if terminal_required {
-        report.remediation = "Named target-cache reclaim is preview-only here on macOS. In a terminal, run cas factory gc deep-reclaim --target <absolute-path>; it may trigger macOS privacy prompts.".to_string();
+        let command = crate::factory_target_cache::TERMINAL_RECLAIM_COMMAND;
+        report.terminal_reclaim_command = Some(command.to_string());
+        report.remediation = format!("Named target-cache reclaim is preview-only here on macOS. In a terminal, run {command}; it may trigger macOS privacy prompts.");
     }
     Ok(report)
 }

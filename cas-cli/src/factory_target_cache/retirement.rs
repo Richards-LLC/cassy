@@ -588,17 +588,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_automatic_retirement_never_runs_global_inventory_cas_a46c() {
-        const CHILD: &str = "CAS_A46C_RETIREMENT_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let test = std::thread::current();
-            let output = std::process::Command::new("/usr/bin/sandbox-exec")
-                .args(["-p", "(version 1)(allow default)(deny process-exec (literal \"/usr/sbin/lsof\"))"])
-                .arg(std::env::current_exe().unwrap())
-                .args(["--exact", test.name().unwrap(), "--nocapture"])
-                .env(CHILD, "1")
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        if run_test_in_lsof_denied_child() {
             return;
         }
 

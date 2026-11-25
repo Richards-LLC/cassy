@@ -35,6 +35,7 @@ pub use lane::LanePreviewRecord;
 const QUARANTINE_PREFIX: &str = ".cas-target-gc-";
 const MANAGED_BRANCH_PREFIXES: [&str; 2] = ["epic/", "release/"];
 const MANAGED_WORKTREE_PREFIXES: [&str; 2] = ["epic-", "release-"];
+pub(crate) const TERMINAL_RECLAIM_COMMAND: &str = "cas factory gc deep-reclaim --target <absolute-path>";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TargetCachePolicy {
@@ -137,6 +138,8 @@ pub struct TargetCacheReport {
     pub pending_reclaim_bytes: u64,
     pub dry_run: bool,
     pub remediation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_reclaim_command: Option<String>,
     pub caches: Vec<TargetCacheRecord>,
     #[serde(default)]
     pub lane_previews: Vec<LanePreviewRecord>,
@@ -531,6 +534,7 @@ fn inspect_scoped_with_probe(
         pending_reclaim_bytes: pending_reclaim_bytes.unwrap_or(0),
         dry_run,
         remediation: "Review gc_report, then run gc_cleanup force=true dry_run=false; Cassy revalidates ownership, liveness, recency, and path containment immediately before each rename.".to_string(),
+        terminal_reclaim_command: None,
         caches: records,
         lane_previews,
     })
@@ -1832,6 +1836,8 @@ fn process_uses(worktree: &Path, cache: &Path, own_lock_fd: Option<i32>) -> bool
 
 #[cfg(target_os = "macos")]
 fn macos_deep_process_uses(worktree: &Path, cache: &Path, own_lock_fds: &[i32]) -> bool {
+    #[cfg(test)]
+    assert!(std::env::var_os(NO_LSOF_TEST_CHILD).is_none(), "deep inventory entered from a non-interactive route");
     // Unknown/inaccessible evidence must preserve the cache. Include fd fields
     // to exempt precisely the eviction lock, while keeping this process's
     // executable, mappings and every other output handle visible.
@@ -1848,6 +1854,26 @@ fn macos_deep_process_uses(worktree: &Path, cache: &Path, own_lock_fds: &[i32]) 
         return true;
     }
     macos_process_arguments_use(worktree, cache)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+const NO_LSOF_TEST_CHILD: &str = "CAS_A46C_NO_LSOF_TEST_CHILD";
+
+#[cfg(all(test, target_os = "macos"))]
+fn run_test_in_lsof_denied_child() -> bool {
+    if std::env::var_os(NO_LSOF_TEST_CHILD).is_some() {
+        return false;
+    }
+    let test = std::thread::current();
+    let output = std::process::Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)(deny process-exec (literal \"/usr/sbin/lsof\"))"])
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", test.name().unwrap(), "--nocapture"])
+        .env(NO_LSOF_TEST_CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    true
 }
 
 #[cfg(target_os = "macos")]

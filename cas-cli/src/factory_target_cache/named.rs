@@ -248,7 +248,7 @@ fn owner_marker() -> &'static str {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
 
@@ -312,6 +312,7 @@ mod tests {
         (env, cas, target, task, policy)
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn exact_retired_target_survives_global_budget_exhaustion() {
         let (_env, cas, target, _task, policy) = fixture();
@@ -345,6 +346,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn exact_consent_keeps_liveness_quiet_identity_and_evidence_guards() {
         let (_env, cas, target, mut task, policy) = fixture();
@@ -481,6 +483,11 @@ mod tests {
     #[tokio::test]
     async fn named_consent_mcp_route_is_narrow_and_dry_by_default() {
         use rmcp::handler::server::wrapper::Parameters;
+        #[cfg(target_os = "macos")]
+        if run_test_in_lsof_denied_child() {
+            return;
+        }
+
         let (_env, cas, target, _task, _policy) = fixture();
         // The real request handler loads policy, rather than the unit test policy.
         let config = fs::read_to_string(cas.join("config.toml")).unwrap();
@@ -500,7 +507,7 @@ mod tests {
         core.set_agent_id_for_testing(supervisor.id.clone());
         let service = crate::mcp::CasService::new(core, None);
         let request = |force, dry_run| {
-            serde_json::json!({"action":"gc_cleanup",
+            serde_json::json!({"action":"gc_cleanup", "full":true,
             "reclaim_unknown_target": target, "force":force, "dry_run":dry_run})
         };
         for (force, dry_run) in [(true, None), (false, Some(false))] {
@@ -534,10 +541,11 @@ mod tests {
         assert_ne!(result.is_error, Some(true), "{result:?}");
         #[cfg(target_os = "macos")]
         {
+            let report = target_cache_status(&result);
+            assert_eq!(report["dry_run"], true);
+            assert_eq!(report["reclaimed_bytes"], 0);
             assert!(target.join("debug/output").is_file());
-            assert!(result.content.iter().any(|content| content.as_text().is_some_and(|text| {
-                text.text.contains("cas factory gc deep-reclaim --target")
-            })));
+            assert_eq!(report["terminal_reclaim_command"].as_str(), Some(TERMINAL_RECLAIM_COMMAND));
         }
         #[cfg(not(target_os = "macos"))]
         assert!(!target.exists(), "native MCP named reclaim failed: {result:?}");
@@ -549,6 +557,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     async fn legacy_mcp_request(
         service: &crate::mcp::CasService,
         target: &Path,
@@ -560,6 +569,10 @@ mod tests {
         .unwrap();
         let result = service.factory_request(Parameters(request)).await.unwrap();
         assert_ne!(result.is_error, Some(true), "{result:?}");
+        target_cache_status(&result)
+    }
+
+    fn target_cache_status(result: &rmcp::model::CallToolResult) -> serde_json::Value {
         let text = result
             .content
             .iter()
@@ -577,6 +590,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn legacy_exact_mcp_routes_preserve_scope_and_destructive_guards() {
         let (_env, cas, unrelated, _task, _policy) = fixture();

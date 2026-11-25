@@ -13820,6 +13820,8 @@ printf '}'
         let graphql_input = concat!("gh api graphql -f query='mutation($input: MergePullRequestInput!) { mergePull", "Request(input: $input) { clientMutationId } }' -F 'input[pullRequestId]=PR_fixture'");
         let graphql_json = concat!("gh api graphql --input - <<< '{\"query\":\"mutation($input: MergePullRequestInput!) { mergePull", "Request(input: $input) { clientMutationId } }\",\"variables\":{\"input\":{\"pullRequestId\":\"PR_fixture\"}}}'");
         let graphql_default = concat!("gh api graphql -f query='mutation(,$pr,: ID!,= # default )\n \"PR_\\u0066ixture\",) { mergePull", "Request(,input,: {,# target\n pullRequestId,: $pr,},) { clientMutationId } }'");
+        let graphql_keyword_variable = graphql_default.replace("$pr", "$mutation");
+        let graphql_named = concat!("gh api graphql -f query='mutation mergePull", "Request($pr: ID! = \"PR_other\") { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }'");
         let graphql_object_default = concat!("gh api graphql --input - <<< '{\"query\":\"mutation($input: MergePullRequestInput! = {pullRequestId: \\\"PR_fixture\\\"}) { mergePull", "Request(input: $input) { clientMutationId } }\"}'");
         let graphql_unresolved = concat!("gh api graphql -f query='mutation($pr: ID!) { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }'");
         let opaque_body = repo.path().join("opaque-merge.json");
@@ -13837,6 +13839,7 @@ printf '}'
         run("worker", &command, Some("PR_VERIFIER_PENDING"));
         run("supervisor", api, Some("PR_VERIFIER_PENDING"));
         verdict(&first, VerificationStatus::Rejected);
+        let keyword_variable = probe("worker", &graphql_keyword_variable);
         std::fs::write(&config, "[qa]\nindependent_pass = true\n").unwrap();
         run("supervisor", &command, Some("PR_VERIFIER_REJECTED"));
         let input_denial = denial_for("supervisor", graphql_input);
@@ -13940,6 +13943,14 @@ printf '}'
         registry.upsert(non_repository.path()).unwrap();
         let broken_discovery_failures = discovery_failures();
 
+        let now = chrono::Utc::now();
+        let qa = cas_store::open_qa_pass(&cas_root, &cas_store::NewQaPass {
+            task_id: &task.id, implementer_agent_id: "worker", branch: "factory/proof",
+            bound_head: head, deadline_at: now + chrono::Duration::minutes(10), max_rounds: 3,
+        }, now).unwrap();
+        assert!(matches!(qa, cas_store::QaPassOpen::Dispatched(_)));
+        let named = lookup_failure(graphql_named);
+        assert_eq!((rejected(keyword_variable.0), keyword_variable.1, named), (true, 1, (true, 1, 0)));
         assert_eq!(
             (rejected(defaulted.0), defaulted.1, rejected(object_defaulted.0), object_defaulted.1, supplied.0.is_none(), supplied.1, unresolved, opaque, opaque_options_first),
             (true, 1, true, 1, true, 1, (true, 0, 1), (true, 0, 1), (true, 0, 1)),

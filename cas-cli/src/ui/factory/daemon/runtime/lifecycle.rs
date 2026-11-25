@@ -1019,7 +1019,7 @@ impl MergeQueueRepair {
         use cas_types::TaskStatus;
         let Some(run) = run else { return MergeQueueRepairOutcome::Unchanged };
         let marker = Self::marker(run, head);
-        for note in task.notes.split("\n\n").rev().filter(|note| note.contains(&marker)) {
+        for note in task.notes.rsplit("\n\n").filter(|note| note.contains(&marker)) {
             if task.status == TaskStatus::Open && task.assignee.as_deref() == Some(worker)
                 && let Some((_, brief)) = note.split_once(cas_store::REQUEST_CHANGES_AUDIT_PREFIX)
                 && brief.starts_with("merge_queue_ejected: ")

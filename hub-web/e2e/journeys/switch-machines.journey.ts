@@ -358,7 +358,9 @@ for (const width of [1280, 390]) {
             const [, other] = [...prowl.sessions].sort((a, b) => Date.parse(b.last_activity_at!) - Date.parse(a.last_activity_at!));
             stamp += 61_000;
             other!.last_activity_at = journeyStamp(stamp);
-            await hub.announceCatalog(prowl.id);
+            const beforeActivity = hub.catalogFetchCount(prowl.id);
+            await hub.emitMachineEvent(prowl.id, "fleet_changed", other!.name);
+            await hub.waitFor(() => hub.catalogFetchCount(prowl.id) > beforeActivity);
             await expect(list.getByRole("button", { name: /^\S+ on prowl, / }).first(),
               `tap ${tap}: activity never re-sorts the prowl group`).toHaveAttribute("data-thread-key", `${prowl.id}:calm-raven-72`);
             if (soundwave.sessions.some((session) => session.name === PASSING.name && session.liveness === "live")) {

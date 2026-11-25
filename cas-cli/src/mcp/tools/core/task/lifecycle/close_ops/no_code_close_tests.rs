@@ -546,6 +546,9 @@ async fn repeat_review_every_entry_refuses_g170_gh2373() {
     registration.metadata.insert("clone_path".into(), checkout.display().to_string());
     agents.update(&registration).unwrap();
     env.set("CAS_AGENT_ROLE", "worker");
+    f.worker.coordination(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"inbox_poll",
+    })).unwrap())).await.unwrap();
     let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
     assert_eq!(f.task(id).status, TaskStatus::InProgress);
     assert!(started.contains(&review));

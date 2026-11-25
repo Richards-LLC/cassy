@@ -1809,6 +1809,8 @@ impl CasCore {
                 data: None,
             });
         }
+        let stored_task = matches!(req.status.as_deref().map(str::parse::<TaskStatus>), Some(Ok(TaskStatus::Closed)))
+            .then(|| task.clone());
         // A recorded receipt must never silently acquire a different epic or
         // target, including a declined delivery whose active proof was cleared.
         // Give the supported supervisor repair before the generic scope guard
@@ -2452,6 +2454,7 @@ impl CasCore {
         // cas-062d: track status transition for supervisor lifecycle push.
         let mut lifecycle_status_change: Option<(TaskStatus, TaskStatus)> = None;
         let mut direct_close_hook_evidence = None;
+        let mut closing_report = super::lifecycle::report_proof::ReportGate::Exempt;
         if let Some(status_str) = req.status {
             use std::str::FromStr;
             let new_status =
@@ -2480,9 +2483,25 @@ impl CasCore {
             if new_status != task.status {
                 lifecycle_status_change = Some((task.status, new_status));
             }
-            if new_status == TaskStatus::Closed
-                && task.status != TaskStatus::Closed
-                && self.load_config().verification_enabled()
+            let closing = new_status == TaskStatus::Closed && task.status != TaskStatus::Closed;
+            let verification_on = closing && self.load_config().verification_enabled();
+            if closing {
+                use super::lifecycle::report_proof::{ReportGate, require_report_verdict};
+                closing_report = match require_report_verdict(
+                    &self.cas_root, verification_on, stored_task.as_ref().unwrap_or(&task), &task,
+                ) {
+                    Ok(gate @ (ReportGate::Exempt | ReportGate::Bound(_))) => gate,
+                    Ok(_) => return Ok(Self::tool_error(crate::gates::tag("G-68", format!(
+                        "VERIFICATION REQUIRED: task {} is a no-code report without an approved independent verdict for its current report, so update status=closed cannot close it. \
+                         Use task action=close to request that review.",
+                        task.id
+                    )))),
+                    Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-68", message))),
+                };
+            }
+            if closing
+                && !closing_report.covered()
+                && verification_on
                 && task.depth != cas_types::TaskDepth::Light
                 && crate::harness_policy::verification_required_for_task_type(task.task_type)
             {
@@ -3065,7 +3084,26 @@ impl CasCore {
         } else {
             None
         };
-        task.updated_at = task_store.update(&task).map_err(|e| McpError {
+        task.updated_at = if closing_report.covered() {
+            #[cfg(test)]
+            super::lifecycle::close_ops::lifecycle_race_hook::fire(&task.id);
+            let current = task_store.get(&task.id).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to update: {e}")),
+                data: None,
+            })?;
+            if let Err(change) = closing_report.recheck(&self.cas_root, stored_task.as_ref().unwrap_or(&task), &task, &current) {
+                return Ok(Self::tool_error(crate::gates::tag("G-68", format!(
+                    "VERIFICATION REQUIRED: task {} changed while this update was running ({change}), so update status=closed did not close it. \
+                     Use task action=close to request a review of the current report.",
+                    task.id
+                ))));
+            }
+            task_store.update_if_current(&task, &current)
+        } else {
+            task_store.update(&task)
+        }
+        .map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,

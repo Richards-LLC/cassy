@@ -1,0 +1,1 @@
+{"config":{"rootDir":"hub-web/e2e"},"errors":[],"suites":[{"title":"journeys/launch-session.journey.ts","column":0,"specs":[{"title":"HUB-J13 read a project's quality trend from the palette","file":"journeys/launch-session.journey.ts","line":576,"column":1,"tests":[{"expectedStatus":"passed","projectId":"journeys","results":[{"status":"timedOut","workerIndex":0,"retry":0}]}]}]}]}

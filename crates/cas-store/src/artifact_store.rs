@@ -345,18 +345,7 @@ impl SqliteArtifactStore {
     /// Newest first, so `cas artifact list` leads with what was just published.
     pub fn list_for_task(&self, task_id: &str) -> Result<Vec<PublishedArtifact>> {
         let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT id, task_id, name, mime, size_bytes, sha256, cloud_artifact_id,
-                    status, cloud_url, slack_permalink, created_at
-             FROM artifacts WHERE task_id = ?1 ORDER BY created_at DESC, id DESC",
-        )?;
-        let mut rows = stmt
-            .query_map([task_id], row_to_artifact)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for artifact in &mut rows {
-            artifact.revocation = revocation_with_conn(&conn, &artifact.id)?;
-        }
-        Ok(rows)
+        list_task_artifacts_with_conn(&conn, task_id)
     }
 
     /// First writer wins: retries never replace the original audit identity/reason/time.
@@ -387,6 +376,24 @@ impl SqliteArtifactStore {
         }
         Ok(())
     }
+}
+
+pub fn list_task_artifacts_with_conn(conn: &rusqlite::Connection, task_id: &str) -> Result<Vec<PublishedArtifact>> {
+    if !conn.table_exists(None, "artifacts")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, task_id, name, mime, size_bytes, sha256, cloud_artifact_id,
+                status, cloud_url, slack_permalink, created_at
+         FROM artifacts WHERE task_id = ?1 ORDER BY created_at DESC, id DESC",
+    )?;
+    let mut rows = stmt
+        .query_map([task_id], row_to_artifact)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for artifact in &mut rows {
+        artifact.revocation = revocation_with_conn(conn, &artifact.id)?;
+    }
+    Ok(rows)
 }
 
 fn revocation_with_conn(conn: &rusqlite::Connection, id: &str) -> Result<Option<ArtifactRevocation>> {

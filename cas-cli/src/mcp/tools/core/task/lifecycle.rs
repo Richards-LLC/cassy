@@ -80,6 +80,7 @@ mod qa_dispatch;
 pub(crate) mod qa_impact;
 pub(crate) mod qa_evidence_gate;
 pub(crate) mod repository_proof;
+pub(crate) mod report_proof;
 pub(crate) mod review_loop;
 pub(crate) mod review_tier;
 pub(crate) mod stale_close_guard;

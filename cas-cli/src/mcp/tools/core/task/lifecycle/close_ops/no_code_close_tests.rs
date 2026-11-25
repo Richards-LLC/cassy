@@ -523,20 +523,60 @@ async fn repeat_review_every_entry_refuses_g172_gh2373() {
     assert_eq!(cursor.pending, vec![id.to_string()]);
     let lease = || agents.get_lease(id).unwrap().map(|lease| (lease.agent_id, lease.epoch, lease.status));
     let before_lease = lease();
-    let queue_result = core.advance_queue_after_delivery(&predecessor.id).await;
-    let queue_gate = queue_result.as_ref().is_err_and(|error| {
+    let repeat_hold = |error: &McpError| {
         error.data.as_ref().is_some_and(|data| data["rule_id"] == "repeat_review_required")
             && crate::gates::codes_in(&error.message).contains(&"G-172")
-    });
+    };
+    let queue_result = core.advance_queue_after_delivery(&predecessor.id).await;
     let after = f.task(id);
-    if !queue_gate || after.status != queued.status || after.assignee != queued.assignee
+    if !queue_result.as_ref().is_err_and(repeat_hold)
+        || after.status != queued.status || after.assignee != queued.assignee
         || queues.get(session, WORKER).unwrap() != cursor || lease() != before_lease
     {
         failures.push(format!("ordered queue: {queue_result:?}; state={:?}/{:?}", after.status, after.assignee));
     }
+
+    queued.status = TaskStatus::InProgress;
+    queued.assignee = Some(WORKER.into());
+    f.put(&queued);
+    let mut recovery_cursor = queues.get(session, WORKER).unwrap();
+    recovery_cursor.current_task = Some(id.into());
+    recovery_cursor.current_started = false;
+    recovery_cursor.pending.clear();
+    recovery_cursor.dispatch_from = Some(predecessor.id.clone());
+    recovery_cursor.starting = true;
+    recovery_cursor.dispatch_revision = recovery_cursor.revision + 1;
+    queues.save(session, WORKER, &mut recovery_cursor).unwrap();
+    let before_retry = lease();
+    let retry = core.advance_queue_after_delivery(&predecessor.id).await;
+    let after_retry = lease();
+    if !retry.as_ref().is_err_and(repeat_hold)
+        || after_retry != before_retry || queues.get(session, WORKER).unwrap() != recovery_cursor
+    {
+        failures.push(format!("queue retry: {retry:?}; lease {before_retry:?} -> {after_retry:?}"));
+    }
+    if let Some((holder, _, cas_types::LeaseStatus::Active)) = after_retry {
+        agents.release_lease(id, &holder).unwrap();
+    }
+
+    env.set("CAS_AGENT_ROLE", "worker");
+    let before_claim = lease();
+    let before_cursor = queues.get(session, WORKER).unwrap();
+    let claim = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"claim", "id":id,
+    })).unwrap())).await;
+    if !claim.as_ref().is_err_and(repeat_hold)
+        || lease() != before_claim || queues.get(session, WORKER).unwrap() != before_cursor
+    {
+        failures.push(format!("manual claim: {claim:?}; lease {before_claim:?} -> {:?}", lease()));
+    }
     assert!(failures.is_empty(), "{failures:#?}");
+    let mut cursor = cursor;
+    cursor.revision = before_cursor.revision;
+    queues.save(session, WORKER, &mut cursor).unwrap();
     f.put(&parked);
 
+    env.set("CAS_AGENT_ROLE", "supervisor");
     call(&f.supervisor, serde_json::json!({"action":"notes", "id":id, "note_type":"decision",
         "notes":"whole-flow review: art-missing"})).await;
     let refusal = f.supervisor.task(Parameters(serde_json::from_value(request.clone()).unwrap()))

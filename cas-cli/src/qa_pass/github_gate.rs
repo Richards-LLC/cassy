@@ -652,26 +652,45 @@ fn graphql_merge_ids(tokens: &[&str]) -> (Vec<String>, bool) {
     let mut complete = true;
     let mut definitions = &[][..];
     let mut depth = 0usize;
-    for (index, &token) in tokens.iter().enumerate() {
+    let mut remaining = tokens.as_slice();
+    while let Some((&token, rest)) = remaining.split_first() {
+        remaining = rest;
+        if depth == 0 {
+            if token == "{" {
+                depth = 1;
+            } else if matches!(token, "query" | "mutation" | "subscription" | "fragment") {
+                let header = match rest {
+                    [name, tail @ ..] if name.starts_with(|ch: char| ch == '_' || ch.is_ascii_alphabetic()) => tail,
+                    _ => rest,
+                };
+                let variables = graphql_group(header, "(", ")");
+                if token != "fragment" {
+                    definitions = variables.unwrap_or_default();
+                }
+                let header = variables.map_or(header, |variables| &header[variables.len() + 2..]);
+                let mut arguments = 0usize;
+                remaining = header.iter().position(|&part| {
+                    match part {
+                        "(" => arguments += 1,
+                        ")" => arguments = arguments.saturating_sub(1),
+                        _ => {}
+                    }
+                    part == "{" && arguments == 0
+                }).map_or(&[], |start| &header[start..]);
+            }
+            continue;
+        }
         match token {
             "{" => depth += 1,
-            "}" => depth = depth.saturating_sub(1),
-            "mutation" if depth == 0 => {
-                let header = &tokens[index + 1..];
-                let header = match header {
-                    [name, tail @ ..] if name.starts_with(|ch: char| ch == '_' || ch.is_ascii_alphabetic()) => tail,
-                    _ => header,
-                };
-                definitions = graphql_group(header, "(", ")").unwrap_or_default();
-            }
+            "}" => depth -= 1,
             _ => {}
         }
         if ![concat!("mergePull", "Request"), concat!("enablePull", "RequestAutoMerge"), concat!("enqueuePull", "Request")].contains(&token)
-            || tokens.get(index + 1) != Some(&"(")
         {
             continue;
         }
-        let input = match &tokens[index + 2..] {
+        let ["(", arguments @ ..] = rest else { continue; };
+        let input = match arguments {
             ["input", ":", value @ ..] => value,
             _ => &[],
         };

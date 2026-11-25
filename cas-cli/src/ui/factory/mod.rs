@@ -145,7 +145,7 @@ pub use daemon::{
 pub use layout::{Direction, MissionControlLayout, PANE_SIDECAR, PaneGrid};
 pub use notification::{Notifier, NotifyBackend, NotifyConfig};
 #[cfg(test)]
-pub(crate) use protocol::DaemonWelcome;
+pub(crate) use protocol::{DaemonWelcome, SupervisorCommandReceiptFrame};
 pub(crate) use protocol::{
     COMMANDER_REPLAY_BYTES_PER_PANE, MAX_MESSAGE_SIZE, encode_message, local_gui_capabilities,
 };

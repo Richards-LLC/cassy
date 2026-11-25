@@ -4641,6 +4641,13 @@ enum LeaseRefusal {
     },
     ScopeDenied { required_scope: &'static str, message: String },
     LeaseUnavailable,
+    AuthStoreUnavailable {
+        #[cfg_attr(test, schemars(extend("const" = super::AuthStoreUnavailable::CODE)))]
+        reason: &'static str,
+        #[cfg_attr(test, schemars(extend("const" = true)))]
+        retryable: bool,
+        server_time: i64,
+    },
 }
 
 // gate-audit[force]: selector Chooses the HubAdmin takeover operation with its own required scope; does not bypass authentication or that scope.
@@ -4934,12 +4941,11 @@ fn auth_store_unavailable(error: &anyhow::Error) -> Response {
     let code = super::AuthStoreUnavailable::CODE;
     let mut response = (
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({
-            "error": code,
-            "reason": code,
-            "retryable": true,
-            "server_time": chrono::Utc::now().timestamp(),
-        })),
+        Json(LeaseRefusal::AuthStoreUnavailable {
+            reason: code,
+            retryable: true,
+            server_time: chrono::Utc::now().timestamp(),
+        }),
     )
         .into_response();
     let headers = response.headers_mut();

@@ -5,7 +5,10 @@ use serde_json::{Value, json};
 
 use super::{EndSessionReceipt, LeaseRefusal, SessionsResponse};
 use crate::hub::{HubSession, LeaseSummary, MachineEvent};
-use crate::ui::factory::{DaemonWelcome, SessionEndOutcome, supervisor_commands::SupervisorCommandReceipt};
+use crate::ui::factory::{
+    DaemonWelcome, SessionEndOutcome, SupervisorCommandReceiptFrame,
+    supervisor_commands::SupervisorCommandReceipt,
+};
 
 fn serializer_fields(schema: &mut Schema) {
     schema.remove("description");
@@ -21,6 +24,11 @@ fn serializer_fields(schema: &mut Schema) {
             names.iter().any(|required_name| required_name.as_str() == Some(name.as_str()))
         }) {
             continue;
+        }
+        match name.as_str() {
+            "enrichment_pending" => field["const"] = json!(true),
+            "agents" | "pane_bootstrap" => field["minItems"] = json!(1),
+            _ => {}
         }
         if let Some(Value::Array(types)) = field.get_mut("type") {
             types.retain(|kind| kind != "null");
@@ -59,6 +67,7 @@ fn hub_double_matches_serializer_schema() {
         "SessionEndOutcome": serializer_schema::<SessionEndOutcome>(),
         "SessionsResponse": serializer_schema::<SessionsResponse>(),
         "SupervisorCommandReceipt": serializer_schema::<SupervisorCommandReceipt>(),
+        "SupervisorCommandReceiptFrame": serializer_schema::<SupervisorCommandReceiptFrame>(),
     });
     let checked_in: Value = serde_json::from_str(include_str!(
         "../../../../hub-web/test/fixtures/hub-wire.schema.json"

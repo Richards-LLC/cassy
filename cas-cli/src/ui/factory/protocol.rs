@@ -713,21 +713,32 @@ pub enum PaneSizeAuthority {
 }
 
 macro_rules! daemon_message {
-    ($(#[$welcome_attr:meta])* Welcome { $($fields:tt)* }, $($other:tt)*) => {
+    ($(#[$welcome_attr:meta])* Welcome { $($fields:tt)* },
+     { $($before_receipt:tt)* }, SupervisorCommandReceipt { $($receipt_fields:tt)* }, $($other:tt)*) => {
         #[doc = "Messages sent from daemon to TUI client"]
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub enum DaemonMessage {
             $(#[$welcome_attr])*
             Welcome { $($fields)* },
+            $($before_receipt)*
+            SupervisorCommandReceipt { $($receipt_fields)* },
             $($other)*
         }
 
         #[cfg(test)]
-        #[allow(dead_code)]
+        #[expect(dead_code, reason = "Schema-only projection of the serialized Welcome frame")]
         #[derive(schemars::JsonSchema)]
         #[schemars(deny_unknown_fields)]
         pub(crate) enum DaemonWelcome {
             Welcome { $($fields)* },
+        }
+
+        #[cfg(test)]
+        #[expect(dead_code, reason = "Schema-only projection of the serialized command receipt frame")]
+        #[derive(schemars::JsonSchema)]
+        #[schemars(deny_unknown_fields)]
+        pub(crate) enum SupervisorCommandReceiptFrame {
+            SupervisorCommandReceipt { $($receipt_fields)* },
         }
     };
 }
@@ -753,11 +764,13 @@ daemon_message! {
         pane_bootstrap: Vec<PaneBootstrap>,
     },
 
-    VerifierLaunched { dispatch_id: String },
-    ReexecResult { receipt: super::daemon::reexec::ReexecReceipt },
-    /// Local-only response. An acknowledgement exists only after both tasks drain.
-    BindingIntake {
-        reply: super::daemon::runtime::violet_intake::IntakeReply,
+    {
+        VerifierLaunched { dispatch_id: String },
+        ReexecResult { receipt: super::daemon::reexec::ReexecReceipt },
+        /// Local-only response. An acknowledgement exists only after both tasks drain.
+        BindingIntake {
+            reply: super::daemon::runtime::violet_intake::IntakeReply,
+        },
     },
     SupervisorCommandReceipt { receipt: SupervisorCommandReceipt },
 

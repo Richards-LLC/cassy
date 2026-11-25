@@ -2932,7 +2932,7 @@ fn playwright_results(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use serde_json::json;
 
@@ -3607,7 +3607,7 @@ process.exit(ok ? 0 : 1);
     /// file may hold several `test('title'` lines, `--grep` keeps the matching
     /// ones (it matches the title path followed by the `{ tag: [...] }` tags),
     /// and the report goes to PLAYWRIGHT_JSON_OUTPUT_FILE when that is set.
-    const STAND_IN_PLAYWRIGHT: &str = r#"#!/usr/bin/env node
+    pub(in crate::factory_worker_check) const STAND_IN_PLAYWRIGHT: &str = r#"#!/usr/bin/env node
 const fs = require('fs'), path = require('path');
 const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1], listing = a.includes('--list');
 const config = path.resolve(at('--config')), settings = require(config), root = path.join(path.dirname(config), settings.testDir);

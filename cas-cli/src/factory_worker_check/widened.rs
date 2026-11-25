@@ -399,16 +399,15 @@ mod tests {
         let (tests, scopes) = stability::requirements(&repo, &head, &base, &paths, None).unwrap();
         assert!(tests.is_empty());
         assert_eq!(scopes, [Scope::Related(packaged.into()), Scope::Related(entry.into())]);
-        let commands = commands(Path::new("/cas"), &repo, &paths, &scopes, &Default::default());
-        assert_eq!(commands.len(), 2);
-        for command in commands {
-            let (_, args) = command.split_once(" -- ").unwrap();
-            let invocation = javascript::invocation(&args.split_whitespace().map(String::from).collect::<Vec<_>>()).unwrap();
-            assert_eq!(invocation.runner, "node");
-            assert_eq!(javascript::related_tests(&repo, &invocation.files[0]).unwrap().1, ["scripts/visual-qa.test.mjs"]);
+        for helper in [packaged, entry] {
+            assert_eq!(javascript::related_specs(&repo, helper), BTreeMap::from([("node", vec!["scripts/visual-qa.test.mjs".into()])]));
         }
         let unknown = "scripts/unknown.mjs";
         write(unknown, "export const value = 1;");
+        for spec in ["test-opencode-slack-policy.mjs", "test-verified-web-tests.mjs", "test-walk-kit.mjs", "subproject/test-owned.mjs"] {
+            write(&format!("scripts/{spec}"), "import { test } from 'node:test';\ntest('works', () => {});");
+        }
+        write("scripts/subproject/package.json", "{}");
         let scopes = [scope(&repo, unknown)];
         assert_eq!(scopes, [Scope::Package("scripts".into())]);
         for fixture in paths.iter().filter(|path| path.starts_with("scripts/visual-qa-fixtures/")) {
@@ -418,20 +417,33 @@ mod tests {
         let (_, args) = runs[0].split_once(" -- ").unwrap();
         let invocation = javascript::invocation(&args.split_whitespace().map(String::from).collect::<Vec<_>>()).unwrap();
         assert_eq!((invocation.runner, invocation.files), ("node", vec![unknown.to_owned()]));
-        assert_eq!(javascript::node_specs(&repo, &repo.join("scripts")), [repo.join("scripts/visual-qa.test.mjs")]);
+        assert_eq!(javascript::node_specs(&repo, &repo.join("scripts")), [
+            repo.join("scripts/test-opencode-slack-policy.mjs"), repo.join("scripts/test-verified-web-tests.mjs"),
+            repo.join("scripts/test-walk-kit.mjs"), repo.join("scripts/visual-qa.test.mjs"),
+        ]);
     }
 
     #[test]
     fn gh2471_playwright_helper_uses_related_proof_beside_a_vitest_consumer() {
-        let root = tempfile::tempdir().unwrap();
-        let repo = root.path();
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let state = tempfile::tempdir().unwrap();
+        let cas_root = state.path();
+        let worktree = cas_root.join("worktrees/web");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let repo = worktree.as_path();
         let helper = "hub-web/e2e/journeys/hub-double.ts";
         let journey = "hub-web/e2e/journeys/supervisor-commands.journey.ts";
         let preview = "hub-web/preview/browser-page.test.ts";
+        let real = "hub-web/e2e/real/real-hub.journey.ts";
         for (path, contents) in [
+            (".gitignore", "node_modules/\n"),
             ("hub-web/package.json", r#"{"devDependencies":{"@playwright/test":"1","vitest":"3"}}"#),
+            ("hub-web/playwright.config.js", "module.exports = { testDir: 'e2e/journeys', testMatch: '**/*.journey.ts', webServer: { command: 'fixture-local', port: 3000 } };"),
+            ("hub-web/playwright.real.config.js", "module.exports = { testDir: 'e2e/real', testMatch: '**/*.journey.ts' };"),
+            ("docs/qa/journeys.yaml", "journeys:\n  - id: HUB-J11\n    status: live\n    spec: hub-web/e2e/journeys/supervisor-commands.journey.ts\n    additional_specs:\n      - hub-web/e2e/real/real-hub.journey.ts\n"),
             (helper, "import type { Page } from '@playwright/test'; export class HubDouble {}"),
-            (journey, "import { test } from '@playwright/test'; import './hub-double'; test('journey', () => {});"),
+            (journey, "import { test } from '@playwright/test'; import './hub-double';\ntest('journey', () => {});"),
+            (real, "import { test } from '@playwright/test'; import '../journeys/hub-double';\ntest('real', () => {});"),
             (preview, "import { test } from 'vitest'; import '../e2e/journeys/hub-double'; test('preview', () => {});"),
         ] {
             let file = repo.join(path);
@@ -440,15 +452,6 @@ mod tests {
         }
         let scopes = [scope(repo, helper)];
         assert_eq!(scopes, [Scope::Related(helper.into())]);
-        let runs = commands(Path::new("/cas"), repo, &[helper.into(), journey.into(), preview.into()], &scopes, &Default::default());
-        let runners = runs.iter().map(|command| {
-            let (_, args) = command.split_once(" -- ").unwrap();
-            javascript::invocation(&args.split_whitespace().map(String::from).collect::<Vec<_>>()).unwrap()
-        }).map(|invocation| {
-            assert_eq!(invocation.files, [helper]);
-            invocation.runner
-        }).collect::<BTreeSet<_>>();
-        assert_eq!(runners, BTreeSet::from(["playwright", "vitest"]));
         let git = |args: &[&str]| super::git(repo, &[
             &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"], args,
         ].concat()).unwrap();
@@ -456,17 +459,20 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "-qm", "delivery"]);
         let head = git(&["rev-parse", "HEAD"]);
-        let state = tempfile::tempdir().unwrap();
-        let cas_root = state.path();
+        assert_eq!(deployed_journey_specs(cas_root, repo, &head), BTreeSet::from([real.into()]));
+        assert_eq!(javascript::related_specs(repo, helper), BTreeMap::from([
+            ("playwright", vec![journey.into(), real.into()]), ("vitest", vec![preview.into()]),
+        ]));
+        let playwright = repo.join("hub-web/node_modules/.bin/playwright");
+        std::fs::create_dir_all(playwright.parent().unwrap()).unwrap();
+        std::fs::write(&playwright, javascript::tests::STAND_IN_PLAYWRIGHT).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&playwright, std::fs::Permissions::from_mode(0o755)).unwrap();
+        javascript::execute(cas_root, &["playwright".into(), helper.into()], repo, &[]).unwrap();
         let proof_missing = || missing(&PassingTests::new(cas_root, repo, &head), &scopes, &Default::default());
-        record(cas_root, repo, &head, Proof {
-            runner: "playwright".into(), scope: scopes[0].clone(), reason: String::new(),
-            configs: BTreeMap::from([(journey.into(), "hub-web/playwright.config.ts".into())]),
-        }, 1).unwrap();
         assert_eq!(proof_missing(), scopes);
-        invalidate_runner(cas_root, repo, &head, &scopes[0], Some("vitest")).unwrap();
         record(cas_root, repo, &head, Proof {
-            runner: "vitest".into(), scope: scopes[0].clone(), reason: String::new(), configs: Default::default(),
+            runner: "vitest".into(), scope: Scope::File(preview.into()), reason: String::new(), configs: Default::default(),
         }, 1).unwrap();
         assert!(proof_missing().is_empty());
     }

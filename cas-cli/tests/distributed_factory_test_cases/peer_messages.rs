@@ -504,7 +504,7 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     // The MCP caller identity comes from the registry, never from the runner's
     // ambient CAS_* environment (a factory worker runs these tests).
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let (server, _registry, _mailbox) = fake_cloud_with_mailbox().await;
+    let (server, _registry, mailbox) = fake_cloud_with_mailbox().await;
     let endpoint = server.uri();
     let alpha = TestMachine::new("machine-alpha");
     let beta = TestMachine::new("machine-beta");
@@ -528,6 +528,27 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     .await
     .unwrap_err();
     assert!(urgent.contains("cannot be urgent"), "{urgent}");
+
+    let notice_id = cas::store::open_supervisor_queue_store(&a)
+        .unwrap()
+        .notify(
+            "a",
+            "supervisor_notice",
+            &json!({"kind": "premerge_verification", "detail": "review dispatched", "recipient": "sup-a", "factory_session": "factory-a"}).to_string(),
+            cas_store::NotificationPriority::High,
+        )
+        .unwrap();
+    let request = serde_json::from_value(json!({
+        "action": "message", "target": "sup-b@machine-beta", "summary": "take cas-1234?",
+        "message": "can you take cas-1234?", "kind": "ask", "in_reply_to": notice_id,
+    }))
+    .unwrap();
+    let error = service_a
+        .coordination(rmcp::handler::server::wrapper::Parameters(request))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{error}");
+    assert!(mailbox.lock().unwrap().is_empty());
 
     let sent = coordinate(
         &service_a,

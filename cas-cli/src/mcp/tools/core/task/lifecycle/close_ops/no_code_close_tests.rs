@@ -1552,10 +1552,15 @@ async fn no_code_spike_closes_when_its_target_exists_only_on_origin_gh1167() {
 #[tokio::test]
 async fn expired_task_close_renews_verification_with_corrected_proof_cas_afd2() {
     use cas_types::{VerificationDispatchState as State, VerificationProofBoundary};
-    for no_code in [false, true] {
+    for (no_code, recorded) in [(false, false), (true, false), (true, true)] {
         for state in ["due", "timed-out", "live"] {
             let mut env = TestEnvGuard::temp_home();
             let f = fixture(&mut env, "main");
+            if recorded {
+                let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+                config.set("verification.enabled", "true").unwrap();
+                config.save(&f.cas_dir()).unwrap();
+            }
             env.set("CAS_AGENT_ROLE", "worker");
             let id = "cas-afd2";
             if no_code {
@@ -1575,9 +1580,16 @@ async fn expired_task_close_renews_verification_with_corrected_proof_cas_afd2() 
             }
             // The explicit dispatch still requires review if config changes.
             let deadline = chrono::Utc::now() + chrono::Duration::minutes(if state == "live" { 10 } else { -1 });
-            let old = cas_store::create_verification_dispatch_bound(
-                &f.cas_dir(), id, "nocode-worker-session", "nocode-supervisor-session",
-                &VerificationProofBoundary::task(), deadline, false,
+            let reviewed = recorded.then(|| {
+                let report = f.task(id);
+                crate::mcp::tools::core::task::lifecycle::report_proof::require_report_verdict(
+                    &f.cas_dir(), true, &report, &report,
+                ).unwrap().proof_to_record().unwrap()
+            });
+            let old = cas_store::create_verification_dispatch_reviewing_with_conn(
+                &rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap(),
+                id, "nocode-worker-session", "nocode-supervisor-session",
+                &VerificationProofBoundary::task(), reviewed.as_deref(), deadline, false,
             ).unwrap();
             if state == "timed-out" {
                 cas_store::timeout_verification_dispatch(&f.cas_dir(), id, chrono::Utc::now()).unwrap().unwrap();
@@ -1587,8 +1599,9 @@ async fn expired_task_close_renews_verification_with_corrected_proof_cas_afd2() 
             f.put(&task);
             let corrected = "https://example.test/deploys/corrected";
             let mut request = serde_json::json!({"action":"close", "id":id, "reason":"Corrected evidence recorded"});
-            if no_code { request["external_ref"] = corrected.into(); }
-            if no_code && state == "due" {
+            let corrects = no_code && !recorded;
+            if corrects { request["external_ref"] = corrected.into(); }
+            if corrects && state == "due" {
                 let mut invalid = request.clone();
                 invalid["external_ref"] = "/tmp/corrected-report.md".into();
                 call(&f.worker, invalid).await;
@@ -1597,18 +1610,24 @@ async fn expired_task_close_renews_verification_with_corrected_proof_cas_afd2() 
             }
             let response = call(&f.worker, request.clone()).await;
             let current = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap();
-            assert_ne!(f.task(id).status, TaskStatus::Closed, "{no_code}/{state}: {response}");
+            assert_ne!(f.task(id).status, TaskStatus::Closed, "{no_code}/{recorded}/{state}: {response}");
             if state == "live" {
                 assert_eq!(current.id, old.id, "{response}");
                 if no_code { assert_eq!(f.task(id).external_ref.as_deref(), Some(PROOF)); }
                 continue;
             }
-            assert_ne!(current.id, old.id, "{no_code}/{state}: {response}");
+            assert_ne!(current.id, old.id, "{no_code}/{recorded}/{state}: {response}");
+            if recorded {
+                use crate::mcp::tools::core::task::lifecycle::report_proof::ReportProof;
+                let kept = ReportProof::recorded(&f.cas_dir(), &current.id).unwrap();
+                assert!(kept.is_some(), "{state}: the replacement dispatch records no report proof: {response}");
+                assert_eq!(kept, ReportProof::recorded(&f.cas_dir(), &old.id).unwrap(), "{state}: {response}");
+            }
             assert_eq!(current.state, State::Pending, "{response}");
             assert!(current.deadline_at > chrono::Utc::now());
             assert!(f.task(id).pending_verification);
             assert_eq!(cas_store::get_verification_dispatch(&f.cas_dir(), &old.id).unwrap().state, State::TimedOut);
-            if no_code { assert_eq!(f.task(id).external_ref.as_deref(), Some(corrected)); }
+            if corrects { assert_eq!(f.task(id).external_ref.as_deref(), Some(corrected)); }
             // A retry must retain the fresh cycle, not dispatch again or close.
             let again = call(&f.worker, request).await;
             assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap().id, current.id, "{again}");
@@ -1989,13 +2008,16 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
     for prior in [
         "never-verified", "light-depth", "rejected-earlier-report", "approval-unreadable",
         "legacy-approved", "legacy-skipped", "legacy-approved-update-route",
-        "inventory-unreadable", "rapid-unsampled", "release-tagged",
+        "inventory-unreadable", "rapid-unsampled", "release-tagged", "opencode-worker",
     ] {
         let f = fixture(&mut env, "main");
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
         config.set("verification.enabled", "true").unwrap();
         config.save(&f.cas_dir()).unwrap();
         env.set("CAS_AGENT_ROLE", "supervisor");
+        if prior == "opencode-worker" {
+            env.set("CAS_FACTORY_WORKER_CLI", "opencode");
+        }
         let id = "cas-2417";
         let (checkout, lane) = issue_delivery(&f, id, "main");
         std::fs::create_dir_all(checkout.join("docs")).unwrap();
@@ -2033,12 +2055,21 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
             }
             _ => {}
         }
+        let mut seeded = None;
         if matches!(prior, "rejected-earlier-report" | "approval-unreadable") {
-            let dispatch = cas_store::create_verification_dispatch_bound(
-                &f.cas_dir(), id, "nocode-supervisor-session", "nocode-supervisor-session",
-                &cas_types::VerificationProofBoundary::task(),
+            let reviewed = (prior == "approval-unreadable").then(|| {
+                let report = f.task(id);
+                crate::mcp::tools::core::task::lifecycle::report_proof::require_report_verdict(
+                    &f.cas_dir(), true, &report, &report,
+                ).unwrap().proof_to_record().unwrap()
+            });
+            let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+            let dispatch = cas_store::create_verification_dispatch_reviewing_with_conn(
+                &conn, id, "nocode-supervisor-session", "nocode-supervisor-session",
+                &cas_types::VerificationProofBoundary::task(), reviewed.as_deref(),
                 chrono::Utc::now() + chrono::Duration::minutes(10), false,
             ).unwrap();
+            seeded = reviewed.map(|_| dispatch.id.clone());
             let mut verdict = cas_types::Verification::new("ver-2417-rejected".into(), id.into());
             verdict.status = if prior == "approval-unreadable" {
                 cas_types::VerificationStatus::Approved
@@ -2051,7 +2082,6 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
             verdict.issuer_agent_id = verdict.agent_id.clone();
             verdict.dispatch_id = Some(dispatch.id.clone());
             cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap().add(&verdict).unwrap();
-            let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
             cas_store::resolve_verification_dispatch_with_conn(
                 &conn, &dispatch.id, "nocode-supervisor-session", None, true,
             ).unwrap();
@@ -2075,10 +2105,12 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
         } else {
             serde_json::json!({"action": "close", "id": id, "reason": "Report accepted"})
         }).await;
-        let dispatched = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().is_some();
+        let latest = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().map(|dispatch| dispatch.id);
+        let dispatched = latest.is_some();
         if f.task(id).status == TaskStatus::Closed
-            || (by_update || prior == "inventory-unreadable") && !response.contains("G-68")
+            || (by_update || seeded.is_some() || prior == "inventory-unreadable") && !response.contains("G-68")
             || prior == "inventory-unreadable" && dispatched
+            || seeded.is_some() && latest != seeded
         {
             wrong.push(format!("{prior}: dispatched={dispatched}: {response}"));
         }
@@ -2093,13 +2125,17 @@ async fn premerge_approval_of_a_no_code_spike_covers_the_artifacts_it_reviewed_g
     for case in [
         "unchanged", "light-depth", "rapid-unsampled", "release-tagged", "republished",
         "revoked-before-launch", "peer-report-revoked-before-launch", "bytes-changed-before-launch",
-        "cloud-unavailable-at-launch", "republished-while-merge-waits",
+        "size-changed-before-launch", "cloud-unavailable-at-launch", "republished-while-merge-waits",
+        "opencode-worker",
     ] {
         let f = fixture(&mut env, "main");
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
         config.set("verification.enabled", "true").unwrap();
         config.save(&f.cas_dir()).unwrap();
         env.set("CAS_AGENT_ROLE", "worker");
+        if case == "opencode-worker" {
+            env.set("CAS_FACTORY_WORKER_CLI", "opencode");
+        }
         let cloud = fixture_cloud(&f).await;
         let id = "cas-2418";
         let (checkout, lane) = issue_delivery(&f, id, "main");
@@ -2164,14 +2200,15 @@ async fn premerge_approval_of_a_no_code_spike_covers_the_artifacts_it_reviewed_g
                 "cloud-unavailable-at-launch" => {
                     Mock::given(any()).respond_with(ResponseTemplate::new(503)).mount(&cloud).await;
                 }
-                "bytes-changed-before-launch" => {
+                "bytes-changed-before-launch" | "size-changed-before-launch" => {
+                    let served: &[u8] = if case == "size-changed-before-launch" { b"report v10\n" } else { b"report v9\n" };
                     Mock::given(method("GET")).and(path(view.clone()))
                         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                             "artifact_id": cloud_id, "url": format!("{}/blob/{cloud_id}", cloud.uri()),
                             "size_bytes": published.size_bytes,
                         }))).mount(&cloud).await;
                     Mock::given(method("GET")).and(path(format!("/blob/{cloud_id}")))
-                        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"report v9\n".to_vec()))
+                        .respond_with(ResponseTemplate::new(200).set_body_bytes(served.to_vec()))
                         .mount(&cloud).await;
                 }
                 _ => {
@@ -2199,7 +2236,7 @@ async fn premerge_approval_of_a_no_code_spike_covers_the_artifacts_it_reviewed_g
             let replaced = launched == Invalidated && latest.id != reviewed.id && latest.state == Pending;
             let expected = asked && match case {
                 "cloud-unavailable-at-launch" => launched == Pending && latest.id == reviewed.id,
-                "bytes-changed-before-launch" => replaced,
+                "bytes-changed-before-launch" | "size-changed-before-launch" => replaced,
                 _ => replaced && recorded.as_ref().is_some_and(|proof| {
                     proof.artifacts.iter().all(|(artifact, _)| artifact != &published.id)
                 }),
@@ -2261,7 +2298,7 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         ("report-revoked", TaskType::Spike), ("reference-revised-before-launch", TaskType::Spike),
         ("active-dispatch-without-recorded-proof", TaskType::Spike), ("update-route", TaskType::Spike),
         ("reference-revised-during-close", TaskType::Spike), ("republished-during-final-write", TaskType::Spike),
-        ("revoked-during-update-close", TaskType::Spike),
+        ("revoked-during-update-close", TaskType::Spike), ("withdrawn-after-close-then-replayed", TaskType::Spike),
     ] {
         let f = fixture(&mut env, "main");
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
@@ -2445,12 +2482,19 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         let closed = f.task(id).status == TaskStatus::Closed;
         let approval_still_covers = matches!(
             case, "unchanged" | "unpublished-draft" | "peer-report-imported" | "peer-report-importing" | "chore"
-                | "active-dispatch-without-recorded-proof" | "update-route"
+                | "active-dispatch-without-recorded-proof" | "update-route" | "withdrawn-after-close-then-replayed"
         );
         if closed != approval_still_covers {
             wrong.push(format!("{case}: closed={closed}: {response}"));
         } else if case == "reference-revised-during-close" && f.task(id).external_ref.as_deref() != Some(revised) {
             wrong.push(format!("{case}: the concurrent reference was overwritten: {response}"));
+        } else if case == "withdrawn-after-close-then-replayed" {
+            artifacts.revoke(&published.id, "nocode-supervisor-session", "Report withdrawn").unwrap();
+            let replay = call(&f.supervisor, serde_json::json!({"action": "close", "id": id, "reason": "Report published"})).await;
+            let review = cas_store::get_verification_dispatch(&f.cas_dir(), &reviewed.id).unwrap().state;
+            if review != cas_types::VerificationDispatchState::Resolved || f.task(id).status != TaskStatus::Closed {
+                wrong.push(format!("{case}: replay left the review {review:?}: {replay}"));
+            }
         } else if !closed && !raced && case != "rejected"
             && cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap().id == reviewed.id
         {

@@ -1244,15 +1244,15 @@ async fn park_requires_red_first_evidence_gh_2422() {
                 ),
                 "node subtest regression" => (
                     "test('gear node regression', async t => { await t.test('inner', () => { throw Error('gear is stuck'); }); });\n",
-                    "test('gear node regression', async t => { await t.test('inner', () => {}); });\n",
+                    "test('gear node regression', () => {});\n",
                 ),
                 "node subtest aborted" => (
                     "test('gear node regression', async t => { await t.test('inner', { signal: AbortSignal.abort() }, () => {}); });\n",
-                    "test('gear node regression', async t => { await t.test('inner', () => {}); });\n",
+                    "test('gear node regression', () => {});\n",
                 ),
                 "node subtest hook failure" => (
                     "test('gear node regression', async t => { t.beforeEach(() => { throw Error('setup'); }); await t.test('inner', () => {}); });\n",
-                    "test('gear node regression', async t => { await t.test('inner', () => {}); });\n",
+                    "test('gear node regression', () => {});\n",
                 ),
                 _ => (
                     "test('gear node regression', () => { throw Error('gear is stuck'); });\n",

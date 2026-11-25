@@ -3615,7 +3615,7 @@ pub(super) mod worker_attention_tests {
         assert_eq!(tasks.get(&task.id).unwrap().status, cas_types::TaskStatus::AwaitingMerge);
         let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
         assert!(rows.iter().any(|row| row.target == "supervisor"
-            && crate::gates::codes_in(&row.prompt).contains(&"G-171")));
+            && crate::gates::codes_in(&row.prompt).contains(&"G-172")));
         assert!(!rows.iter().any(|row| row.target == worker.name));
     }
 

@@ -12502,7 +12502,7 @@ impl FactoryDaemon {
                                 &worker_name,
                             );
                             if let (Some(request_id), Err(error)) = (request_id, assignment)
-                                && crate::gates::codes_in(&error).contains(&"G-171")
+                                && crate::gates::codes_in(&error).contains(&"G-172")
                             {
                                 self.fail_unbound_spawn(request_id, &worker_name, Some(tid), &error);
                                 return;
@@ -12602,7 +12602,7 @@ impl FactoryDaemon {
                                 &worker_name,
                             );
                             if let (Some(request_id), Err(error)) = (request_id, assignment)
-                                && crate::gates::codes_in(&error).contains(&"G-171")
+                                && crate::gates::codes_in(&error).contains(&"G-172")
                             {
                                 self.fail_unbound_spawn(request_id, &worker_name, Some(tid), &error);
                                 return;

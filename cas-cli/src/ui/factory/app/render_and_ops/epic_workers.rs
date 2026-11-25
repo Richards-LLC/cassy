@@ -3396,7 +3396,7 @@ impl FactoryApp {
         let review = if let Some(id) = task_id.as_deref().filter(|_| !queued_spawn) {
             match assign_task_to_new_worker_with_review(self.cas_dir(), id, &worker_name) {
                 Ok(review) => Ok(review),
-                Err(error) if crate::gates::codes_in(&error).contains(&"G-171") => anyhow::bail!("{error}"),
+                Err(error) if crate::gates::codes_in(&error).contains(&"G-172") => anyhow::bail!("{error}"),
                 Err(error) => Err(error),
             }
         } else { Ok(None) };

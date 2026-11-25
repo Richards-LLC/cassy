@@ -236,27 +236,19 @@ fn github_merges_in_depth(command: &str, depth: usize, opaque_graphql: &mut bool
             });
             continue;
         }
-        if invocation.is_some_and(graphql_input_file) {
-            *opaque_graphql = true;
-            continue;
-        }
-        if ["mergePullRequest", "enablePullRequestAutoMerge", "enqueuePullRequest"]
-            .iter()
-            .any(|mutation| statement.contains(mutation))
-        {
-            let (ids, unresolved) = invocation.map(graphql_merge_ids).unwrap_or_default();
-            let mut push = |selector| merges.push(GithubMerge {
-                transport: MergeTransport::Api, selector, repo: None, match_head: None,
-                statement: statement_text.to_owned(),
+        let Some(invocation) = invocation else { continue; };
+        let (ids, unresolved) = graphql_merge_ids(invocation, opaque_graphql);
+        let mut push = |selector| merges.push(GithubMerge {
+            transport: MergeTransport::Api, selector, repo: None, match_head: None,
+            statement: statement_text.to_owned(),
+        });
+        if !ids.is_empty() {
+            push(MergeSelector::PullRequestNodes {
+                ids, host: hostname_flag(invocation).map(str::to_owned),
             });
-            if !ids.is_empty() {
-                push(MergeSelector::PullRequestNodes {
-                    ids, host: invocation.and_then(hostname_flag).map(str::to_owned),
-                });
-            }
-            if unresolved {
-                push(MergeSelector::Unresolvable("a GraphQL merge mutation has an unresolved pull request node"));
-            }
+        }
+        if unresolved {
+            push(MergeSelector::Unresolvable("a GraphQL merge mutation has an unresolved pull request node"));
         }
     }
     merges
@@ -429,9 +421,9 @@ fn hostname_flag<'a>(tokens: &[&'a str]) -> Option<&'a str> {
     })
 }
 
-fn graphql_input_file(tokens: &[&str]) -> bool {
-    let [program, "api", args @ ..] = tokens else { return false; };
-    if !is_gh(program) { return false; }
+fn gh_graphql_input<'a>(tokens: &[&'a str]) -> Option<Option<&'a str>> {
+    let [program, "api", args @ ..] = tokens else { return None; };
+    if !is_gh(program) { return None; }
     let mut args = args.iter().copied();
     let mut endpoint = None;
     let mut input = None;
@@ -452,7 +444,7 @@ fn graphql_input_file(tokens: &[&str]) -> bool {
             },
         }
     }
-    endpoint == Some("graphql") && input.is_some_and(|path| !path.is_empty() && path != "-")
+    (endpoint == Some("graphql")).then_some(input.filter(|path| !path.is_empty()))
 }
 
 #[track_caller]
@@ -622,7 +614,16 @@ fn resolve_nodes(cwd: &Path, ids: &[String], host: Option<&str>) -> Vec<Result<P
     }).collect()
 }
 
-fn graphql_merge_ids(tokens: &[&str]) -> (Vec<String>, bool) {
+fn graphql_merge_ids(tokens: &[&str], opaque_graphql: &mut bool) -> (Vec<String>, bool) {
+    let input = match gh_graphql_input(tokens) {
+        Some(input) => input,
+        None if tokens.first().is_some_and(|program| program_name(program) == "curl") => None,
+        None => return (Vec::new(), false),
+    };
+    if input.is_some_and(|path| path != "-") {
+        *opaque_graphql = true;
+        return (Vec::new(), false);
+    }
     let fields: std::collections::HashMap<&str, &str> = tokens.iter().enumerate()
         .filter_map(|(index, token)| {
             let field = match *token {
@@ -641,6 +642,10 @@ fn graphql_merge_ids(tokens: &[&str]) -> (Vec<String>, bool) {
         }?;
         serde_json::from_str(value).ok()
     });
+    if input == Some("-") && body.is_none() {
+        *opaque_graphql = true;
+        return (Vec::new(), false);
+    }
     let query = match &body {
         Some(body) => body.get("query").and_then(serde_json::Value::as_str),
         None => fields.get("query").copied(),
@@ -826,7 +831,7 @@ pub(crate) fn github_merge_refusal_with_supervisor(
     let mut opaque_graphql = false;
     let merges = github_merges_in_depth(command, 0, &mut opaque_graphql);
     if opaque_graphql {
-        tracing::warn!(code = "PR_VERIFIER_LOOKUP_FAILED", "Raw GitHub merge: GraphQL input file is opaque to the verifier");
+        tracing::warn!(code = "PR_VERIFIER_LOOKUP_FAILED", "Raw GitHub merge: GraphQL input is opaque to the verifier");
     }
     let mut lookups = Vec::new();
     for merge in &merges {

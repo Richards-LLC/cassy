@@ -2847,7 +2847,8 @@ fn latest_repeated_rejection_with_conn(conn: &Connection, task_id: &str) -> Resu
     let Some(latest) = rows.next()? else { return Ok(None) };
     let id = latest.get(0)?;
     let created_at: String = latest.get(1)?;
-    let count = latest.get(2)?;
+    let count = u64::try_from(latest.get::<_, i64>(2)?)
+        .map_err(|error| StoreError::Parse(format!("invalid rejection count: {error}")))?;
     if count < 2 { return Ok(None); }
     let created_at = DateTime::parse_from_rfc3339(&created_at)
         .map_err(|error| StoreError::Parse(format!("invalid rejection timestamp: {error}")))?

@@ -38,6 +38,8 @@ pub struct WorkerTaskQueue {
     pub starting: bool,
     #[serde(default)]
     pub dispatch_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_review_artifact: Option<String>,
     /// A queued successor cannot start in this predecessor conversation.
     #[serde(default)]
     pub context_reset_from: Option<String>,

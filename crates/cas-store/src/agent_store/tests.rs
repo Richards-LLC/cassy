@@ -539,7 +539,7 @@ fn test_lease_renewal() {
 /// are never renewed" (found while verifying cas-d165). Before this fix,
 /// `renew_lease` had zero production call sites for task leases at all.
 #[test]
-fn test_heartbeat_renews_task_lease_past_original_duration() {
+fn test_heartbeat_only_renews_unexpired_task_leases() {
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (temp, store) = create_test_store(&mut env);
 
@@ -555,14 +555,12 @@ fn test_heartbeat_renews_task_lease_past_original_duration() {
     task.assignee = Some("agent-hb-renew".into());
     tasks.add(&task).unwrap();
 
-    // Seed an already expired active lease; heartbeat must renew it before reclaim.
     store
-        .try_claim("task-hb-renew", "agent-hb-renew", -60, None)
+        .try_claim("task-hb-renew", "agent-hb-renew", 60, None)
         .unwrap();
 
     let before = store.get_lease("task-hb-renew").unwrap().unwrap();
 
-    // Heartbeat must move the expired deadline into the future.
     store.heartbeat("agent-hb-renew").unwrap();
 
     let after = store.get_lease("task-hb-renew").unwrap().unwrap();
@@ -575,16 +573,12 @@ fn test_heartbeat_renews_task_lease_past_original_duration() {
         "heartbeat-driven renewal must be recorded the same way explicit renew_lease is"
     );
 
-    // Reclaim now would collect the seeded lease without renewal.
-    let reclaimed = store.reclaim_expired_leases().unwrap();
-    assert_eq!(
-        reclaimed, 0,
-        "a heartbeat-renewed lease must survive past its original claim duration"
-    );
-    assert!(
-        store.get_lease("task-hb-renew").unwrap().is_some(),
-        "task-hb-renew's lease must still be active after a heartbeat renewed it"
-    );
+    store.renew_lease("task-hb-renew", "agent-hb-renew", -60).unwrap();
+    let expired = store.get_lease("task-hb-renew").unwrap().unwrap();
+    store.heartbeat("agent-hb-renew").unwrap();
+    assert!(store.renew_lease("task-hb-renew", "agent-hb-renew", 120).is_err());
+    assert_eq!(store.get_lease("task-hb-renew").unwrap().unwrap().expires_at, expired.expires_at);
+    assert_eq!(store.reclaim_expired_leases().unwrap(), 1);
 }
 
 /// cas-85d9: heartbeat must ALSO renew worktree leases at the store layer.

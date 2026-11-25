@@ -407,6 +407,349 @@ fn issue_delivery(f: &Fixture, id: &str, target: &str) -> (PathBuf, String) {
     (checkout, lane)
 }
 
+async fn park_for_repeat_review_gh2373(f: &Fixture, id: &str, target: &str, train: Option<&Task>) {
+    let (checkout, lane) = issue_delivery(f, id, target);
+    if let Some(train) = train {
+        open_task_store(&f.cas_dir()).unwrap().add_dependency(&Dependency::new(
+            id.into(), train.id.clone(), DependencyType::ParentChild,
+        )).unwrap();
+    }
+    std::fs::write(checkout.join("feature.rs"), "pub fn feature() {}\n").unwrap();
+    git(&checkout, &["add", "feature.rs"]);
+    git(&checkout, &["commit", "-qm", &format!("feat({id}): implement transition")]);
+    git(&checkout, &["push", "-q", "origin", &lane]);
+    let response = call(&f.worker, serde_json::json!({
+        "action":"close", "id":id, "reason":"Transition implemented",
+    })).await;
+    assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{response}");
+}
+
+async fn reject_repeat_review_gh2373(f: &Fixture, id: &str, finding: &str) -> serde_json::Value {
+    let owner = "nocode-supervisor-session";
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &f.cas_dir(), id, owner, owner, &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10), false,
+    ).unwrap();
+    let request = serde_json::json!({
+        "action":"add", "task_id":id, "dispatch_id":dispatch.id, "status":"rejected", "summary":finding,
+    });
+    let response = f.supervisor.verification(Parameters(serde_json::from_value(request.clone()).unwrap())).await.unwrap();
+    assert_ne!(response.is_error, Some(true), "{response:?}");
+    let verdict = cas_store::get_verification_for_dispatch(&f.cas_dir(), &dispatch.id).unwrap().unwrap();
+    assert_eq!(verdict.status, cas_types::VerificationStatus::Rejected);
+    request
+}
+
+async fn link_repeat_review_gh2373(f: &Fixture, id: &str, path: &Path) -> String {
+    f.supervisor.artifact(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"publish", "task_id":id, "path":path,
+    })).unwrap())).await.unwrap();
+    let artifact = cas_store::SqliteArtifactStore::open(&f.cas_dir()).unwrap()
+        .list_for_task(id).unwrap().into_iter().find(|artifact|
+            Some(artifact.name.as_str()) == path.file_name().and_then(std::ffi::OsStr::to_str)
+        ).unwrap();
+    call(&f.supervisor, serde_json::json!({"action":"notes", "id":id, "note_type":"decision",
+        "notes":format!("whole-flow review: {}", artifact.id)})).await;
+    artifact.id
+}
+
+#[tokio::test]
+async fn repeat_review_every_entry_refuses_g172_gh2373() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-2373";
+    env.set("CAS_AGENT_ROLE", "worker");
+    park_for_repeat_review_gh2373(&f, id, "main", None).await;
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    reject_repeat_review_gh2373(&f, id, "The abort transition is unreachable").await;
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let session = "repeat-review-queue";
+    for actor in ["nocode-supervisor-session", "nocode-worker-session"] {
+        let mut registration = agents.get(actor).unwrap();
+        registration.factory_session = Some(session.into());
+        registration.metadata.insert("clone_path".into(), f.dir.path().display().to_string());
+        agents.update(&registration).unwrap();
+    }
+    let mut predecessor = assigned("cas-2373-predecessor", TaskType::Feature, "main");
+    f.put(&predecessor);
+    let core = CasCore::with_daemon(f.cas_dir(), None, None);
+    core.set_agent_id_for_testing("nocode-supervisor-session".into());
+    reject_repeat_review_gh2373(&f, id, "A stale queue can claim the successor").await;
+    core.configure_worker_task_queue(WORKER, Some(vec![id.into()]), None).await.unwrap();
+    predecessor.status = TaskStatus::AwaitingMerge;
+    f.put(&predecessor);
+    open_agent_store(&f.cas_dir()).unwrap().register(&Agent::new_with_role(
+        "replacement-session".into(), "replacement".into(), AgentRole::Worker,
+    )).unwrap();
+    let request = serde_json::json!({"action":"request_changes", "id":id, "reason":"Correct the mismatches"});
+    let assignment = serde_json::json!({"action":"update", "id":id, "assignee":"replacement"});
+    let transfer = serde_json::json!({"action":"transfer", "id":id, "to_agent":"replacement", "supervisor_override":true});
+    let parked = f.task(id);
+    let mut failures = Vec::new();
+    for (role, status, attempt) in [
+        ("supervisor", TaskStatus::AwaitingMerge, request.clone()),
+        ("supervisor", TaskStatus::AwaitingMerge, assignment),
+        ("supervisor", TaskStatus::AwaitingMerge, transfer),
+        ("worker", TaskStatus::Open, serde_json::json!({"action":"claim", "id":id})),
+        ("worker", TaskStatus::Open, serde_json::json!({"action":"start", "id":id})),
+        ("supervisor", TaskStatus::Blocked, serde_json::json!({"action":"reopen", "id":id, "reason":"Reopen repair"})),
+        ("supervisor", TaskStatus::AwaitingMerge, serde_json::json!({"action":"update", "id":id, "proof_scope_fix":true, "proof_targets":["transition suite"], "reason":"Widen proof"})),
+        ("supervisor", TaskStatus::Blocked, serde_json::json!({"action":"update", "id":id, "status":"open"})),
+        ("supervisor", TaskStatus::Open, serde_json::json!({"action":"update", "id":id, "status":"in_progress"})),
+    ] {
+        let mut before = parked.clone();
+        before.status = status;
+        f.put(&before);
+        env.set("CAS_AGENT_ROLE", role);
+        let service = if role == "worker" { &f.worker } else { &f.supervisor };
+        let result = service.task(Parameters(serde_json::from_value(attempt.clone()).unwrap())).await;
+        let after = f.task(id);
+        if !result.as_ref().is_err_and(|error| crate::gates::codes_in(&error.message).contains(&"G-172"))
+            || after.status != before.status || after.assignee != before.assignee
+        {
+            failures.push(format!("{attempt}: {result:?}; state={:?}/{:?}", after.status, after.assignee));
+        }
+    }
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let mut queued = parked.clone();
+    queued.status = TaskStatus::Open;
+    queued.assignee = None;
+    queued.execution_note = Some("no-code".into());
+    queued.deliverables.factory_branch_start = None;
+    f.put(&queued);
+    let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap();
+    let cursor = queues.get(session, WORKER).unwrap();
+    assert_eq!(cursor.current_task.as_deref(), Some(predecessor.id.as_str()));
+    assert_eq!(cursor.pending, vec![id.to_string()]);
+    let lease = || agents.get_lease(id).unwrap().map(|lease| (lease.agent_id, lease.epoch, lease.status));
+    let before_lease = lease();
+    let repeat_hold = |error: &McpError| {
+        error.data.as_ref().is_some_and(|data| data["rule_id"] == "repeat_review_required")
+            && crate::gates::codes_in(&error.message).contains(&"G-172")
+    };
+    let queue_result = core.advance_queue_after_delivery(&predecessor.id).await;
+    let after = f.task(id);
+    if !queue_result.as_ref().is_err_and(repeat_hold)
+        || after.status != queued.status || after.assignee != queued.assignee
+        || queues.get(session, WORKER).unwrap() != cursor || lease() != before_lease
+    {
+        failures.push(format!("ordered queue: {queue_result:?}; state={:?}/{:?}", after.status, after.assignee));
+    }
+
+    queued.status = TaskStatus::InProgress;
+    queued.assignee = Some(WORKER.into());
+    f.put(&queued);
+    let mut recovery_cursor = queues.get(session, WORKER).unwrap();
+    recovery_cursor.current_task = Some(id.into());
+    recovery_cursor.current_started = false;
+    recovery_cursor.pending.clear();
+    recovery_cursor.dispatch_from = Some(predecessor.id.clone());
+    recovery_cursor.starting = true;
+    recovery_cursor.dispatch_revision = recovery_cursor.revision + 1;
+    queues.save(session, WORKER, &mut recovery_cursor).unwrap();
+    let before_retry = lease();
+    let retry = core.advance_queue_after_delivery(&predecessor.id).await;
+    let after_retry = lease();
+    if !retry.as_ref().is_err_and(repeat_hold)
+        || after_retry != before_retry || queues.get(session, WORKER).unwrap() != recovery_cursor
+    {
+        failures.push(format!("queue retry: {retry:?}; lease {before_retry:?} -> {after_retry:?}"));
+    }
+    if let Some((holder, _, cas_types::LeaseStatus::Active)) = after_retry {
+        agents.release_lease(id, &holder).unwrap();
+    }
+
+    env.set("CAS_AGENT_ROLE", "worker");
+    let before_claim = lease();
+    let before_cursor = queues.get(session, WORKER).unwrap();
+    let claim = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"claim", "id":id,
+    })).unwrap())).await;
+    if !claim.as_ref().is_err_and(repeat_hold)
+        || lease() != before_claim || queues.get(session, WORKER).unwrap() != before_cursor
+    {
+        failures.push(format!("manual claim: {claim:?}; lease {before_claim:?} -> {:?}", lease()));
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+    let mut cursor = cursor;
+    cursor.revision = before_cursor.revision;
+    queues.save(session, WORKER, &mut cursor).unwrap();
+    f.put(&parked);
+
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    call(&f.supervisor, serde_json::json!({"action":"notes", "id":id, "note_type":"decision",
+        "notes":"whole-flow review: art-missing"})).await;
+    let refusal = f.supervisor.task(Parameters(serde_json::from_value(request.clone()).unwrap()))
+        .await.unwrap_err();
+    assert!(crate::gates::codes_in(&refusal.message).contains(&"G-172"), "{refusal:?}");
+    assert_eq!(refusal.data.as_ref().unwrap()["rule_id"], "repeat_review_required");
+
+    let receipt = f.artifact(id);
+    link_repeat_review_gh2373(&f, id, &receipt).await;
+    let refusal = f.supervisor.task(Parameters(serde_json::from_value(request.clone()).unwrap()))
+        .await.unwrap_err();
+    assert!(crate::gates::codes_in(&refusal.message).contains(&"G-172"), "{refusal:?}");
+
+    let path = receipt.with_file_name("whole-flow-review.md");
+    std::fs::write(&path, "| Actor | Operation | Design | Observed |\n| --- | --- | --- | --- |\n| Owner | Abort | Can abort an open run | Unreachable |\n| Queue | Claim | Only current generation | Stale generation admitted |\n\n## Mismatches\n\n- Owner cannot abort an open run.\n- Queue admits a stale generation.\n").unwrap();
+    let review = link_repeat_review_gh2373(&f, id, &path).await;
+    call(&f.supervisor, request).await;
+    assert_eq!(f.task(id).status, TaskStatus::Open);
+    let checkout = f.cas_dir().join("worktrees").join(WORKER);
+    let mut registration = agents.get("nocode-worker-session").unwrap();
+    registration.metadata.insert("clone_path".into(), checkout.display().to_string());
+    agents.update(&registration).unwrap();
+    env.set("CAS_AGENT_ROLE", "worker");
+    f.worker.coordination(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"inbox_poll",
+    })).unwrap())).await.unwrap();
+    let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+    assert_eq!(f.task(id).status, TaskStatus::InProgress);
+    assert!(started.contains(&review));
+}
+
+#[tokio::test]
+async fn repeat_rejection_holds_automatic_conflict_return_gh2373() {
+    let mut env = TestEnvGuard::temp_home();
+    let target = "epic/conflict";
+    let f = fixture(&mut env, target);
+    let id = "cas-2373-conflict";
+    env.set("CAS_AGENT_ROLE", "worker");
+    park_for_repeat_review_gh2373(&f, id, target, None).await;
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    reject_repeat_review_gh2373(&f, id, "The abort transition is unreachable").await;
+    reject_repeat_review_gh2373(&f, id, "A stale queue can claim the successor").await;
+
+    let parked = f.task(id);
+    assert!(!parked.deliverables.merge_conflicted);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let lease_snapshot = || serde_json::to_value(agents.get_lease(id).unwrap()).unwrap();
+    let parked_lease = lease_snapshot();
+    let start = || f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"start", "id":id,
+    })).unwrap()));
+    env.set("CAS_AGENT_ROLE", "worker");
+    let clean_refusal = start().await.unwrap_err();
+    assert!(crate::gates::codes_in(&clean_refusal.message).contains(&"G-05"), "{clean_refusal:?}");
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let repo = f.dir.path();
+    git(repo, &["checkout", "-q", target]);
+    std::fs::write(repo.join("feature.rs"), "pub fn different_feature() {}\n").unwrap();
+    git(repo, &["add", "feature.rs"]);
+    git(repo, &["commit", "-qm", "conflicting target change"]);
+    git(repo, &["push", "-q", "origin", target]);
+    let refusal = f.supervisor.factory(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"worktree_merge", "id":format!("{LANE}-{id}"), "task_id":id,
+    })).unwrap())).await.unwrap_err();
+    assert!(crate::gates::codes_in(&refusal.message).contains(&"G-172"), "{refusal:?}");
+    assert_eq!(refusal.data.as_ref().and_then(|data| data["rule_id"].as_str()),
+        Some("repeat_review_required"), "{refusal:?}");
+    let held = f.task(id);
+    assert_eq!(held.status, TaskStatus::AwaitingMerge);
+    assert_eq!(held.deliverables.factory_branch_anchor, parked.deliverables.factory_branch_anchor);
+    assert!(!held.deliverables.merge_conflicted);
+
+    env.set("CAS_AGENT_ROLE", "worker");
+    for stored_conflict in [false, true] {
+        let mut before = held.clone();
+        if stored_conflict {
+            before.deliverables.merge_conflicted = true;
+            f.put(&before);
+        }
+        let before = serde_json::to_value(f.task(id)).unwrap();
+        let result = start().await;
+        let after = serde_json::to_value(f.task(id)).unwrap();
+        assert!(result.as_ref().is_err_and(|refusal| {
+            crate::gates::codes_in(&refusal.message).contains(&"G-172")
+                && refusal.data.as_ref().and_then(|data| data["rule_id"].as_str())
+                    == Some("repeat_review_required")
+        }), "stored_conflict={stored_conflict}: {result:?}");
+        assert_eq!(after, before);
+        assert_eq!(lease_snapshot(), parked_lease);
+    }
+}
+
+#[tokio::test]
+async fn detached_task_keeps_recorded_start_gh2373() {
+    let mut env = TestEnvGuard::temp_home();
+    for (keep, fail_first_notice) in [(false, true), (false, false), (true, false)] {
+        let target = "epic/release-train";
+        let f = fixture(&mut env, target);
+        let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+        config.set("factory.release_train", "true").unwrap();
+        config.save(&f.cas_dir()).unwrap();
+        let store = open_task_store(&f.cas_dir()).unwrap();
+        let mut train = Task::new("cas-2374-train".into(), "Release train".into());
+        train.task_type = TaskType::Epic;
+        train.labels.push("release-train".into());
+        train.branch = Some(target.into());
+        train.deliverables.work_target = assigned("unused", TaskType::Task, "main").deliverables.work_target;
+        f.put(&train);
+        let id = "cas-2374";
+        env.set("CAS_AGENT_ROLE", "worker");
+        park_for_repeat_review_gh2373(&f, id, target, Some(&train)).await;
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        reject_repeat_review_gh2373(&f, id, "The abort transition is unreachable").await;
+        assert_eq!(store.get_parent_epic(id).unwrap().unwrap().id, train.id);
+        if keep {
+            call(&f.supervisor, serde_json::json!({"action":"notes", "id":id, "note_type":"decision",
+                "notes":format!("keep release train: {}: Required correction for this cut", train.id)})).await;
+        }
+        let queue = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
+        let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+        if fail_first_notice {
+            conn.execute_batch("CREATE TRIGGER fail_repeat_notice BEFORE INSERT ON prompt_queue
+                WHEN NEW.source LIKE 'supervisor-notice:%' AND
+                (NEW.summary = 'repeat-review-train-detached' OR instr(NEW.prompt, 'G-172') > 0)
+                BEGIN SELECT RAISE(ABORT, 'injected repeat notice delivery error'); END;").unwrap();
+        }
+        let verdict = reject_repeat_review_gh2373(&f, id, "A stale queue can claim the successor").await;
+        assert_eq!(store.get_parent_epic(id).unwrap().map(|parent| parent.id), keep.then(|| train.id.clone()));
+        assert_eq!(f.task(id).deliverables.work_target.unwrap().target_branch, if keep { target } else { "main" });
+        let detach_notices = || queue.peek_all(50).unwrap().into_iter().filter(|row|
+            row.summary.as_deref() == Some("repeat-review-train-detached") && row.target == "supervisor").collect::<Vec<_>>();
+        let assert_notices = || {
+            let notices = detach_notices();
+            assert_eq!(notices.len(), usize::from(!keep));
+            assert!(notices.iter().all(|row| crate::supervisor_notices::is_action_envelope(&row.prompt)));
+            let notice = crate::store::open_supervisor_queue_store(&f.cas_dir()).unwrap()
+                .get_by_transition_key(&format!("repeat-review:{id}:{}",
+                    cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap()
+                        .latest_repeated_rejection(id).unwrap().unwrap().0)).unwrap().unwrap();
+            assert!(notice.prompt_delivered_at.is_some());
+            let payload: serde_json::Value = serde_json::from_str(&notice.payload).unwrap();
+            assert_eq!(payload["context"]["train_id"].as_str(), (!keep).then_some(train.id.as_str()));
+        };
+        if fail_first_notice {
+            assert!(detach_notices().is_empty());
+            conn.execute_batch("DROP TRIGGER fail_repeat_notice").unwrap();
+            for _ in 0..2 {
+                let retry = f.supervisor.verification(Parameters(serde_json::from_value(verdict.clone()).unwrap())).await.unwrap();
+                assert_ne!(retry.is_error, Some(true), "{retry:?}");
+                assert_notices();
+            }
+        } else {
+            assert_notices();
+        }
+        let parked = f.task(id);
+        let start = parked.deliverables.factory_branch_start.unwrap();
+        let work_target = parked.deliverables.work_target.unwrap();
+        assert_eq!(start.work_target, work_target);
+        if !keep {
+            assert!(parked.deliverables.work_target_pinned);
+            assert!(parked.deliverables.prior_work_targets.iter().any(|previous| previous.target_branch == target));
+            let path = f.artifact(id).with_file_name("whole-flow-review.md");
+            std::fs::write(&path, "| Actor | Operation | Design | Observed |\n| --- | --- | --- | --- |\n| Owner | Abort | Allowed | Unreachable |\n\n## Mismatches\n- Abort is unreachable.\n").unwrap();
+            link_repeat_review_gh2373(&f, id, &path).await;
+            call(&f.supervisor, serde_json::json!({"action":"request_changes", "id":id, "reason":"Correct the mismatches"})).await;
+            let restarted = CasCore::with_daemon(f.cas_dir(), None, None);
+            let returned = f.task(id);
+            assert_eq!(returned.status, TaskStatus::Open);
+            assert!(restarted.test_started_task_merge_source(f.dir.path(), &returned, &start.branch).unwrap());
+        }
+    }
+}
+
 /// Ordinary parks must make all close-reason proof portable before handing
 /// the delivery to a verifier on another machine (cas-dae1).
 #[tokio::test(flavor = "multi_thread")]
@@ -4039,10 +4382,10 @@ async fn booting_worker_assignments_reach_ordered_queue_gh1620() {
 #[tokio::test]
 async fn queued_task_starts_after_close_or_park_cas_8488() {
     let mut env = TestEnvGuard::temp_home();
-    for (park, pending_brief, cli, restart) in [
-        (true, false, "codex", false), // Default config must keep the context.
-        (false, false, "claude", true), (true, false, "codex", true),
-        (true, true, "codex", true),
+    for (park, pending_brief, cli, restart, direct_start) in [
+        (true, false, "codex", false, false), // Default config must keep the context.
+        (false, false, "claude", true, false), (true, false, "codex", true, false),
+        (true, true, "codex", true, false), (true, true, "codex", true, true),
     ] {
         let f = fixture(&mut env, "main");
         let config = f.cas_dir().join("config.toml");
@@ -4092,9 +4435,23 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         for id in ["cas-8488b", "cas-8488c"] {
             let mut next = assigned(id, TaskType::Task, "epic/next");
             next.status = TaskStatus::Open;
-            next.assignee = None;
+            if !direct_start || id != "cas-8488b" {
+                next.assignee = None;
+            }
             f.put(&next);
         }
+        let admitted_review = if pending_brief {
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            reject_repeat_review_gh2373(&f, "cas-8488b", "The abort transition is unreachable").await;
+            reject_repeat_review_gh2373(&f, "cas-8488b", "A stale queue can claim the successor").await;
+            let path = f.artifact("cas-8488b").with_file_name("whole-flow-review.md");
+            std::fs::write(&path, "| Actor | Operation | Design | Observed |\n| --- | --- | --- | --- |\n| Owner | Abort | Allowed | Unreachable |\n\n## Mismatches\n- Abort is unreachable.\n").unwrap();
+            let review = link_repeat_review_gh2373(&f, "cas-8488b", &path).await;
+            env.set("CAS_AGENT_ROLE", "worker");
+            Some((path, review))
+        } else {
+            None
+        };
         let queued = call(&f.supervisor, serde_json::json!({
             "action":"update", "id":"cas-8488b", "assignee":WORKER,
             "task_ids":["cas-8488b", "cas-8488c"],
@@ -4214,6 +4571,30 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             assert_eq!(f.task("cas-8488b").status, TaskStatus::Open, "a pending recycle must complete first");
             spawns.mark_processed(resets[0].id).unwrap();
             spawns.record_spawn_state(resets[0].id, cas_store::SpawnLifecycleState::Registered, Some(WORKER), None).unwrap();
+            if let Some((path, review)) = &admitted_review {
+                let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+                conn.execute_batch("CREATE TRIGGER defer_ordered_brief BEFORE INSERT ON prompt_queue
+                    WHEN NEW.source = 'task-assignment'
+                    BEGIN SELECT RAISE(ABORT, 'injected ordered prompt failure'); END;").unwrap();
+                if direct_start {
+                    call(&f.worker, serde_json::json!({"action":"start", "id":"cas-8488b"})).await;
+                } else {
+                    crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+                }
+                assert_eq!(f.task("cas-8488b").status, TaskStatus::InProgress);
+                let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap();
+                let pending = queues.get("queue-session", WORKER).unwrap();
+                assert!(pending.starting);
+                assert_eq!(pending.current_started, !direct_start);
+                conn.execute_batch("DROP TRIGGER defer_ordered_brief").unwrap();
+                let replacement = path.with_file_name("replacement-review.md");
+                std::fs::copy(path, &replacement).unwrap();
+                env.set("CAS_AGENT_ROLE", "supervisor");
+                let replacement = link_repeat_review_gh2373(&f, "cas-8488b", &replacement).await;
+                assert_ne!(&replacement, review);
+                assert_eq!(crate::mcp::tools::core::task::repeat_review::require_review(&f.cas_dir(), "cas-8488b").unwrap(), Some(replacement));
+                env.set("CAS_AGENT_ROLE", "worker");
+            }
             crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
         }
         let next = f.task("cas-8488b");
@@ -4231,6 +4612,9 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             && row.prompt.contains(&active_branch)), "{briefs:?}");
         let successor = briefs.iter().find(|row| row.target == WORKER
             && row.prompt.contains(&next.id) && row.prompt.contains(&active_branch)).unwrap();
+        if let Some((_, review)) = &admitted_review {
+            assert!(successor.prompt.contains(review));
+        }
         assert!(crate::prompt_revalidation::assignment_stale_task(
             &successor.prompt, next.status, next.assignee.as_deref(), WORKER,
         ).is_none());

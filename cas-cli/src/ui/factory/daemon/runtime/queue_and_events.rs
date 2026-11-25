@@ -16272,16 +16272,22 @@ mod tests {
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::TempDir::new().unwrap();
         assert!(std::process::Command::new("git").current_dir(temp.path())
-            .args(["init", "-q", "-b", "factory/worker-1"]).status().unwrap().success());
+            .args(["init", "-q", "-b", "main"]).status().unwrap().success());
         assert!(std::process::Command::new("git").current_dir(temp.path())
             .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
                 "commit", "--allow-empty", "-qm", "initial checkout"]).status().unwrap().success());
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         let focus = "visible chunks first";
-        std::fs::write(cas_dir.join("config.toml"), format!("[factory]\nfocus_mode='{focus}'\n")).unwrap();
+        std::fs::write(cas_dir.join("config.toml"), format!(
+            "[project]\ncanonical_id='reviewed-initial-queue'\n[factory]\nfocus_mode='{focus}'\n",
+        )).unwrap();
         let mut task = cas_types::Task::new("cas-brief2".into(), "Fix the sweep".into());
         task.description = "Apply rule-177 to the SMS send path.".into();
         task.execution_note = Some("no-code".into());
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:reviewed-initial-queue".into(),
+            target_branch: "main".into(),
+        });
         // cas-d8295: only a stakeholder rule's citation asks for markers.
         let mut rule = cas_types::Rule::new("rule-177".into(), "Only SMS sends".into());
         rule.stakeholder = Some(cas_types::StakeholderAttribution {
@@ -16339,9 +16345,9 @@ mod tests {
         ).await;
         let core = crate::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
         core.set_agent_id_for_testing(supervisor.id);
-        core.configure_worker_task_queue(&worker.name, Some(vec![task.id.clone()]), None).await.unwrap();
+        let queue_state = core.configure_worker_task_queue(&worker.name, Some(vec![task.id.clone()]), None).await.unwrap();
         let task = tasks.get(&task.id).unwrap();
-        assert_eq!(task.status, cas_types::TaskStatus::InProgress);
+        assert_eq!(task.status, cas_types::TaskStatus::InProgress, "{queue_state}");
         let cursor = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&cas_dir).unwrap()
             .get("factory-session", &worker.name).unwrap();
         assert!(cursor.current_started && !cursor.starting, "{cursor:?}");

@@ -1,0 +1,4 @@
+title: Commander journey double diverges from hub serializers
+statement: Session catalog, lease, session-end, supervisor command receipt and machine-event fixtures match the Rust hub wire schemas.
+tasks: [cas-b5b5]
+journeys: [HUB-J3, HUB-J14]

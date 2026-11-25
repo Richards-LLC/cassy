@@ -1125,6 +1125,7 @@ async fn park_requires_red_first_evidence_gh_2422() {
     env.set("RUSTUP_HOME", rustup);
     env.set("CARGO_HOME", cargo_home);
     env.set("CARGO_NET_OFFLINE", "true");
+    env.set("CARGO_BUILD_JOBS", "2");
     let cargo = Path::new(env!("CARGO"));
     let nextest = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(=gear::regression)"];
     let parameterized = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(gear::regression)"];
@@ -1132,6 +1133,8 @@ async fn park_requires_red_first_evidence_gh_2422() {
     let unrelated = ["nextest", "run", "-p", "widget", "--lib", "-E", "test(=gear::unrelated)"];
     let check = ["-p", "widget", "--tests"];
     let spare_check = ["-p", "spare", "--tests"];
+    let lib_check = ["-p", "widget", "--lib"];
+    let both_check = ["-p", "spare", "-p", "widget", "--tests"];
     let node = ["node", "--test", "gear.test.mjs"];
     let outer = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(park_requires_red_first_evidence_gh_2422)"];
     let signal = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(queued_task_starts_after_close_or_park_cas_8488)"];
@@ -1152,6 +1155,8 @@ async fn park_requires_red_first_evidence_gh_2422() {
         ("red checkpoint", Some("test-first"), Some(("HEAD^", &nextest[..])), true),
         ("compile failure at base", Some("test-first"), Some(("main", &check[..])), true),
         ("compile failure in another crate at base", Some("test-first"), Some(("main", &spare_check[..])), false),
+        ("compile failure of the library at base", Some("test-first"), Some(("main", &lib_check[..])), false),
+        ("compile failure across crates at base", Some("test-first"), Some(("main", &both_check[..])), true),
         ("unrelated failure at base", Some("test-first"), Some(("main", &unrelated[..])), false),
         ("node file setup failure", Some("test-first"), Some(("HEAD^", &node[..])), false),
         ("node before hook failure", Some("test-first"), Some(("HEAD^", &node[..])), false),
@@ -1161,6 +1166,7 @@ async fn park_requires_red_first_evidence_gh_2422() {
         ("node subtest aborted", Some("test-first"), Some(("HEAD^", &node[..])), false),
         ("node subtest hook failure", Some("test-first"), Some(("HEAD^", &node[..])), false),
         ("node inactive regression", Some("test-first"), Some(("HEAD^", &node[..])), false),
+        ("node dynamic regression", Some("test-first"), Some(("HEAD^", &node[..])), true),
         ("captured outer Nextest failure", Some("test-first"), Some(("HEAD^", &outer[..])), false),
         ("captured nested Nextest failure", Some("test-first"), Some(("HEAD^", &nextest[..])), false),
         ("captured Nextest signal", Some("test-first"), Some(("HEAD^", &signal[..])), false),
@@ -1173,8 +1179,10 @@ async fn park_requires_red_first_evidence_gh_2422() {
         ("receipt exact retry", Some("test-first"), Some(("main", &nextest[..])), true),
         ("receipt ordinary task", None, None, true),
     ] {
-        let f = fixture_with_gear(&mut env, if case == "compile failure at base" { &broken } else { &red }, &checkpoint);
-        if case == "compile failure in another crate at base" {
+        let broken_base = matches!(case, "compile failure at base" | "compile failure of the library at base"
+            | "compile failure across crates at base");
+        let f = fixture_with_gear(&mut env, if broken_base { &broken } else { &red }, &checkpoint);
+        if matches!(case, "compile failure in another crate at base" | "compile failure across crates at base") {
             let repo = f.dir.path();
             let spare = repo.join("crates/spare");
             std::fs::create_dir_all(spare.join("src")).unwrap();
@@ -1198,7 +1206,7 @@ async fn park_requires_red_first_evidence_gh_2422() {
         open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
         let gear_path = f.worker_path.join("crates/widget/src/gear.rs");
         let mut passing_rust = &nextest;
-        let mut green_source = green.clone();
+        let mut green_source = if case == "node dynamic regression" { gear("2", "assert_eq!(turn(), 2);") } else { green.clone() };
         if matches!(case, "nextest timeout" | "nextest leak failure") {
             let (config, regression) = if case == "nextest timeout" {
                 ("slow-timeout = { period = '250ms', terminate-after = 2 }", "std::thread::sleep(std::time::Duration::from_secs(5));")
@@ -1244,15 +1252,19 @@ async fn park_requires_red_first_evidence_gh_2422() {
                 ),
                 "node subtest regression" => (
                     "test('gear node regression', async t => { await t.test('inner', () => { throw Error('gear is stuck'); }); });\n",
-                    "test('gear node regression', () => {});\n",
+                    "test('gear node regression', async t => { await t.test('inner', () => {}); });\n",
                 ),
                 "node subtest aborted" => (
                     "test('gear node regression', async t => { await t.test('inner', { signal: AbortSignal.abort() }, () => {}); });\n",
-                    "test('gear node regression', () => {});\n",
+                    "test('gear node regression', async t => { await t.test('inner', () => {}); });\n",
                 ),
                 "node subtest hook failure" => (
                     "test('gear node regression', async t => { t.beforeEach(() => { throw Error('setup'); }); await t.test('inner', () => {}); });\n",
-                    "test('gear node regression', () => {});\n",
+                    "test('gear node regression', async t => { await t.test('inner', () => {}); });\n",
+                ),
+                "node dynamic regression" => (
+                    "test(`gear ${'node'} regression`, () => { throw Error('gear is stuck'); });\n",
+                    "test(`gear ${'node'} regression`, () => {});\n",
                 ),
                 _ => (
                     "test('gear node regression', () => { throw Error('gear is stuck'); });\n",
@@ -1300,7 +1312,8 @@ async fn park_requires_red_first_evidence_gh_2422() {
                 .flatten().filter_map(|directory| std::fs::read_dir(directory.path()).ok()).flatten().flatten()
                 .any(|entry| entry.file_name().to_string_lossy().contains("-red-"));
             if written != !matches!(case, "node file setup failure" | "node before hook failure" | "node abort signal" |
-                "captured nested Nextest failure" | "node subtest aborted" | "node subtest hook failure" | "nextest leak failure") {
+                "captured nested Nextest failure" | "node subtest aborted" | "node subtest hook failure" | "nextest leak failure" |
+                "compile failure of the library at base") {
                 violations.push(format!("{case}: unexpected red receipt presence {written}"));
             }
             if checkout == &linked {
@@ -1310,7 +1323,10 @@ async fn park_requires_red_first_evidence_gh_2422() {
             }
         }
         run(&f.worker_path, passing_rust).unwrap_or_else(|error| panic!("{case}: {error:#}\n{}", git(&f.worker_path, &["status", "--porcelain"])));
-        if case.starts_with("node ") { run(&f.worker_path, &node).unwrap_or_else(|error| panic!("{case}: {error:#}")); }
+        if case.starts_with("node ") && let Err(error) = run(&f.worker_path, &node) {
+            violations.push(format!("{case}: {error:#}"));
+            continue;
+        }
         let mut request = serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"});
         if case.starts_with("receipt ") {
             git(f.dir.path(), &["config", "user.name", "CAS Test"]);

@@ -1,4 +1,0 @@
-title: No-code report closed without a current independent verdict
-statement: A no-code spike or demo deliverable closes only on an approved verdict whose dispatch recorded the report inventory still current at close, at any depth; the verifier is shown that recorded inventory.
-tasks: [cas-0ff6]
-journeys: [FACTORY-CLOSE, FACTORY-MERGE]

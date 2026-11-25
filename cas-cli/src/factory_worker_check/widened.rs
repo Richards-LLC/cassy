@@ -497,6 +497,11 @@ mod tests {
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(file, contents).unwrap();
         }
+        let playwright = repo.join("hub-web/node_modules/.bin/playwright");
+        std::fs::create_dir_all(playwright.parent().unwrap()).unwrap();
+        std::fs::write(&playwright, javascript::tests::STAND_IN_PLAYWRIGHT).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&playwright, std::fs::Permissions::from_mode(0o755)).unwrap();
         let scopes = [scope(repo, helper)];
         assert_eq!(scopes, [Scope::Related(helper.into())]);
         let git = |args: &[&str]| super::git(repo, &[
@@ -518,11 +523,6 @@ mod tests {
                 (run.runner, run.files)
             }).collect::<Vec<_>>();
         assert_eq!(plans(), [("playwright", vec![journey.to_owned()]), ("vitest", vec![preview.to_owned()])]);
-        let playwright = repo.join("hub-web/node_modules/.bin/playwright");
-        std::fs::create_dir_all(playwright.parent().unwrap()).unwrap();
-        std::fs::write(&playwright, javascript::tests::STAND_IN_PLAYWRIGHT).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&playwright, std::fs::Permissions::from_mode(0o755)).unwrap();
         javascript::execute(cas_root, &["playwright".into(), helper.into()], repo, &[]).unwrap();
         let proof_missing = || missing(&PassingTests::new(cas_root, repo, &head), &scopes, &Default::default());
         assert_eq!(proof_missing(), scopes);

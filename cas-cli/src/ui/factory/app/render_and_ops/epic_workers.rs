@@ -7178,6 +7178,108 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
+    async fn peer_replacement_and_repark_sync_to_train_owner_cas_e27d() {
+        use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue};
+        use crate::mcp::tools::core::task::{audit, rebind};
+        use cas_types::{FactoryBranchStart, WorkTarget};
+        use std::io::Read;
+        use std::sync::{Arc, Mutex};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let server = MockServer::start().await;
+        let (project, team) = ("peer-replacement", "train-team");
+        let config = CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".into()),
+            team_id: Some(team.into()),
+            team_only: true,
+            ..Default::default()
+        };
+        let make_machine = || {
+            let temp = TempDir::new().unwrap();
+            let root = crate::store::init_cas_dir(temp.path()).unwrap();
+            std::fs::write(root.join("config.toml"), format!("[project]\ncanonical_id = \"{project}\"\n")).unwrap();
+            let queue = Arc::new(SyncQueue::open(&root).unwrap());
+            queue.init().unwrap();
+            let syncer = CloudSyncer::new_for_project(queue, config.clone(), CloudSyncerConfig::default(), project.into(), &root);
+            (temp, root, syncer)
+        };
+        let (_peer_dir, peer_root, peer) = make_machine();
+        let (_owner_dir, owner_root, owner) = make_machine();
+        config.save_to_cas_dir(&peer_root).unwrap();
+        let writer = open_task_store_cached(&peer_root).unwrap();
+        let owner_tasks = crate::store::open_task_store_local(&owner_root).unwrap();
+        let target = WorkTarget { repo_selector: format!("project:{project}"), target_branch: "epic/train".into() };
+        let start = |worker: &str| FactoryBranchStart {
+            work_target: target.clone(), assignee: worker.into(), branch: format!("factory/{worker}"), base_sha: "a".repeat(40),
+        };
+        let mut original = Task::new("cas-e27d".into(), "Peer delivery".into());
+        original.origin_project = Some(project.into());
+        original.updated_at -= chrono::Duration::minutes(10);
+        original.status = TaskStatus::AwaitingMerge;
+        original.assignee = Some("old-worker".into());
+        original.deliverables.work_target = Some(target.clone());
+        original.deliverables.factory_branch_start = Some(start("old-worker"));
+        original.deliverables.record_park(Some("factory/old-worker"), Some(&"b".repeat(40)), original.assignee.as_deref());
+        original.notes = audit::parked_note(original.updated_at, "Original delivery");
+        crate::store::open_task_store_local(&peer_root).unwrap().add(&original).unwrap();
+        owner_tasks.add(&original).unwrap();
+
+        let cloud_rows = Arc::new(Mutex::new(serde_json::Value::Null));
+        let uploaded = cloud_rows.clone();
+        Mock::given(method("POST")).and(path(format!("/api/teams/{team}/sync/push")))
+            .respond_with(move |request: &wiremock::Request| {
+                let mut body = Vec::new();
+                flate2::read::GzDecoder::new(request.body.as_slice()).read_to_end(&mut body).unwrap();
+                let envelope: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                *uploaded.lock().unwrap() = envelope["tasks"].clone();
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "synced": {"tasks": {"updated": 1}},
+                    "rows": [{"entity_type": "tasks", "id": envelope["tasks"][0]["id"], "outcome": "updated"}],
+                }))
+            }).mount(&server).await;
+        Mock::given(method("GET")).and(path(format!("/api/teams/{team}/sync/pull")))
+            .respond_with(move |_: &wiremock::Request| {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "tasks": cloud_rows.lock().unwrap().clone(), "pulled_at": chrono::Utc::now(), "team_id": team, "status": "ok",
+                }))
+            }).mount(&server).await;
+        let round_trip = || {
+            let pushed = peer.push_team(team).unwrap();
+            assert_eq!(pushed.pushed_tasks, 1, "{:?}", pushed.errors);
+            let pulled = owner.pull_team(team, project, &*crate::store::open_store_local(&owner_root).unwrap(), &*owner_tasks,
+                &*crate::store::open_rule_store_local(&owner_root).unwrap(), &*crate::store::open_skill_store_local(&owner_root).unwrap()).unwrap();
+            assert!(pulled.errors.is_empty(), "{:?}", pulled.errors);
+            let task = owner_tasks.get(&original.id).unwrap();
+            (task.status, task.assignee, task.deliverables.factory_branch_start.unwrap().branch, task.deliverables.parked_branch)
+        };
+
+        assert!(assign_task_to_new_worker(&peer_root, &original.id, "new-worker"));
+        let expected = writer.get(&original.id).unwrap();
+        let mut rebound = expected.clone();
+        rebind::rebind_start(&mut rebound, start("new-worker"), "peer-supervisor", "Replacement approved", rebind::StartAudit::Recorded);
+        rebound.deliverables.retain_factory_branch_anchor_as_history();
+        rebound.deliverables.parked_branch = None;
+        writer.update_if_current(&rebound, &expected).unwrap();
+
+        let expected = writer.get(&original.id).unwrap();
+        let mut started = expected.clone();
+        started.status = TaskStatus::InProgress;
+        writer.update_if_current(&started, &expected).unwrap();
+        assert_eq!(round_trip(), (TaskStatus::InProgress, Some("new-worker".into()), "factory/new-worker".into(), None));
+
+        let expected = writer.get(&original.id).unwrap();
+        let mut parked = expected.clone();
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.deliverables.record_park(Some("factory/new-worker"), Some(&"c".repeat(40)), parked.assignee.as_deref());
+        parked.notes.push_str(&format!("\n\n{}", audit::parked_note(chrono::Utc::now(), "Replacement delivery")));
+        writer.update_if_current(&parked, &expected).unwrap();
+        assert_eq!(round_trip(), (TaskStatus::AwaitingMerge, Some("new-worker".into()), "factory/new-worker".into(), Some("factory/new-worker".into())));
+    }
+
+    #[tokio::test]
     async fn dead_pane_recycle_reports_and_retries_retirement_failure_cas_f501() {
         let env = crate::test_support::TestEnvGuard::temp_home();
         for busy in [true, false] {

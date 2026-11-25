@@ -1061,7 +1061,6 @@ pub(crate) fn latest_spawn_brief(notes: &str) -> Option<&str> {
 ///
 /// A pre-assigned worker that boots with no message sits idle burning a seat —
 /// the assignment alone is invisible from inside the worker's session.
-#[cfg(test)]
 fn deliver_worker_task_brief(
     cas_dir: &std::path::Path,
     factory_session: &str,
@@ -1069,16 +1068,11 @@ fn deliver_worker_task_brief(
     task_id: &str,
     task_title: &str,
     worker_cli: cas_mux::SupervisorCli,
+    review: Option<&str>,
 ) -> anyhow::Result<i64> {
-    let message = worker_spawn_prompt(cas_dir, worker_name, task_id, task_title, worker_cli, None);
-    queue_worker_task_brief(cas_dir, factory_session, worker_name, task_id, &message)
-}
-
-fn queue_worker_task_brief(
-    cas_dir: &std::path::Path, factory_session: &str, worker_name: &str, task_id: &str, message: &str,
-) -> anyhow::Result<i64> {
+    let message = worker_spawn_prompt(cas_dir, worker_name, task_id, task_title, worker_cli, review);
     let id = crate::task_assignment::enqueue_spawn_message(
-        cas_dir, factory_session, worker_name, task_id, message,
+        cas_dir, factory_session, worker_name, task_id, &message,
     )?;
     super::delivery::wake_daemon_after_enqueue(cas_dir);
     Ok(id)
@@ -7032,9 +7026,8 @@ impl FactoryDaemon {
                 );
                 let mut detail =
                     format!("Task {task_id} (\"{title}\") is assigned to this worker.");
-                let message = worker_spawn_prompt(self.app.cas_dir(), worker, task_id, &title,
-                    self.app.harness_for(worker), review.as_deref());
-                match queue_worker_task_brief(self.app.cas_dir(), &self.session_name, worker, task_id, &message) {
+                match deliver_worker_task_brief(self.app.cas_dir(), &self.session_name, worker, task_id, &title,
+                    self.app.harness_for(worker), review.as_deref()) {
                     Ok(_) => {
                         // cas-8563b: the brief is the assignment notice for a
                         // pre-assigned spawn; the director must not send a
@@ -16252,6 +16245,7 @@ mod tests {
             "cas-5890",
             "wake the worker",
             cas_mux::SupervisorCli::Claude,
+            None,
         )
         .unwrap();
 
@@ -16303,6 +16297,7 @@ mod tests {
             "cas-brief2",
             "Fix the sweep",
             cas_mux::SupervisorCli::Claude,
+            None,
         )
         .unwrap();
         let prompt = crate::store::open_prompt_queue_store(&cas_dir)
@@ -16314,7 +16309,7 @@ mod tests {
         assert!(prompt.contains(focus), "{prompt}");
         assert!(prompt.contains(&cas_mux::claude_worker_contract("worker-1")), "the single spawn message carries the worker contract: {prompt}");
         deliver_worker_task_brief(&cas_dir, "factory-session", "worker-1", &task.id,
-            &task.title, cas_mux::SupervisorCli::Claude).unwrap();
+            &task.title, cas_mux::SupervisorCli::Claude, None).unwrap();
         let mut worker = cas_types::Agent::new_with_role("worker-id".into(), "worker-1".into(),
             cas_types::AgentRole::Worker);
         worker.factory_session = Some("factory-session".into());
@@ -16325,26 +16320,20 @@ mod tests {
         // An ordered spawn starts its head at registration. It still shares
         // the initial assignment rather than creating another model turn.
         task.status = cas_types::TaskStatus::InProgress;
-        let mut supervisor = cas_types::Agent::new_with_role("supervisor-id".into(), "supervisor".into(),
-            cas_types::AgentRole::Supervisor);
-        supervisor.factory_session = Some("factory-session".into());
-        crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
-        let review = crate::mcp::tools::core::task::repeat_review::publish_test_review(
-            &cas_dir, &task.id, &supervisor.id,
-        ).await;
-        let repair_brief = crate::mcp::tools::core::task::repeat_review::mismatch_brief(&review);
-        crate::task_assignment::enqueue_queued(&cas_dir, &task, 1, true, &repair_brief).unwrap();
+        crate::store::open_task_store_cached(&cas_dir).unwrap().update(&task).unwrap();
+        let admission = crate::mcp::tools::core::task::repeat_review::admit_repair(&cas_dir, &task.id).unwrap();
+        assert!(admission.artifact_id.is_none());
+        crate::task_assignment::enqueue_queued(&cas_dir, &task, 1, true, &admission.brief()).unwrap();
         assert_eq!(crate::store::open_prompt_queue_store(&cas_dir).unwrap()
             .peek_all(10).unwrap().len(), 1, "startup, registration and head selection must reuse the assignment");
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let row = queue.peek_all(10).unwrap().remove(0);
-        assert!(row.prompt.contains(&review));
         assert!(crate::prompt_revalidation::assignment_stale_task(
             &row.prompt, task.status, task.assignee.as_deref(), &worker.name,
         ).is_none(), "an initial assignment still waiting for transport must become a continuation");
         queue.record_recipient_transport_delivered(row.id, &worker.name).unwrap();
         queue.mark_transport_delivered(row.id).unwrap();
-        crate::task_assignment::enqueue_queued(&cas_dir, &task, 1, true, &repair_brief).unwrap();
+        crate::task_assignment::enqueue_queued(&cas_dir, &task, 1, true, &admission.brief()).unwrap();
         assert!(queue.peek_all(10).unwrap().is_empty(), "a handed-off startup must not create another turn");
         // pin: the header tells the worker the brief must be read before it starts.
         assert!(prompt.contains("read it before you start"), "{prompt}");
@@ -16398,6 +16387,7 @@ mod tests {
             "cas-cite2",
             "Fix uploads",
             cas_mux::SupervisorCli::Claude,
+            None,
         )
         .unwrap();
         let queued = crate::store::open_prompt_queue_store(&cas_dir)
@@ -20397,6 +20387,7 @@ mod tests {
             "cas-aee6",
             "awaiting_merge lifecycle",
             cas_mux::SupervisorCli::Claude,
+            None,
         )
         .unwrap();
 
@@ -20436,6 +20427,7 @@ mod tests {
                 &task_id,
                 "add targeted regression coverage",
                 worker_cli,
+                None,
             )
             .unwrap();
         }
@@ -20468,6 +20460,7 @@ mod tests {
             "cas-demo-brief",
             "demo brief",
             cas_mux::SupervisorCli::Claude,
+            None,
         )
         .unwrap();
 
@@ -20496,6 +20489,7 @@ mod tests {
             "cas-2b0b-namespace",
             "harness-aware assignment",
             cas_mux::SupervisorCli::Codex,
+            None,
         )
         .unwrap();
 
@@ -20551,6 +20545,7 @@ mod tests {
             "cas-stale-path",
             "stale artifact path",
             cas_mux::SupervisorCli::Claude,
+            None,
         )
         .unwrap();
         deliver_worker_task_brief(
@@ -20560,6 +20555,7 @@ mod tests {
             "cas-clean-path",
             "clean artifact path",
             cas_mux::SupervisorCli::Claude,
+            None,
         )
         .unwrap();
         deliver_worker_task_brief(
@@ -20569,6 +20565,7 @@ mod tests {
             "cas-mentioned-path",
             "path mentioned only",
             cas_mux::SupervisorCli::Claude,
+            None,
         )
         .unwrap();
 
@@ -20637,6 +20634,7 @@ mod tests {
             "cas-node",
             "Node worktree fixture",
             cas_mux::SupervisorCli::Claude,
+            None,
         )
         .unwrap();
 

@@ -2755,14 +2755,23 @@ impl CasCore {
         } else {
             super::repeat_review::RepairAdmission::default()
         };
-        if let Some(principal) = principal.as_mut() {
-            principal.persist_review(repeat_admission.artifact_id.as_deref())?;
-        }
-        if queued_start {
+        let _queue_lock = if queued_start {
             let worker = worker.as_ref().ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS,
                 crate::gates::tag("G-09", "Queued start requires its registered worker")))?;
+            let artifact_id = repeat_admission.artifact_id.as_deref();
+            let lock = if task.status != TaskStatus::Open {
+                None
+            } else if let Some(principal) = principal.as_mut() {
+                principal.persist_review(artifact_id)?;
+                None
+            } else {
+                Some(crate::worker_task_queue::checkpoint_reserved_start_review(
+                    &self.cas_root, worker, &req.id, artifact_id,
+                )?)
+            };
             crate::worker_task_queue::ensure_owned_queue_checkout(&self.cas_root, worker, Some(&req.id))?;
-        }
+            lock
+        } else { None };
 
         crate::task_assignment::ensure_review_assignment(
             task.review_dispatch_id.as_deref(),

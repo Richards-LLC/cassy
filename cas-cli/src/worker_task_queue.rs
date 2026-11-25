@@ -188,13 +188,34 @@ impl QueueStartPrincipal<'_> {
     }
 
     pub(crate) fn persist_review(&mut self, artifact_id: Option<&str>) -> Result<(), McpError> {
-        if self.queue.dispatch_review_artifact.as_deref() != artifact_id {
-            self.queue.dispatch_review_artifact = artifact_id.map(str::to_owned);
-            let session = self.agent.factory_session.as_deref().expect("validated session");
-            self.queues.save(session, &self.agent.name, self.queue).map_err(error)?;
-        }
-        Ok(())
+        persist_start_review(self.queues, &self.agent, self.queue, artifact_id)
     }
+}
+
+fn persist_start_review(
+    queues: &SqliteWorkerTaskQueueStore, worker: &Agent, queue: &mut WorkerTaskQueue,
+    artifact_id: Option<&str>,
+) -> Result<(), McpError> {
+    if queue.dispatch_review_artifact.as_deref() != artifact_id {
+        queue.dispatch_review_artifact = artifact_id.map(str::to_owned);
+        let session = worker.factory_session.as_deref().expect("validated session");
+        queues.save(session, &worker.name, queue).map_err(error)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn checkpoint_reserved_start_review(
+    root: &Path, worker: &Agent, task_id: &str, artifact_id: Option<&str>,
+) -> Result<File, McpError> {
+    let lock = worker_lock(root, worker, "queue")?;
+    let session = worker.factory_session.as_deref().expect("validated session");
+    let queues = SqliteWorkerTaskQueueStore::open(root).map_err(error)?;
+    let mut queue = queues.get(session, &worker.name).map_err(error)?;
+    if !queue.starting || queue.current_task.as_deref() != Some(task_id) {
+        return Err(error("Queued start reservation changed; retry task start"));
+    }
+    persist_start_review(&queues, worker, &mut queue, artifact_id)?;
+    Ok(lock)
 }
 
 /// Resolve booting names through their durable, session-scoped spawn receipt.

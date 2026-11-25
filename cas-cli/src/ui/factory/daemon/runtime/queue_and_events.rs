@@ -16271,8 +16271,9 @@ mod tests {
     /// Communication contract v2, P3.7 (cas-ee68): the worker's spawn message
     /// quotes the newest supervisor spawn brief stored on its task, and only
     /// that brief, so the worker has it before it can start the task.
-    #[test]
-    fn ct2_p3_spawn_message_carries_the_supervisor_brief() {
+    #[tokio::test]
+    async fn ct2_p3_spawn_message_carries_the_supervisor_brief() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         let focus = "visible chunks first";
@@ -16324,14 +16325,20 @@ mod tests {
         // An ordered spawn starts its head at registration. It still shares
         // the initial assignment rather than creating another model turn.
         task.status = cas_types::TaskStatus::InProgress;
-        let review = "art-admitted-review";
-        let repair_brief = crate::mcp::tools::core::task::repeat_review::mismatch_brief(review);
+        let mut supervisor = cas_types::Agent::new_with_role("supervisor-id".into(), "supervisor".into(),
+            cas_types::AgentRole::Supervisor);
+        supervisor.factory_session = Some("factory-session".into());
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+        let review = crate::mcp::tools::core::task::repeat_review::publish_test_review(
+            &cas_dir, &task.id, &supervisor.id,
+        ).await;
+        let repair_brief = crate::mcp::tools::core::task::repeat_review::mismatch_brief(&review);
         crate::task_assignment::enqueue_queued(&cas_dir, &task, 1, true, &repair_brief).unwrap();
         assert_eq!(crate::store::open_prompt_queue_store(&cas_dir).unwrap()
             .peek_all(10).unwrap().len(), 1, "startup, registration and head selection must reuse the assignment");
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let row = queue.peek_all(10).unwrap().remove(0);
-        assert!(row.prompt.contains(review));
+        assert!(row.prompt.contains(&review));
         assert!(crate::prompt_revalidation::assignment_stale_task(
             &row.prompt, task.status, task.assignee.as_deref(), &worker.name,
         ).is_none(), "an initial assignment still waiting for transport must become a continuation");

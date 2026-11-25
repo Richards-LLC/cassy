@@ -3548,8 +3548,8 @@ mod worker_attention_tests {
         );
     }
 
-    #[test]
-    fn late_listed_merge_queue_run_still_returns_task_for_repair_cas_738f() {
+    #[tokio::test]
+    async fn late_listed_merge_queue_run_still_returns_task_for_repair_cas_738f() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_FACTORY_SESSION", "late-queue-run");
         let cas_dir = crate::store::init_cas_dir(env.home()).unwrap();
@@ -3568,17 +3568,27 @@ mod worker_attention_tests {
             "queue-exit:2026-11-05T23:30:00Z", Some("Fast Validation"),
             MergeQueueExit { head_sha: "1111aaaa", group_mate_failed: false },
         );
-        assert!(matches!(eject(None), WorkerAttentionRelayOutcome::Persisted { .. }));
+        let first = eject(None);
+        assert!(matches!(first, WorkerAttentionRelayOutcome::Persisted { .. }));
         assert_eq!(task_store.get("cas-late-run").unwrap().status, cas_types::TaskStatus::AwaitingMerge);
-        for _ in 0..2 {
-            assert!(matches!(eject(Some(601)), WorkerAttentionRelayOutcome::Persisted { .. }));
-            let repaired = task_store.get("cas-late-run").unwrap();
-            assert_eq!(repaired.status, cas_types::TaskStatus::Open);
-            // pin: repair markers account for exactly one cycle per failed run.
-            assert_eq!(repaired.notes.matches("merge-queue-repair run=601 head=1111aaaa").count(), 1);
-        }
-        assert_eq!(crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap().len(), 2,
-            "late run evidence must not duplicate the already delivered relay");
+        record_bound_rejection(&cas_dir, &task.id, "ver-first");
+        record_bound_rejection(&cas_dir, &task.id, "ver-second");
+        let review = crate::mcp::tools::core::task::repeat_review::publish_test_review(
+            &cas_dir, &task.id, "supervisor-id",
+        ).await;
+
+        let late = eject(Some(601));
+        assert_eq!(task_store.get(&task.id).unwrap().status, cas_types::TaskStatus::Open);
+        let WorkerAttentionRelayOutcome::Persisted { notification_id } = late else { panic!("{late:?}") };
+        assert_ne!(late, first);
+        assert_eq!(eject(Some(601)), late);
+        let repaired = task_store.get(&task.id).unwrap();
+        assert_eq!(repaired.notes.matches("merge-queue-repair run=601 head=1111aaaa").count(), 1);
+        let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+        assert_eq!(rows.iter().filter(|row| row.target == "supervisor"
+            && row.prompt.contains(&format!("notification_id=\"{notification_id}\""))).count(), 1);
+        assert_eq!(rows.iter().filter(|row| row.target == worker.name && row.prompt.contains(&review)).count(), 1);
+        assert_eq!(rows.len(), 4);
     }
 
     #[test]

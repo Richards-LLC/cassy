@@ -142,6 +142,26 @@ pub(crate) fn mismatch_brief(artifact_id: &str) -> String {
     format!("\nWhole-flow mismatch list: {artifact_id}. Use the review's full list for this repair.")
 }
 
+#[cfg(test)]
+pub(crate) async fn publish_test_review(root: &Path, task_id: &str, supervisor_id: &str) -> String {
+    use rmcp::handler::server::wrapper::Parameters;
+
+    let path = root.parent().unwrap().join("whole-flow-review.md");
+    std::fs::write(&path, "| Actor | Operation | Design | Observed |\n| --- | --- | --- | --- |\n| Owner | Abort | Allowed | Unreachable |\n\n## Mismatches\n- Abort is unreachable.\n").unwrap();
+    let supervisor = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
+    supervisor.set_agent_id_for_testing(supervisor_id.into());
+    supervisor.artifact_publish(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "publish", "task_id": task_id, "path": path,
+    })).unwrap())).await.unwrap();
+    let artifact = cas_store::SqliteArtifactStore::open(root).unwrap().list_for_task(task_id)
+        .unwrap().into_iter().find(|artifact| artifact.name == "whole-flow-review.md").unwrap();
+    supervisor.cas_task_notes(Parameters(crate::mcp::tools::TaskNotesRequest {
+        id: task_id.into(), note_type: "decision".into(), note: format!("{REVIEW_NOTE} {}", artifact.id),
+        reason: None, supervisor_override: None,
+    })).await.unwrap();
+    artifact.id
+}
+
 pub(crate) fn repair_transition<T>(
     root: &Path, task_id: &str, reason: &str,
     transition: impl FnOnce(&str, Option<&str>) -> Result<T, McpError>,

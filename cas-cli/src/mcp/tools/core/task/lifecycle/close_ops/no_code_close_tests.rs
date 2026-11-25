@@ -630,16 +630,28 @@ async fn detached_task_keeps_recorded_start_gh2373() {
         assert_eq!(f.task(id).deliverables.work_target.unwrap().target_branch, if keep { target } else { "main" });
         let detach_notices = || queue.peek_all(50).unwrap().into_iter().filter(|row|
             row.summary.as_deref() == Some("repeat-review-train-detached") && row.target == "supervisor").collect::<Vec<_>>();
-        if fail_first_notice {
-            assert!(detach_notices().is_empty());
-            conn.execute_batch("DROP TRIGGER fail_repeat_notice").unwrap();
-        }
-        for _ in 0..2 {
-            let retry = f.supervisor.verification(Parameters(serde_json::from_value(verdict.clone()).unwrap())).await.unwrap();
-            assert_ne!(retry.is_error, Some(true), "{retry:?}");
+        let assert_notices = || {
             let notices = detach_notices();
             assert_eq!(notices.len(), usize::from(!keep));
             assert!(notices.iter().all(|row| crate::supervisor_notices::is_action_envelope(&row.prompt)));
+            let notice = crate::store::open_supervisor_queue_store(&f.cas_dir()).unwrap()
+                .get_by_transition_key(&format!("repeat-review:{id}:{}",
+                    cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap()
+                        .latest_repeated_rejection(id).unwrap().unwrap().0)).unwrap().unwrap();
+            assert!(notice.prompt_delivered_at.is_some());
+            let payload: serde_json::Value = serde_json::from_str(&notice.payload).unwrap();
+            assert_eq!(payload["context"]["train_id"].as_str(), (!keep).then_some(train.id.as_str()));
+        };
+        if fail_first_notice {
+            assert!(detach_notices().is_empty());
+            conn.execute_batch("DROP TRIGGER fail_repeat_notice").unwrap();
+            for _ in 0..2 {
+                let retry = f.supervisor.verification(Parameters(serde_json::from_value(verdict.clone()).unwrap())).await.unwrap();
+                assert_ne!(retry.is_error, Some(true), "{retry:?}");
+                assert_notices();
+            }
+        } else {
+            assert_notices();
         }
         let parked = f.task(id);
         let start = parked.deliverables.factory_branch_start.unwrap();
@@ -3752,6 +3764,18 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             next.assignee = None;
             f.put(&next);
         }
+        let admitted_review = if pending_brief {
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            reject_repeat_review_gh2373(&f, "cas-8488b", "The abort transition is unreachable").await;
+            reject_repeat_review_gh2373(&f, "cas-8488b", "A stale queue can claim the successor").await;
+            let path = f.artifact("cas-8488b").with_file_name("whole-flow-review.md");
+            std::fs::write(&path, "| Actor | Operation | Design | Observed |\n| --- | --- | --- | --- |\n| Owner | Abort | Allowed | Unreachable |\n\n## Mismatches\n- Abort is unreachable.\n").unwrap();
+            let review = link_repeat_review_gh2373(&f, "cas-8488b", &path).await;
+            env.set("CAS_AGENT_ROLE", "worker");
+            Some((path, review))
+        } else {
+            None
+        };
         let queued = call(&f.supervisor, serde_json::json!({
             "action":"update", "id":"cas-8488b", "assignee":WORKER,
             "task_ids":["cas-8488b", "cas-8488c"],
@@ -3871,6 +3895,25 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             assert_eq!(f.task("cas-8488b").status, TaskStatus::Open, "a pending recycle must complete first");
             spawns.mark_processed(resets[0].id).unwrap();
             spawns.record_spawn_state(resets[0].id, cas_store::SpawnLifecycleState::Registered, Some(WORKER), None).unwrap();
+            if let Some((path, review)) = &admitted_review {
+                let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+                conn.execute_batch("CREATE TRIGGER defer_ordered_brief BEFORE INSERT ON prompt_queue
+                    WHEN NEW.source = 'task-assignment'
+                    BEGIN SELECT RAISE(ABORT, 'injected ordered prompt failure'); END;").unwrap();
+                crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+                assert_eq!(f.task("cas-8488b").status, TaskStatus::InProgress);
+                let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap();
+                let pending = queues.get("queue-session", WORKER).unwrap();
+                assert!(pending.starting && pending.current_started);
+                conn.execute_batch("DROP TRIGGER defer_ordered_brief").unwrap();
+                let replacement = path.with_file_name("replacement-review.md");
+                std::fs::copy(path, &replacement).unwrap();
+                env.set("CAS_AGENT_ROLE", "supervisor");
+                let replacement = link_repeat_review_gh2373(&f, "cas-8488b", &replacement).await;
+                assert_ne!(&replacement, review);
+                assert_eq!(crate::mcp::tools::core::task::repeat_review::require_review(&f.cas_dir(), "cas-8488b").unwrap(), Some(replacement));
+                env.set("CAS_AGENT_ROLE", "worker");
+            }
             crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
         }
         let next = f.task("cas-8488b");
@@ -3888,6 +3931,9 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
             && row.prompt.contains(&active_branch)), "{briefs:?}");
         let successor = briefs.iter().find(|row| row.target == WORKER
             && row.prompt.contains(&next.id) && row.prompt.contains(&active_branch)).unwrap();
+        if let Some((_, review)) = &admitted_review {
+            assert!(successor.prompt.contains(review));
+        }
         assert!(crate::prompt_revalidation::assignment_stale_task(
             &successor.prompt, next.status, next.assignee.as_deref(), WORKER,
         ).is_none());

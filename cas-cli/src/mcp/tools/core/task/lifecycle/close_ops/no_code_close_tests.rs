@@ -581,6 +581,17 @@ async fn repeat_rejection_holds_automatic_conflict_return_gh2373() {
     reject_repeat_review_gh2373(&f, id, "A stale queue can claim the successor").await;
 
     let parked = f.task(id);
+    assert!(!parked.deliverables.merge_conflicted);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let lease_snapshot = || serde_json::to_value(agents.get_lease(id).unwrap()).unwrap();
+    let parked_lease = lease_snapshot();
+    let start = || f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"start", "id":id,
+    })).unwrap()));
+    env.set("CAS_AGENT_ROLE", "worker");
+    let clean_refusal = start().await.unwrap_err();
+    assert!(crate::gates::codes_in(&clean_refusal.message).contains(&"G-05"), "{clean_refusal:?}");
+    env.set("CAS_AGENT_ROLE", "supervisor");
     let repo = f.dir.path();
     git(repo, &["checkout", "-q", target]);
     std::fs::write(repo.join("feature.rs"), "pub fn different_feature() {}\n").unwrap();
@@ -596,6 +607,26 @@ async fn repeat_rejection_holds_automatic_conflict_return_gh2373() {
     let held = f.task(id);
     assert_eq!(held.status, TaskStatus::AwaitingMerge);
     assert_eq!(held.deliverables.factory_branch_anchor, parked.deliverables.factory_branch_anchor);
+    assert!(!held.deliverables.merge_conflicted);
+
+    env.set("CAS_AGENT_ROLE", "worker");
+    for stored_conflict in [false, true] {
+        let mut before = held.clone();
+        if stored_conflict {
+            before.deliverables.merge_conflicted = true;
+            f.put(&before);
+        }
+        let before = serde_json::to_value(f.task(id)).unwrap();
+        let result = start().await;
+        let after = serde_json::to_value(f.task(id)).unwrap();
+        assert!(result.as_ref().is_err_and(|refusal| {
+            crate::gates::codes_in(&refusal.message).contains(&"G-172")
+                && refusal.data.as_ref().and_then(|data| data["rule_id"].as_str())
+                    == Some("repeat_review_required")
+        }), "stored_conflict={stored_conflict}: {result:?}");
+        assert_eq!(after, before);
+        assert_eq!(lease_snapshot(), parked_lease);
+    }
 }
 
 #[tokio::test]

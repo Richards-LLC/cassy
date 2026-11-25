@@ -314,7 +314,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       });
     });
     test("HUB-J27 reload Cassy on a Codex supervisor only after confirming its restart", journeyPart, async ({ page, journey }) => {
-      const machine = { ...ATLAS, sessions: [{ ...ATLAS.sessions[0]!, harness: "codex" as const, mcp_version: "9.99.2", installed_version: "9.99.2", mcp_reload_needed: true, epic_id: null, ws_port: 48101, dormant: false, standby: false, dismissed: false, started_at: journeyStamp(-60_000) }] };
+      const machine = { ...ATLAS, sessions: [{ ...ATLAS.sessions[0]!, harness: "codex" as const, mcp_version: "9.99.2", installed_version: "9.99.2", mcp_reload_needed: true, ws_port: 48101 }] };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
       const mutations = () => hub.frames.filter(frame => frame.kind === "SupervisorCommand");
       await journey.stage("The Codex card names the restart before anything is sent", async () => {
@@ -605,15 +605,26 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         hub.send(PELICAN, { Error: { client_ref: request.client_ref, message: "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again." } });
         await expect(receipt).toHaveAttribute("data-phase", "unconfirmed");
         const session = machine.sessions[0]!;
-        session.ended = { at: journeyStamp(), reason: "prompt_input_exit", workers_stopped: [...session.workers], orphans: [], unverified: [] };
+        const endedAt = journeyStamp();
+        session.ended = { at: endedAt, reason: "prompt_input_exit", workers_stopped: [...session.workers], worker_states: [], orphans: [], unverified: [] };
         session.liveness = "stale_metadata"; session.workers = [];
+        session.ws_port = null;
+        session.machine_online = false;
+        session.last_activity_at = endedAt;
+        session.last_activity = "Session ended";
         const catalog = page.waitForResponse(response => new URL(response.url()).pathname === "/v1/sessions" && response.request().method() === "GET");
         await hub.announceCatalog(machine.id);
         expect(await (await catalog).json()).toMatchObject({
           schema_version: 1,
           freshness_threshold_secs: 30,
           sessions: [],
-          stopped_sessions: [{ ...session, epic_id: null, ws_port: null, dormant: false, standby: false, dismissed: false, mcp_reload_needed: false }],
+          stopped_sessions: [{
+            name: PELICAN, supervisor: PELICAN, project_dir: "/projects/cas-src", harness: "codex",
+            workers: [], liveness: "stale_metadata", machine_online: false, epic_id: null, ws_port: null,
+            dormant: false, standby: false, dismissed: false, mcp_reload_needed: false,
+            started_at: expect.any(String), last_activity_at: endedAt, last_activity: "Session ended",
+            ended: { at: endedAt, reason: "prompt_input_exit", workers_stopped: ["young-otter-14"], worker_states: [], orphans: [], unverified: [] },
+          }],
         });
         await expect(conversationRow(page)).toHaveCount(0);
         await expect(composer(page)).toBeHidden();

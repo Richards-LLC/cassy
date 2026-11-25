@@ -22,7 +22,7 @@ export type Session = {
   epic_id?: string | null;
   ws_port?: number | null;
   liveness: "live" | "stale_metadata";
-  ended?: import("../../src/types").SessionEndOutcome;
+  ended?: import("../../src/types").SessionEndOutcome & { worker_states?: string[] };
   started_at?: string;
   dismissed?: boolean;
   dormant?: boolean;
@@ -1115,16 +1115,16 @@ export class HubDouble {
     }
     if (path === "/v1/sessions") {
       this.tickBooting(machineId);
-      const catalog = this.sessionsFor(machineId).map(session => ({
+      const catalog = this.sessionsFor(machineId).map((session, index) => ({
         ...session,
         epic_id: session.epic_id ?? null,
-        ws_port: session.ws_port ?? null,
+        ws_port: session.ws_port === undefined && !session.ended && session.liveness === "live" ? 48100 + index : session.ws_port ?? null,
         dormant: session.dormant ?? false,
         standby: session.standby ?? false,
         dismissed: session.dismissed ?? false,
         mcp_reload_needed: session.mcp_reload_needed ?? false,
       }));
-      const sessions = catalog.filter(session => !session.ended && session.liveness === "live" && session.supervisor.trim());
+      const sessions = catalog.filter(session => !session.ended && session.liveness === "live" && session.ws_port !== null && session.supervisor.trim());
       const stopped_sessions = catalog.filter(session => session.ended || session.liveness === "stale_metadata");
       await route.fulfill({ json: { schema_version: 1, freshness_threshold_secs: 30, sessions, stopped_sessions } });
       // Counted once the page has the answer, so a waiter that resumes on it
@@ -1220,9 +1220,14 @@ export class HubDouble {
       const callerDeviceId = active?.device_id ?? "journey-device";
       if (method === "POST") {
         const force = (route.request().postDataJSON() as { force?: boolean } | null)?.force === true;
+        if (force && !this.scopesFor(machineId).includes("hub-admin")) {
+          this.leaseTakes.push({ machine: machineId, session, force, status: 401 });
+          this.observed();
+          return route.fulfill({ status: 401, json: { error: "unauthorized" } });
+        }
         const holder = this.activeLease(session);
         const heldElsewhere = holder && holder.id !== callerDeviceId;
-        const status = !heldElsewhere ? 200 : !force ? 409 : this.scopesFor(machineId).includes("hub-admin") ? 200 : 403;
+        const status = heldElsewhere && !force ? 409 : 200;
         this.leaseTakes.push({ machine: machineId, session, force, status });
         this.observed();
         const gate = this.leaseTakeGates.get(session);
@@ -1232,7 +1237,6 @@ export class HubDouble {
           await gate.wait;
         }
         if (status === 409) return route.fulfill({ status, json: { error: "lease_unavailable" } });
-        if (status === 403) return route.fulfill({ status, json: { error: "scope_denied", required_scope: "hub:admin" } });
         this.grantLease(session, callerDeviceId, active?.device_label ?? "Journey browser");
       } else if (method === "DELETE") {
         // Match the authenticated hub's idempotent cleanup contract, including

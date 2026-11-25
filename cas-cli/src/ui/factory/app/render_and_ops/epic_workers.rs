@@ -1964,8 +1964,9 @@ fn reset_stale_preassign_holder(
         return Err(format!("task is still held by live worker '{holder}'"));
     }
 
-    agents
-        .release_lease_for_task(&task.id, "Stale pre-assignment force-release")
+    let reason = "Stale pre-assignment force-release";
+    let lease_released = agents
+        .release_lease_for_task(&task.id, reason)
         .map_err(|e| format!("could not release stale holder '{holder}' lease: {e}"))?;
 
     let store = open_task_store_cached(cas_dir)
@@ -1983,16 +1984,16 @@ fn reset_stale_preassign_holder(
     let prior_status = reset.status;
     reset.status = cas_types::TaskStatus::Open;
     reset.assignee = None;
-    let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
-    let audit = format!(
-        "[{timestamp}] ✅ DECISION cas-2327: force-released stale assignee '{holder}' with reset semantics; {prior_status:?}→Open. Notes, branch, and prior work were preserved before pre-assigning a replacement worker."
+    let now = chrono::Utc::now();
+    let audit = crate::mcp::tools::core::task::audit::reset_note(
+        now, prior_status, Some(holder), lease_released, reason,
     );
     reset.notes = if reset.notes.is_empty() {
         audit
     } else {
         format!("{}\n\n{audit}", reset.notes)
     };
-    reset.updated_at = chrono::Utc::now();
+    reset.updated_at = now;
     store.update(&reset)
         .map_err(|e| format!("could not persist stale-holder reset: {e}"))?;
     clear_departed_block(&*store, &task.id);
@@ -7921,7 +7922,6 @@ mod tests {
         assert_eq!(task.status, TaskStatus::Open);
         assert_eq!(task.assignee.as_deref(), Some("replacement-reviewer"));
         assert!(task.notes.contains("prior review evidence"));
-        assert!(task.notes.contains("force-released"));
         assert_eq!(task.branch.as_deref(), Some("factory/prior-review"));
         agents
             .register(&cas_types::Agent::new_with_role(
@@ -8970,13 +8970,22 @@ mod tests {
     #[tokio::test]
     async fn preassigned_worker_takeover_starts_parks_and_recovers_cas_ace6() {
         for queued in [true, false] {
+        use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue};
         use crate::mcp::{CasCore, CasService};
-        use crate::store::{init_cas_dir, open_task_store};
+        use crate::mcp::tools::core::task::audit;
+        use crate::store::{
+            init_cas_dir, open_rule_store_local, open_skill_store_local, open_store_local,
+            open_task_store, open_task_store_local,
+        };
         use crate::test_env_guard::TestEnvGuard;
         use cas_types::{Agent, AgentRole, AgentStatus, FactoryBranchStart, TaskDepth, WorkTarget};
         use rmcp::handler::server::wrapper::Parameters;
+        use std::io::Read;
         use std::path::Path;
         use std::process::Command;
+        use std::sync::{Arc, Mutex};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
         let mut env = TestEnvGuard::temp_home();
         let project = env.home().join("project");
         std::fs::create_dir_all(&project).unwrap();
@@ -9026,7 +9035,11 @@ mod tests {
         let anchor = git(&project, &["rev-parse", "HEAD"]);
         git(&project, &["push", "-q", "origin", old_branch]);
         git(&project, &["switch", "epic/takeover"]);
-        let branch = "factory/replacement-worker";
+        let branch = if queued {
+            "factory/replacement-worker"
+        } else {
+            "factory/replacement-worker-cas-d6b1"
+        };
         let checkout = root.join("worktrees/replacement-worker");
         git(
             &project,
@@ -9063,7 +9076,7 @@ mod tests {
             }
             agents.register(&agent).unwrap();
         }
-        let tasks = open_task_store(&root).unwrap();
+        let (project_id, team) = ("takeover-fixture", "takeover-team");
         let mut task = Task::new("cas-d6b1".into(), "Recover retired worker delivery".into());
         task.depth = TaskDepth::Light;
         task.status = TaskStatus::AwaitingMerge;
@@ -9081,7 +9094,121 @@ mod tests {
         });
         task.deliverables.parked_branch = Some(old_branch.into());
         task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        let sync_owner = if !queued {
+            task.origin_project = Some(project_id.into());
+            task.updated_at -= chrono::Duration::minutes(10);
+            task.notes = audit::parked_note(task.updated_at, "Original delivery");
+            let server = MockServer::start().await;
+            let config = CloudConfig {
+                endpoint: server.uri(),
+                token: Some("test-token".into()),
+                team_id: Some(team.into()),
+                team_only: true,
+                ..Default::default()
+            };
+            config.save_to_cas_dir(&root).unwrap();
+            let owner_dir = tempfile::tempdir().unwrap();
+            let owner_root = init_cas_dir(owner_dir.path()).unwrap();
+            std::fs::copy(root.join("config.toml"), owner_root.join("config.toml")).unwrap();
+            let syncer = |cas_dir: &Path| {
+                let queue = Arc::new(SyncQueue::open(cas_dir).unwrap());
+                queue.init().unwrap();
+                CloudSyncer::new_for_project(
+                    queue,
+                    config.clone(),
+                    CloudSyncerConfig::default(),
+                    project_id.into(),
+                    cas_dir,
+                )
+            };
+            let peer = syncer(&root);
+            let owner = syncer(&owner_root);
+            let owner_entries = open_store_local(&owner_root).unwrap();
+            let owner_tasks = open_task_store_local(&owner_root).unwrap();
+            let owner_rules = open_rule_store_local(&owner_root).unwrap();
+            let owner_skills = open_skill_store_local(&owner_root).unwrap();
+            let stored = Arc::new(Mutex::new(None::<(serde_json::Value, i64, chrono::DateTime<chrono::Utc>)>));
+            let uploaded = Arc::clone(&stored);
+            Mock::given(method("POST"))
+                .and(path(format!("/api/teams/{team}/sync/push")))
+                .respond_with(move |request: &wiremock::Request| {
+                    let mut bytes = Vec::new();
+                    flate2::read::GzDecoder::new(request.body.as_slice())
+                        .read_to_end(&mut bytes).unwrap();
+                    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    let rows = body["tasks"].as_array().unwrap();
+                    assert_eq!(rows.len(), 1);
+                    let mut row = rows[0].clone();
+                    let id = row["id"].as_str().unwrap().to_owned();
+                    let mut stored = uploaded.lock().unwrap();
+                    let previous_revision = stored.as_ref().map(|(_, revision, _)| *revision);
+                    assert_eq!(crate::cloud::wire_revision(&row), previous_revision);
+                    let revision = previous_revision.unwrap_or(0) + 1;
+                    let inserted = previous_revision.is_none();
+                    row.as_object_mut().unwrap().remove("revision");
+                    *stored = Some((row, revision, chrono::Utc::now()));
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "synced": {"tasks": {
+                            "inserted": u8::from(inserted), "updated": u8::from(!inserted), "skipped": 0,
+                            "accepted": {id.clone(): {"revision": revision.to_string(), "canonical_id": project_id}},
+                        }},
+                        "rows": [{"entity_type": "tasks", "id": id,
+                            "outcome": if inserted { "inserted" } else { "updated" }}],
+                        "canonical_id": project_id,
+                        "git_remote": null,
+                    }))
+                }).mount(&server).await;
+            Mock::given(method("GET"))
+                .and(path(format!("/api/teams/{team}/sync/pull")))
+                .respond_with(move |request: &wiremock::Request| {
+                    let pulled_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                    let since = request.url.query_pairs().find(|(key, _)| key == "since")
+                        .map(|(_, value)| chrono::DateTime::parse_from_rfc3339(&value).unwrap());
+                    let stored = stored.lock().unwrap();
+                    let rows: Vec<_> = stored.iter()
+                        .filter(|(_, _, updated)| since.is_none_or(|since| *updated > since))
+                        .map(|(row, revision, _)| {
+                            let mut row = row.clone();
+                            row["revision"] = serde_json::json!(revision.to_string());
+                            row["project_id"] = serde_json::json!(project_id);
+                            row["team_id"] = serde_json::json!(team);
+                            row
+                        }).collect();
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "entries": [], "rules": [], "skills": [], "sessions": [], "verifications": [],
+                        "events": [], "prompts": [], "file_changes": [], "commit_links": [],
+                        "agents": [], "worktrees": [], "task_dependencies": [], "omitted_rows": [],
+                        "tasks": rows, "team_id": team, "pulled_at": pulled_at,
+                    }))
+                }).mount(&server).await;
+            let task_id = task.id.clone();
+            Some(move || {
+                let _fixture = (&server, &owner_dir);
+                let pushed = peer.push_team(team).unwrap();
+                assert_eq!(pushed.pushed_tasks, 1, "{:?}", pushed.errors);
+                let pulled = owner.pull_team(
+                    team, project_id, &*owner_entries, &*owner_tasks, &*owner_rules, &*owner_skills,
+                ).unwrap();
+                assert!(pulled.errors.is_empty(), "{:?}", pulled.errors);
+                let received = owner_tasks.get(&task_id).unwrap();
+                (
+                    received.status, received.assignee,
+                    received.deliverables.factory_branch_start.unwrap().branch,
+                    received.deliverables.parked_branch,
+                )
+            })
+        } else {
+            None
+        };
+        let tasks = open_task_store(&root).unwrap();
         tasks.add(&task).unwrap();
+        if let Some(sync_owner) = &sync_owner {
+            env.set_current_dir(&project);
+            assert_eq!(
+                sync_owner(),
+                (TaskStatus::AwaitingMerge, Some("retired-worker".into()), old_branch.into(), Some(old_branch.into())),
+            );
+        }
         assert!(
             agents
                 .try_claim(&task.id, "retired-id", 600, None)
@@ -9114,6 +9241,14 @@ mod tests {
             queue.current_task = Some(task.id.clone());
             queue.starting = true;
             queues.save("takeover-session", "replacement-worker", &mut queue).unwrap();
+        } else {
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            let rebind = supervisor.task(request(serde_json::json!({
+                "action": "rebind_branch", "id": task.id, "branch": branch,
+                "reason": "Approve the replacement worker checkout",
+            }))).await.unwrap();
+            assert_ne!(rebind.is_error, Some(true), "{rebind:?}");
+            assert_eq!(tasks.get(&task.id).unwrap().deliverables.parked_branch, None);
         }
         env.set_current_dir(&checkout);
         env.set("CAS_AGENT_ROLE", "worker");
@@ -9151,13 +9286,20 @@ mod tests {
             serde_json::to_value(&task.deliverables.factory_branch_start).unwrap()
         );
         assert_eq!(audit["previous_tip"], anchor);
+        if let Some(sync_owner) = &sync_owner {
+            let _project_dir = env.enter_dir(&project);
+            assert_eq!(
+                sync_owner(),
+                (TaskStatus::InProgress, Some("replacement-worker".into()), branch.into(), None),
+            );
+        }
         // The replacement can now continue, park and merge under its own name.
         std::fs::write(checkout.join("recovery.txt"), "replacement work\n").unwrap();
         git(&checkout, &["add", "recovery.txt"]);
         git(&checkout, &["commit", "-qm", "cas-d6b1: complete takeover"]);
         let tip = git(&checkout, &["rev-parse", "HEAD"]);
         git(&checkout, &["push", "-q", "origin", branch]);
-        worker
+        let park = worker
             .task(request(
                 serde_json::json!({"action": "close", "id": task.id, "reason": "Takeover validated"}),
             ))
@@ -9165,8 +9307,21 @@ mod tests {
             .unwrap();
         assert_eq!(
             tasks.get(&task.id).unwrap().status,
-            TaskStatus::AwaitingMerge
+            TaskStatus::AwaitingMerge,
+            "{park:?}"
         );
+        if let Some(sync_owner) = &sync_owner {
+            let _project_dir = env.enter_dir(&project);
+            assert_eq!(
+                sync_owner(),
+                (
+                    TaskStatus::AwaitingMerge,
+                    Some("replacement-worker".into()),
+                    branch.into(),
+                    Some(branch.into()),
+                ),
+            );
+        }
         // Replay the already-parked mismatch from GH #2255. The supported
         // recovery returns it for changes before supervisor branch approval.
         let mut mismatched = tasks.get(&task.id).unwrap();

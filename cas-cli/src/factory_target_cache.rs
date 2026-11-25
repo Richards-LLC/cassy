@@ -870,11 +870,11 @@ fn cleanup_selected_with_capacity(
         }
         let process_block =
             process_probe(probe_root, &quarantine, &descriptors, guard.is_some() && !explicit_unknown, proc_root);
-        if guard
+        let guard_changed = guard
             .as_ref()
-            .is_some_and(|guard| !guard.unchanged(&quarantine))
-            || process_block.is_some()
-        {
+            .is_some_and(|guard| !guard.unchanged(&quarantine));
+        if guard_changed || process_block.is_some() {
+            tracing::debug!(guard_changed, ?process_block, "target reclaim blocked after quarantine");
             if !record.interrupted_cleanup && !record.path.exists() {
                 let _ = fs::rename(&quarantine, &record.path);
             }
@@ -1845,12 +1845,15 @@ fn macos_deep_process_uses(worktree: &Path, cache: &Path, own_lock_fds: &[i32]) 
         .args(["-nP", "-F0pfn"])
         .output()
     else {
+        tracing::debug!("cannot launch deep process inventory");
         return true;
     };
     if !output.status.success() || !output.stderr.is_empty() {
+        tracing::debug!(status = %output.status, stderr_bytes = output.stderr.len(), "deep process inventory unavailable");
         return true;
     }
     if lsof_uses_many(&output.stdout, worktree, cache, own_lock_fds) {
+        tracing::debug!("deep process inventory found live output or incomplete evidence");
         return true;
     }
     macos_process_arguments_use(worktree, cache)
@@ -1906,21 +1909,49 @@ fn macos_process_arguments_use(worktree: &Path, cache: &Path) -> bool {
         return true;
     }
     let uid = unsafe { libc::geteuid() };
-    for pid in pids.into_iter().filter(|&pid| pid != 0 && pid != own_pid) {
-        match crate::cli::factory::wedged::process_commandline(pid as u32) {
-            Some(argv) if process_arguments_use(&argv, worktree, cache) => {
-                tracing::warn!(pid, "macOS process arguments reference a fenced cache path");
-                return true;
-            }
+    macos_argv_evidence_blocks(
+        pids.into_iter().filter(|&pid| pid != 0 && pid != own_pid),
+        worktree,
+        cache,
+        |pid| crate::cli::factory::wedged::process_commandline(pid as u32),
+        |pid| macos_unreadable_process_is_irrelevant(pid, uid),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_argv_evidence_blocks(
+    pids: impl IntoIterator<Item = libc::pid_t>,
+    worktree: &Path,
+    cache: &Path,
+    read_argv: impl Fn(libc::pid_t) -> Option<Vec<u8>>,
+    irrelevant: impl Fn(libc::pid_t) -> bool,
+) -> bool {
+    let references_output = |pid, argv: &[u8]| {
+        let found = process_arguments_use(argv, worktree, cache);
+        if found {
+            tracing::warn!(pid, "macOS process arguments reference a fenced cache path");
+        }
+        found
+    };
+    let mut deferred = Vec::new();
+    for pid in pids {
+        match read_argv(pid) {
+            Some(argv) if references_output(pid, &argv) => return true,
             Some(_) => {}
-            None if macos_unreadable_process_is_irrelevant(pid, uid) => {}
-            None => {
-                tracing::warn!(pid, "cannot establish macOS process argument evidence");
-                return true;
-            }
+            None if irrelevant(pid) => {}
+            None => deferred.push(pid),
         }
     }
-    false
+    deferred.into_iter().any(|pid| {
+        match read_argv(pid) {
+            Some(argv) => references_output(pid, &argv),
+            None if irrelevant(pid) => false,
+            None => {
+                tracing::warn!(pid, "cannot establish macOS process argument evidence");
+                true
+            }
+        }
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -1944,10 +1975,14 @@ fn macos_unreadable_process_is_irrelevant(pid: libc::pid_t, uid: libc::uid_t) ->
     };
     if read == size {
         let info = unsafe { info.assume_init() };
-        info.status == libc::SZOMB || info.uid != uid
-    } else {
-        read == 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        if info.status == libc::SZOMB || info.uid != uid {
+            return true;
+        }
+    } else if read == 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        return true;
     }
+    let probe = unsafe { libc::kill(pid, 0) };
+    probe == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
 #[cfg(all(unix, any(target_os = "macos", test)))]
@@ -2372,6 +2407,17 @@ mod tests {
         assert!(process_arguments_use(b"cargo\0--target-dir=/repo with spaces/target/debug\0", cache, cache));
         assert!(!process_arguments_use(b"cargo\0--target-dir=/repo with spaces/target/debugger\0/nested/repo with spaces/target/debug\0", cache, cache));
         assert!(!process_arguments_use(b"sleep\0--quiet\0", cache, cache));
+
+        #[cfg(target_os = "macos")]
+        {
+            let gone = std::cell::Cell::new(false);
+            assert!(!macos_argv_evidence_blocks(
+                [42, 43], cache, cache,
+                |pid| (pid == 43).then(|| { gone.set(true); b"sleep\0".to_vec() }),
+                |_| gone.get(),
+            ));
+            assert!(macos_argv_evidence_blocks([42], cache, cache, |_| None, |_| false));
+        }
     }
 
     #[test]
@@ -3400,6 +3446,10 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn cas_49b9_exact_unknown_target_opt_in_reclaims_only_quiet_regenerable_subtree() {
+        #[cfg(target_os = "macos")]
+        let _trace = tracing::subscriber::set_default(
+            tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).finish(),
+        );
         let (_temp, cas, target, _proc, policy) = unknown_cache_fixture();
         let retired = cas.join("merge-sweeps/assembly-target");
         for (cache, expected_bytes) in [(&target, 11), (&retired, 7)] {

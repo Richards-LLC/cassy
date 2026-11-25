@@ -13819,12 +13819,13 @@ printf '}'
         let graphql_variables = concat!("gh api graphql -f query='mutation($pr: ID!) { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }' -F pr=PR_fixture");
         let graphql_input = concat!("gh api graphql -f query='mutation($input: MergePullRequestInput!) { mergePull", "Request(input: $input) { clientMutationId } }' -F 'input[pullRequestId]=PR_fixture'");
         let graphql_json = concat!("gh api graphql --input - <<< '{\"query\":\"mutation($input: MergePullRequestInput!) { mergePull", "Request(input: $input) { clientMutationId } }\",\"variables\":{\"input\":{\"pullRequestId\":\"PR_fixture\"}}}'");
-        let graphql_default = concat!("gh api graphql -f query='mutation($pr: ID! = \"PR_fixture\") { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }'");
+        let graphql_default = concat!("gh api graphql -f query='mutation(,$pr,: ID!,= # default )\n \"PR_\\u0066ixture\",) { mergePull", "Request(,input,: {,# target\n pullRequestId,: $pr,},) { clientMutationId } }'");
         let graphql_object_default = concat!("gh api graphql --input - <<< '{\"query\":\"mutation($input: MergePullRequestInput! = {pullRequestId: \\\"PR_fixture\\\"}) { mergePull", "Request(input: $input) { clientMutationId } }\"}'");
         let graphql_unresolved = concat!("gh api graphql -f query='mutation($pr: ID!) { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }'");
         let opaque_body = repo.path().join("opaque-merge.json");
         std::fs::write(&opaque_body, graphql_json.split('\'').nth(1).unwrap()).unwrap();
         let graphql_opaque = format!("gh api graphql --input {}", shell_words::quote(opaque_body.to_str().unwrap()));
+        let graphql_opaque_options_first = format!("gh api --input {} graphql", shell_words::quote(opaque_body.to_str().unwrap()));
         let graphql_multi = concat!("/fixture-only/gh api graphql -f query='mutation { a: mergePull", "Request(input: {pullRequestId: \"PR_other\"}) { clientMutationId } b: mergePull", "Request(input: {pullRequestId: \"PR_missing\"}) { clientMutationId } c: mergePull", "Request(input: {pullRequestId: \"PR_fixture\"}) { clientMutationId } }'");
         let graphql_wrapped = format!("bash -c {}", shell_words::quote(&graphql.replace("gh api", "/fixture-only/gh api")));
         let graphql_enqueue = concat!("/fixture-only/gh api graphql -f query='mutation { enqueuePull", "Request(input: {pullRequestId: \"PR_fixture\"}) { clientMutationId } }'");
@@ -13857,6 +13858,7 @@ printf '}'
         };
         let unresolved = lookup_failure(graphql_unresolved);
         let opaque = lookup_failure(&graphql_opaque);
+        let opaque_options_first = lookup_failure(&graphql_opaque_options_first);
         let multi_denial = denial_for("worker", graphql_multi);
         let (wrapped_denial, wrapped_reads) = probe("worker", &graphql_wrapped);
         let (enqueue_denial, enqueue_reads) = probe("worker", graphql_enqueue);
@@ -13939,8 +13941,8 @@ printf '}'
         let broken_discovery_failures = discovery_failures();
 
         assert_eq!(
-            (rejected(defaulted.0), defaulted.1, rejected(object_defaulted.0), object_defaulted.1, supplied.0.is_none(), supplied.1, unresolved, opaque),
-            (true, 1, true, 1, true, 1, (true, 0, 1), (true, 0, 1)),
+            (rejected(defaulted.0), defaulted.1, rejected(object_defaulted.0), object_defaulted.1, supplied.0.is_none(), supplied.1, unresolved, opaque, opaque_options_first),
+            (true, 1, true, 1, true, 1, (true, 0, 1), (true, 0, 1), (true, 0, 1)),
         );
         assert_eq!(
             (rejected(multi_denial), rejected(wrapped_denial), rejected(enqueue_denial), rejected(large_denial), recorded_fork_denial.is_none(), repaired_fork_denial.is_none(), approved_wrapped.is_none(), wrapped_reads, enqueue_reads, approved_wrapped_reads, empty_discovery_failures, broken_discovery_failures),

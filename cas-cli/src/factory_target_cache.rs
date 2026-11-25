@@ -687,6 +687,14 @@ fn cleanup_selected_with_capacity(
             record.reason = reason.clone();
             continue;
         }
+        if cfg!(target_os = "macos")
+            && explicit_unknown
+            && rescanned.newest_write.is_some_and(|modified| modified > cutoff)
+        {
+            record.disposition = CacheDisposition::RecentWrite;
+            record.reason = format!("newest write is younger than {}s", policy.min_idle_secs);
+            continue;
+        }
         let mut guard = match cache_admission_at(
             cas_root,
             &rescanned.worktree,
@@ -1536,10 +1544,6 @@ fn cache_admission_at(
         ));
     }
     if explicit_unknown {
-        // Unknown owners get no opaque-process exception, even under locks.
-        if let Some(disposition) = process_block_at(worktree, cache, &[], false, proc_root) {
-            return Err((disposition, "native process/handle evidence does not prove the unknown cache idle".into()));
-        }
         let snapshot = snapshot
             .filter(|snapshot| snapshot.admissible())
             .ok_or_else(|| {
@@ -1548,6 +1552,12 @@ fn cache_admission_at(
                     "unsafe unknown-cache snapshot".into(),
                 )
             })?;
+        if let Some(disposition) = process_block_at(worktree, cache, &[], false, proc_root) {
+            return Err((
+                disposition,
+                "native process/handle evidence does not prove the unknown cache idle".into(),
+            ));
+        }
         if !lock {
             return Ok(None);
         }

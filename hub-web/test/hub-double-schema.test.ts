@@ -17,7 +17,7 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
     const id = `urn:cassy:hub:${name}`;
     const validate = ajv.getSchema(id);
     expect(validate, id).toBeDefined();
-    expect(validate!(payload), `${id}: ${ajv.errorsText(validate!.errors)}`).toBe(true);
+    expect.soft(validate!(payload), `${id}: ${ajv.errorsText(validate!.errors)}`).toBe(true);
   };
 
   const origin = "https://fixture.test";
@@ -85,7 +85,7 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   expect([busy.status, busy.json.error]).toEqual([409, "lease_unavailable"]);
   const forceDenied = await http(lease, "POST", { force: true });
   check("LeaseRefusal", forceDenied.json);
-  expect([forceDenied.status, forceDenied.json.error]).toEqual([401, "unauthorized"]);
+  expect.soft([forceDenied.status, forceDenied.json.error]).toEqual([401, "unauthorized"]);
   double.setScopes("fixture", [...SCOPES, "hub-admin", "factory-manage"]);
   check("LeaseSummary", (await http(lease, "POST", { force: true })).json);
   const released = await http(lease, "DELETE");
@@ -109,6 +109,6 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   const result = await http("/v1/sessions/running", "DELETE");
   check("EndSessionReceipt", result.json);
   expect(result.json.outcome).toBe("ended");
-  expect(events.map(event => event.kind)).toEqual(expect.arrayContaining(["session_added", "fleet_changed"]));
+  expect(events.map(event => event.kind)).toEqual(["session_added", "pane_removed", "fleet_changed"]);
   for (const event of events) check("MachineEvent", event);
 });

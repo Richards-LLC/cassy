@@ -311,6 +311,7 @@ export class HubDouble {
    */
   private readonly leaseHolders = new Map<string, string>();
   private readonly releasedLeases = new Set<string>();
+  private readonly eventSequences = new Map<string, number>();
   /** One lease read can be held at the wire boundary to exercise stale-cache races. */
   private readonly leaseReadGates = new Map<string, { wait: Promise<void>; started: () => void }>();
   /** POST /v1/sessions/<s>/lease calls, in order, with whether they forced. */
@@ -376,12 +377,19 @@ export class HubDouble {
     ];
     if (!events.length) events.push({ kind: "session_added", session: "" });
     for (const event of events) {
-      await this.page.evaluate(
-        ([host, data]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number }).__journeyMachineEvent(host, data),
-        [`${machineId}.test`, JSON.stringify(event)] as const,
-      );
+      await this.emitMachineEvent(machineId, event.kind, event.session || null);
     }
     await this.waitFor(() => this.catalogFetchCount(machineId) > before);
+  }
+
+  private emitMachineEvent(machineId: string, kind: string, session: string | null): Promise<number> {
+    const sequence = (this.eventSequences.get(machineId) ?? 0) + 1;
+    this.eventSequences.set(machineId, sequence);
+    const data = JSON.stringify({ sequence, revision: 0, kind, session, pane_id: null, at: this.stamp() });
+    return this.page.evaluate(
+      ([host, data]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number }).__journeyMachineEvent(host, data),
+      [`${machineId}.test`, data] as const,
+    );
   }
 
   /** Another device (named `label`) holds control of the session until a take overrides it. */
@@ -667,10 +675,7 @@ export class HubDouble {
     this.operationOutcomes.set(body.op_id, outcome);
     await answer(200, { op_id: body.op_id, outcome });
     // FleetChanged: every connected device refetches status.
-    await this.page.evaluate(
-      ([host, data]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number }).__journeyMachineEvent(host, data),
-      [`${machineId}.test`, JSON.stringify({ kind: "fleet_changed", session })] as const,
-    ).catch(() => undefined);
+    await this.emitMachineEvent(machineId, "fleet_changed", session).catch(() => undefined);
   }
 
   /**
@@ -1078,8 +1083,17 @@ export class HubDouble {
     }
     if (path === "/v1/sessions") {
       this.tickBooting(machineId);
-      const sessions = this.sessionsFor(machineId);
-      await route.fulfill({ json: { freshness_threshold_secs: 30, sessions } });
+      const catalog = this.sessionsFor(machineId).map(session => ({
+        ...session,
+        epic_id: null,
+        dormant: session.dormant ?? false,
+        standby: session.standby ?? false,
+        dismissed: session.dismissed ?? false,
+        mcp_reload_needed: false,
+      }));
+      const stopped_sessions = catalog.filter(session => session.ended || session.liveness === "stale_metadata");
+      const sessions = catalog.filter(session => !session.ended && session.liveness === "live" && session.supervisor.trim());
+      await route.fulfill({ json: { schema_version: 1, freshness_threshold_secs: 30, sessions, stopped_sessions } });
       // Counted once the page has the answer, so a waiter that resumes on it
       // never races the response it is waiting for.
       this.catalogFetches.set(machineId, (this.catalogFetches.get(machineId) ?? 0) + 1);
@@ -1193,10 +1207,10 @@ export class HubDouble {
           await gate.wait;
         }
         const currentHolder = this.leaseHolders.get(session);
-        if (currentHolder) return route.fulfill({ json: { held_by_me: false, controller_label: currentHolder } });
+        if (currentHolder) return route.fulfill({ json: { controller_device_id: "other-journey-device", controller_label: currentHolder, expires_at: this.stamp(30_000), held_by_me: false } });
       }
       const held = !this.releasedLeases.has(session);
-      return route.fulfill({ json: { held_by_me: held, controller_label: held ? "Journey browser" : null } });
+      return route.fulfill({ json: { controller_device_id: held ? "journey-device" : null, controller_label: held ? "Journey browser" : null, expires_at: held ? this.stamp(30_000) : null, held_by_me: held } });
     }
     if (path.endsWith("/status")) {
       const session = decodeURIComponent(path.split("/")[3] ?? "");

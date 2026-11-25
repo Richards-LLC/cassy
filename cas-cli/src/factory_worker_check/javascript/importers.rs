@@ -6,6 +6,16 @@ use std::sync::LazyLock;
 const EXTENSIONS: [&str; 8] = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
 
 pub(crate) fn related_specs(repo: &Path, path: &str) -> BTreeMap<&'static str, Vec<String>> {
+    related_specs_with_markers(repo, path).specs
+}
+
+#[derive(Default)]
+pub(in crate::factory_worker_check) struct RelatedSpecs {
+    pub specs: BTreeMap<&'static str, Vec<String>>,
+    pub marked_runners: BTreeSet<&'static str>,
+}
+
+pub(in crate::factory_worker_check) fn related_specs_with_markers(repo: &Path, path: &str) -> RelatedSpecs {
     let target = normalize(&repo.join(path));
     let mut package = target.clone();
     while package.pop() && package.starts_with(repo) && !package.join("package.json").is_file() {}
@@ -13,14 +23,15 @@ pub(crate) fn related_specs(repo: &Path, path: &str) -> BTreeMap<&'static str, V
     let graph = cached_graph(repo, &package);
     let Graph { playwright, node, unit, .. } = graph.as_ref();
     let runs_playwright = graph.reached(playwright.clone()).into_iter().chain(playwright.iter().cloned()).collect::<BTreeSet<_>>();
-    let mut tests = BTreeMap::<_, Vec<_>>::new();
+    let mut tests = RelatedSpecs::default();
     for file in graph.reached(vec![target]) {
         let Some(relative) = file.strip_prefix(repo).ok().and_then(Path::to_str) else { continue };
-        let runner = if node.contains(&file) { Some(super::NODE_RUNNER) }
-            else { unit.get(&file).copied().or_else(|| runs_playwright.contains(&file).then_some("playwright"))
-                .or_else(|| super::runner_hint(repo, relative)) };
+        let marked = if node.contains(&file) { Some(super::NODE_RUNNER) }
+            else { unit.get(&file).copied().or_else(|| runs_playwright.contains(&file).then_some("playwright")) };
+        let runner = marked.or_else(|| super::runner_hint(repo, relative));
         if let Some(runner) = runner.filter(|runner| super::test_match(relative, Some(runner))) {
-            tests.entry(runner).or_default().push(relative.to_owned());
+            if marked.is_some() { tests.marked_runners.insert(runner); }
+            tests.specs.entry(runner).or_default().push(relative.to_owned());
         }
     }
     tests

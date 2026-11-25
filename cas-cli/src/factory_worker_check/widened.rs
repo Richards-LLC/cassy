@@ -184,22 +184,23 @@ fn file_proves(passing: &PassingTests<'_>, runner: &str, spec: &str) -> bool {
 }
 
 fn outstanding_consumers(passing: &PassingTests<'_>, helper: &str, deployed: &std::cell::OnceCell<BTreeSet<String>>)
-    -> Option<Vec<(&'static str, String)>> {
-    let consumers = javascript::related_specs(passing.repo, helper);
-    if consumers.is_empty() { return None; }
+    -> Option<javascript::RelatedSpecs> {
+    let mut consumers = javascript::related_specs_with_markers(passing.repo, helper);
+    if consumers.specs.is_empty() { return None; }
     let packages = owners(passing.repo, helper);
     let records = passing.records();
-    Some(consumers.into_iter().flat_map(|(runner, mut specs)| {
+    consumers.specs.retain(|&runner, specs| {
         if records.iter().filter_map(|(_, _, test)| test.widened.as_ref()).any(|proof| {
             proof.runner == runner && (packages.contains(&proof.scope)
                 || (runner != "playwright" && matches!(&proof.scope, Scope::Related(path) if path == helper)))
-        }) { specs.clear(); }
+        }) { return false; }
         specs.retain(|spec| {
             (runner != "playwright" || !deployed.get_or_init(|| deployed_journey_specs(passing.cas_root, passing.repo, passing.head)).contains(spec))
                 && !file_proves(passing, runner, spec)
         });
-        specs.into_iter().map(move |spec| (runner, spec))
-    }).collect())
+        !specs.is_empty()
+    });
+    Some(consumers)
 }
 
 /// A widened scope is proven by its own pass or, for a package, by a
@@ -215,7 +216,7 @@ pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &B
         if let Scope::Related(helper) = scope
             && let Some(consumers) = outstanding_consumers(passing, helper, &deployed)
         {
-            return !consumers.is_empty();
+            return !consumers.specs.is_empty();
         }
         // GH #2369: the owning package's own passing run proves any input in it.
         if let Scope::File(path) | Scope::Related(path) = scope && package_proves(passing, path) { return false; }
@@ -233,19 +234,42 @@ pub(crate) fn coverage_notes(scopes: &[Scope], covering: &BTreeMap<Scope, Coveri
     }).collect()
 }
 
+fn related_args(runner: &str) -> &str {
+    match runner {
+        "vitest" => "vitest related --run",
+        "jest" => "jest --findRelatedTests",
+        runner => runner,
+    }
+}
+
+fn can_run_related(repo: &Path, helper: &str, runner: &str, specs: &[String]) -> bool {
+    javascript::javascript(helper) && (!matches!(runner, "jest" | "vitest")
+        || javascript::runner_root(repo, helper, runner).is_ok_and(|root| {
+            specs.iter().all(|spec| javascript::runner_root(repo, spec, runner).is_ok_and(|owner| owner == root))
+        }))
+}
+
 pub(crate) fn commands(passing: &PassingTests<'_>, paths: &[String], scopes: &[Scope],
     covering: &BTreeMap<Scope, Covering>) -> Vec<String> {
     let (cas_root, repo) = (passing.cas_root, passing.repo);
     let command = |argv: Vec<String>| worker_check_command_line(cas_root, &argv);
     let deployed = std::cell::OnceCell::new();
-    let planned = scopes.iter().filter_map(|scope| {
-        match scope {
-            Scope::Related(helper) => outstanding_consumers(passing, helper, &deployed).map(|specs| (scope, specs)),
-            _ => None,
+    let (mut planned, mut consumers, mut related) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    for scope in scopes {
+        if let Scope::Related(helper) = scope
+            && let Some(plan) = outstanding_consumers(passing, helper, &deployed)
+        {
+            planned.insert(scope);
+            for (runner, specs) in plan.specs {
+                if !plan.marked_runners.contains(runner) && can_run_related(repo, helper, runner, &specs) {
+                    related.insert((runner, helper.as_str()));
+                } else {
+                    consumers.extend(specs.into_iter().map(|spec| (runner, spec)));
+                }
+            }
         }
-    }).collect::<BTreeMap<_, _>>();
-    let consumers: BTreeSet<_> = planned.values().flatten().cloned().collect();
-    let mut commands: Vec<_> = scopes.iter().filter(|scope| !planned.contains_key(*scope)
+    }
+    let mut commands: Vec<_> = scopes.iter().filter(|scope| !planned.contains(*scope)
         && !matches!(scope, Scope::File(path) if consumers.iter().any(|(_, spec)| spec == path))).flat_map(|scope| {
         let found = covering.get(scope);
         if let Some(Covering { specs, unresolved }) = found && unresolved.is_empty() {
@@ -258,13 +282,9 @@ pub(crate) fn commands(passing: &PassingTests<'_>, paths: &[String], scopes: &[S
             return vec![command(["nextest", "run", "-p", package, "--lib", "-E", &format!("test({package})")].map(str::to_owned).into())];
         }
         if let Scope::Related(path) = scope {
-            let runner = match javascript::runner_hint(repo, path).unwrap_or("jest") {
-                "vitest" => "vitest related --run",
-                "jest" => "jest --findRelatedTests",
-                "playwright" => return Vec::new(),
-                runner => runner,
-            };
-            return vec![command(runner_words(runner).chain([path.as_str()]).map(str::to_owned).collect())];
+            let runner = javascript::runner_hint(repo, path).unwrap_or("jest");
+            if runner == "playwright" { return Vec::new(); }
+            return vec![command(runner_words(related_args(runner)).chain([path.as_str()]).map(str::to_owned).collect())];
         }
         // Only a JavaScript input reaches the runner; a JSON catalogue or SQL
         // migration in the same package shares the scope but is refused (GH #2224, #2266).
@@ -290,6 +310,9 @@ pub(crate) fn commands(passing: &PassingTests<'_>, paths: &[String], scopes: &[S
                     .chain([path.into()]).collect())
             }).collect()
     }).collect();
+    commands.extend(related.into_iter().map(|(runner, helper)| {
+        command(runner_words(related_args(runner)).chain([helper]).map(str::to_owned).collect())
+    }));
     let mut by_runner: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for (runner, spec) in consumers { by_runner.entry(runner).or_default().push(spec); }
     commands.extend(by_runner.into_iter().map(|(runner, specs)| {

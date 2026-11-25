@@ -14,6 +14,7 @@ mod importers;
 mod web_attribution;
 
 pub(crate) use importers::related_specs;
+pub(super) use importers::{RelatedSpecs, related_specs_with_markers};
 use importers::node_specs;
 
 #[derive(Debug, thiserror::Error)]

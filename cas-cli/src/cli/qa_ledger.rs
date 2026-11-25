@@ -175,7 +175,7 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                 let mut members = Vec::new();
                 for id in covers {
                     let covered = store.get(id)?;
-                    if crate::qa_pass::is_no_code(&covered) || covered.deliverables.evidence_only.is_some() {
+                    if crate::qa_batch::is_report_member(&covered) {
                         continue;
                     }
                     let (repo, target) = crate::qa_batch::task_context(cas_root, &covered).map_err(anyhow::Error::msg)?;

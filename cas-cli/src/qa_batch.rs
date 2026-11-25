@@ -34,7 +34,6 @@ pub(crate) struct ReleaseScope {
 }
 
 impl ReleaseScope {
-    // gate-audit[evidence_only]: selector Binds report proof metadata; proof validation and acceptance remain with the consumers.
     pub(crate) fn bind_reports(&mut self, root: &Path) -> Result<(), String> {
         let tasks = release_close::read_tasks(root)?;
         self.no_code_members.clear();
@@ -43,12 +42,17 @@ impl ReleaseScope {
             // Terminal members need no new proof to be closed again. Their
             // external_ref may identify the original request, not report bytes.
             if task.is_terminal() { continue; }
-            if crate::qa_pass::is_no_code(&task) || task.deliverables.evidence_only.is_some() {
+            if is_report_member(&task) {
                 self.no_code_members.insert(id.clone(), no_code_proofs(root, self, &task)?);
             }
         }
         Ok(())
     }
+}
+
+// gate-audit[evidence_only]: selector Filters delivery inventory by measured terminal outcome; no acceptance bypass.
+pub(crate) fn is_report_member(task: &Task) -> bool {
+    crate::qa_pass::is_no_code(task) || task.deliverables.evidence_only.is_some()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -152,7 +156,6 @@ pub(crate) struct ReleaseInventoryException {
 /// discovery, commit-subject parsing, proof approval or lifecycle writes.
 /// Epic descendants and live recorded deliveries are discovery candidates.
 /// Only declared tasks or proven shipped work create closeout obligations.
-// gate-audit[evidence_only]: selector Filters delivery inventory by measured terminal outcome; no acceptance bypass.
 pub(crate) fn resolve_release_inventory(
     root: &Path,
     repo: &Path,
@@ -351,9 +354,7 @@ pub(crate) fn resolve_release_inventory(
             }
         }
         let explicit = scope.no_code_members.get(&id);
-        let (anchor, shipped_commit, membership, proofs) = if crate::qa_pass::is_no_code(t)
-            || t.deliverables.evidence_only.is_some()
-        {
+        let (anchor, shipped_commit, membership, proofs) = if is_report_member(t) {
             let Some(proofs) = explicit.filter(|proofs| {
                 !proofs.is_empty()
                     && proofs.iter().all(|p| {

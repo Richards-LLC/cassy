@@ -47,7 +47,7 @@ pub(crate) fn scope(repo: &Path, path: &str) -> Scope {
         // plugin for, so `vitest related` would crash; that component proves
         // through its package run, or through the specs that import it.
         let unloadable = path.ends_with(".vue") && runner == Some("vitest") && !javascript::vitest_loads_vue(repo, path);
-        if (matches!(runner, Some("jest" | "vitest")) && !unloadable) || javascript::related_tests(repo, path).is_some() {
+        if !unloadable && (matches!(runner, Some("jest" | "vitest")) || !javascript::related_specs(repo, path).is_empty()) {
             return Scope::Related(path.into());
         }
     }
@@ -70,13 +70,22 @@ fn package(repo: &Path, path: &str) -> Scope {
         }
         if directory == repo { break; }
     }
-    Scope::Package(directory.strip_prefix(repo).unwrap_or(Path::new("")).to_string_lossy().into())
+    let relative = directory.strip_prefix(repo).unwrap_or(Path::new(""));
+    if relative.as_os_str().is_empty() && !rust && javascript::runner_hint(repo, "package.json").is_none()
+        && let Some(std::path::Component::Normal(first)) = Path::new(path).components().next()
+        && first != Path::new(path).as_os_str()
+        && !javascript::node_specs(repo, &repo.join(first)).is_empty()
+    {
+        return Scope::Package(first.to_string_lossy().into());
+    }
+    Scope::Package(relative.to_string_lossy().into())
 }
 
 /// GH #2369: the package whose own run proves `path` under `runner` when a
 /// focused run of it selects no test: the directory holding the runner's
 /// config for it, else its nearest manifest.
 pub(crate) fn owning_package(repo: &Path, path: &str, runner: &str) -> Scope {
+    if runner == "node" { return package(repo, path); }
     javascript::runner_root(repo, path, runner).ok()
         .and_then(|(directory, _)| directory.strip_prefix(repo).ok().map(|relative| Scope::Package(relative.to_string_lossy().into())))
         .unwrap_or_else(|| package(repo, path))
@@ -155,12 +164,18 @@ pub(crate) fn covering(repo: &Path, head: &str, paths: &[String], scopes: &[Scop
     scopes.iter().filter_map(|scope| {
         let Scope::Package(directory) = scope else { return None };
         let inputs: Vec<&str> = paths.iter().map(String::as_str)
-            .filter(|path| &package(repo, path) == scope).collect();
+            .filter(|path| package_input(repo, path, scope)).collect();
         let resolved = javascript::covering_specs(repo, head, directory, &inputs).ok()?;
         let specs: BTreeSet<String> = resolved.values().flatten().cloned().collect();
         let unresolved = resolved.iter().filter(|(_, specs)| specs.is_empty()).map(|(input, _)| input.clone()).collect();
         (!specs.is_empty()).then(|| (scope.clone(), Covering { specs: specs.into_iter().collect(), unresolved }))
     }).collect()
+}
+
+fn package_input(repo: &Path, path: &str, wanted: &Scope) -> bool {
+    if path.ends_with(".md") { return false; }
+    if javascript::javascript(path) { return &scope(repo, path) == wanted; }
+    &package(repo, path) == wanted
 }
 
 /// A widened scope is proven by its own pass or, for a package, by a
@@ -169,22 +184,31 @@ pub(crate) fn covering(repo: &Path, head: &str, paths: &[String], scopes: &[Scop
 pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &BTreeMap<Scope, Covering>) -> Vec<Scope> {
     // Records already carry an ancestor's run only when no proof input changed
     // since it (cas-3080), so a documentation-only descendant keeps it.
-    let recorded = |wanted: &Scope| passing.records().iter()
-        .filter_map(|(_, _, test)| test.widened.as_ref()).any(|proof| &proof.scope == wanted);
+    let proofs = || passing.records().iter().filter_map(|(_, _, test)| test.widened.as_ref());
+    let recorded = |wanted: &Scope| proofs().any(|proof| &proof.scope == wanted);
     // GH #2146: a Playwright helper holds no tests. Every spec importing it
     // must have run, each under its recorded config, whether through the
     // helper's own run or through that spec's own run.
-    let ran = |spec: &str| passing.records().iter().filter_map(|(_, _, test)| test.widened.as_ref()).any(|proof|
+    let ran = |spec: &str| proofs().any(|proof|
         proof.runner == "playwright" && proof.configs.contains_key(spec)
             && (proof.scope == Scope::File(spec.into()) || matches!(&proof.scope, Scope::Related(_))));
+    let deployed = std::cell::OnceCell::new();
     scopes.iter().filter(|scope| {
+        if let Scope::Related(helper) = scope {
+            let consumers = javascript::related_specs(passing.repo, helper);
+            if !consumers.is_empty() {
+                let packages = owners(passing.repo, helper);
+                return consumers.iter().any(|(&runner, specs)| {
+                    !proofs().any(|proof| proof.runner == runner && packages.contains(&proof.scope))
+                        && if runner == "playwright" {
+                            let deployed = deployed.get_or_init(|| deployed_journey_specs(passing.cas_root, passing.repo, passing.head));
+                            specs.iter().any(|spec| !deployed.contains(spec) && !ran(spec))
+                        } else { !proofs().any(|proof| proof.runner == runner && &proof.scope == *scope) }
+                });
+            }
+        }
         // GH #2369: the owning package's own passing run proves any input in it.
         if let Scope::File(path) | Scope::Related(path) = scope && package_proves(passing, path) { return false; }
-        if let Scope::Related(helper) = scope {
-            let consumers = javascript::related_tests(passing.repo, helper)
-                .filter(|(runner, _)| *runner == "playwright").map(|(_, specs)| specs).unwrap_or_default();
-            if !consumers.is_empty() { return !consumers.iter().all(|spec| ran(spec)); }
-        }
         // GH #2224, #2266: a package is also proven by whole-file passes of the
         // specs covering its inputs, once they cover every input.
         !recorded(scope) && !covering.get(*scope)
@@ -194,6 +218,7 @@ pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &B
 
 pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &[Scope],
     covering: &BTreeMap<Scope, Covering>) -> Vec<String> {
+    let deployed = std::cell::OnceCell::new();
     scopes.iter().flat_map(|scope| {
         let found = covering.get(scope);
         if let Some(Covering { specs, unresolved }) = found && unresolved.is_empty() {
@@ -206,12 +231,23 @@ pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &
             return vec![format!("cas factory worker-check --cas-root {} -- nextest run -p {package} --lib -E 'test({package})'", cas_root.display())];
         }
         if let Scope::Related(path) = scope {
-            let runner = if let Some((runner, _)) = javascript::related_tests(repo, path) {
-                if runner == "node" { "node --test" } else { runner }
-            } else if javascript::runner_hint(repo, path) == Some("vitest") {
-                "vitest related --run"
-            } else { "jest --findRelatedTests" };
-            return vec![format!("cas factory worker-check --cas-root {} -- {runner} {path}", cas_root.display())];
+            let related = javascript::related_specs(repo, path);
+            let runners = if related.is_empty() {
+                vec![javascript::runner_hint(repo, path).unwrap_or("jest")]
+            } else { related.keys().copied().collect() };
+            return runners.into_iter().filter(|&runner| runner != "playwright" || related.get(runner).is_some_and(|specs| specs.iter().any(|spec| {
+                let deployed = deployed.get_or_init(|| git(repo, &["rev-parse", "HEAD"]).ok()
+                    .map(|head| deployed_journey_specs(cas_root, repo, &head)).unwrap_or_default());
+                !deployed.contains(spec)
+            }))).map(|runner| {
+                let runner = match runner {
+                    "node" => "node --test",
+                    "vitest" => "vitest related --run",
+                    "jest" => "jest --findRelatedTests",
+                    runner => runner,
+                };
+                format!("cas factory worker-check --cas-root {} -- {runner} {path}", cas_root.display())
+            }).collect();
         }
         // Only a JavaScript input reaches the runner; a JSON catalogue or SQL
         // migration in the same package shares the scope but is refused (GH #2224, #2266).
@@ -222,18 +258,26 @@ pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &
         // their passes do not stand in for the whole package.
         let unresolved: Vec<&str> = match found {
             Some(found) => found.unresolved.iter().map(String::as_str).collect(),
-            None => paths.iter().map(String::as_str).filter(|input| &self::package(repo, input) == scope).collect(),
+            None => paths.iter().map(String::as_str).filter(|input| package_input(repo, input, scope)).collect(),
         };
         let named = if unresolved.is_empty() { String::new() } else { format!("no spec reads {}; ", unresolved.join(", ")) };
+        let node_package = matches!(scope, Scope::Package(directory) if !javascript::node_specs(repo, &repo.join(directory)).is_empty());
+        let runners = |path| {
+            if node_package && javascript::runner_hint(repo, path).is_none_or(|runner| runner == "node --test") {
+                return vec!["node --test"];
+            }
+            javascript::runner_hint(repo, path).filter(|runner| *runner != "node --test" || !matches!(scope, Scope::Package(_)))
+                .map(|runner| vec![runner]).unwrap_or_else(|| vec!["jest", "vitest", "playwright"])
+        };
         let Some(path) = path else {
             // GH #2164: the package's manifest selects its own run.
             let Scope::Package(directory) = scope else { return Vec::new() };
             let manifest = Path::new(directory).join("package.json").to_string_lossy().into_owned();
-            return javascript::runner_hint(repo, &manifest).map(|runner| vec![runner]).unwrap_or_else(|| vec!["jest", "vitest", "playwright"])
-                .into_iter().map(|runner| format!("{named}cas factory worker-check --cas-root {} -- {runner} {manifest}", cas_root.display())).collect();
+            return runners(&manifest).into_iter()
+                .map(|runner| format!("{named}cas factory worker-check --cas-root {} -- {runner} {manifest}", cas_root.display())).collect();
         };
         let note = (!named.is_empty() && found.is_some()).then(|| format!("{}the covering specs' passes do not prove the package; run the whole package instead", named));
-        note.into_iter().chain(javascript::runner_hint(repo, path).map(|runner| vec![runner]).unwrap_or_else(|| vec!["jest", "vitest", "playwright", "node --test"])
+        note.into_iter().chain(runners(path)
             .into_iter().map(|runner| {
                 // GH #2195: a spec only a non-default config lists runs under it.
                 let config = (runner == "playwright").then(|| javascript::playwright_owner(repo, path)).flatten()
@@ -260,6 +304,10 @@ pub(crate) fn record(cas_root: &Path, repo: &Path, head: &str, proof: Proof, cou
 }
 
 pub(crate) fn invalidate(cas_root: &Path, repo: &Path, head: &str, scope: &Scope) -> Result<()> {
+    invalidate_runner(cas_root, repo, head, scope, None)
+}
+
+pub(super) fn invalidate_runner(cas_root: &Path, repo: &Path, head: &str, scope: &Scope, runner: Option<&str>) -> Result<()> {
     let directory = receipt_path(cas_root, &repo.canonicalize()?, head);
     let Some(directory) = directory.parent().filter(|directory| directory.is_dir()) else { return Ok(()) };
     for entry in std::fs::read_dir(directory)? {
@@ -269,7 +317,8 @@ pub(crate) fn invalidate(cas_root: &Path, repo: &Path, head: &str, scope: &Scope
         // A failed rerun also withdraws the ancestor run it would carry.
         if receipt.repo == repo.canonicalize()?
             && (receipt.head == head || receipt_head_is_ancestor(&receipt.repo, &receipt.head, head))
-            && receipt.test.and_then(|test| test.widened).is_some_and(|proof| &proof.scope == scope)
+            && receipt.test.and_then(|test| test.widened).is_some_and(|proof| &proof.scope == scope
+                && runner.is_none_or(|runner| proof.runner == runner))
         { std::fs::remove_file(entry.path())?; }
     }
     Ok(())
@@ -358,12 +407,24 @@ mod tests {
             assert_eq!(invocation.runner, "node");
             assert_eq!(javascript::related_tests(&repo, &invocation.files[0]).unwrap().1, ["scripts/visual-qa.test.mjs"]);
         }
+        let unknown = "scripts/unknown.mjs";
+        write(unknown, "export const value = 1;");
+        let scopes = [scope(&repo, unknown)];
+        assert_eq!(scopes, [Scope::Package("scripts".into())]);
+        for fixture in paths.iter().filter(|path| path.starts_with("scripts/visual-qa-fixtures/")) {
+            assert_eq!(scope(&repo, fixture), scopes[0]);
+        }
+        let runs = super::commands(Path::new("/cas"), &repo, &[unknown.into()], &scopes, &Default::default());
+        let (_, args) = runs[0].split_once(" -- ").unwrap();
+        let invocation = javascript::invocation(&args.split_whitespace().map(String::from).collect::<Vec<_>>()).unwrap();
+        assert_eq!((invocation.runner, invocation.files), ("node", vec![unknown.to_owned()]));
+        assert_eq!(javascript::node_specs(&repo, &repo.join("scripts")), [repo.join("scripts/visual-qa.test.mjs")]);
     }
 
     #[test]
     fn gh2471_playwright_helper_uses_related_proof_beside_a_vitest_consumer() {
-        let repo = tempfile::tempdir().unwrap();
-        let repo = repo.path();
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path();
         let helper = "hub-web/e2e/journeys/hub-double.ts";
         let journey = "hub-web/e2e/journeys/supervisor-commands.journey.ts";
         let preview = "hub-web/preview/browser-page.test.ts";
@@ -388,6 +449,26 @@ mod tests {
             invocation.runner
         }).collect::<BTreeSet<_>>();
         assert_eq!(runners, BTreeSet::from(["playwright", "vitest"]));
+        let git = |args: &[&str]| super::git(repo, &[
+            &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"], args,
+        ].concat()).unwrap();
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "delivery"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let state = tempfile::tempdir().unwrap();
+        let cas_root = state.path();
+        let proof_missing = || missing(&PassingTests::new(cas_root, repo, &head), &scopes, &Default::default());
+        record(cas_root, repo, &head, Proof {
+            runner: "playwright".into(), scope: scopes[0].clone(), reason: String::new(),
+            configs: BTreeMap::from([(journey.into(), "hub-web/playwright.config.ts".into())]),
+        }, 1).unwrap();
+        assert_eq!(proof_missing(), scopes);
+        invalidate_runner(cas_root, repo, &head, &scopes[0], Some("vitest")).unwrap();
+        record(cas_root, repo, &head, Proof {
+            runner: "vitest".into(), scope: scopes[0].clone(), reason: String::new(), configs: Default::default(),
+        }, 1).unwrap();
+        assert!(proof_missing().is_empty());
     }
 
     /// GH #2352: vitest cannot transform a `.vue` file without a Vue plugin, so

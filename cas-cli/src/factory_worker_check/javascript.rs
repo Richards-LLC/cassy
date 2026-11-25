@@ -13,7 +13,14 @@ use super::stability::{Identity, Proof};
 mod importers;
 mod web_attribution;
 
-pub(crate) use importers::related_tests;
+pub(crate) use importers::related_specs;
+pub(super) use importers::node_specs;
+
+#[cfg(test)]
+pub(super) fn related_tests(repo: &Path, path: &str) -> Option<(&'static str, Vec<String>)> {
+    let tests = related_specs(repo, path);
+    (tests.len() == 1).then(|| tests.into_iter().next()).flatten()
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("Worker check requires an isolated worktree or a managed review checkout")]
@@ -1999,16 +2006,21 @@ fn execute_selection(
     // its own, a Playwright spec under the config that owns it.
     let consumers = match widened {
         Some((super::widened::Scope::Related(helper), _, _)) if matches!(runner, "playwright" | "node") => {
-            let Some((_, specs)) = related_tests(repo, helper).filter(|(owner, _)| *owner == runner) else {
+            let Some(mut specs) = related_specs(repo, helper).remove(runner) else {
                 bail!(ZeroTests::new(format!("no {runner} test imports {helper}")));
             };
+            if runner == "playwright" {
+                let delegated = super::widened::deployed_journey_specs(cas_root, repo, head);
+                specs.retain(|spec| !delegated.contains(spec));
+                if specs.is_empty() { bail!("{helper} is only imported by journeys delegated to batch QA"); }
+            }
             eprintln!("Running {helper} through its importing tests: {}", specs.join(" "));
             specs
         }
         _ => Vec::new(),
     };
     if let Some((scope, file, _)) = widened {
-        super::widened::invalidate(cas_root, repo, head, scope)?;
+        super::widened::invalidate_runner(cas_root, repo, head, scope, Some(runner))?;
         if consumers.is_empty() { by_file.insert(file, Vec::new()); }
         for spec in &consumers { by_file.insert(spec, Vec::new()); }
     }
@@ -2179,6 +2191,10 @@ fn execute_selection(
                 }
                 if runner == "playwright" { command.arg(regex::escape(&file.to_string_lossy())); }
                 else { command.arg(&file); }
+            } else if runner == "node" {
+                let specs = node_specs(repo, &package);
+                if specs.is_empty() { bail!(ZeroTests::new(format!("no node:test files in {}", package.display()))); }
+                command.args(specs);
             }
             let marker = reports.path().join(format!("scope-{iteration}"));
             let success = run_scoped_javascript(command, high, &marker)?;
@@ -3223,10 +3239,8 @@ mod tests {
     /// GH #2146: hub-web's responsive-goals.ts helper holds no tests; its
     /// assertions run through pair-link.journey.ts. The gate widened it to the
     /// whole package. It now runs through the Playwright specs importing it,
-    /// directly or through other helpers; a helper no spec imports, or one a
-    /// unit test also imports, keeps its previous proof. hub-double.ts imports
-    /// Playwright only for types, and a Vitest test imports it: its helpers
-    /// keep their Vitest route (cas-87b5).
+    /// directly or through other helpers. A unit test importing a helper keeps
+    /// its own runner; a Playwright type-only import is not a runtime consumer.
     #[test]
     fn playwright_helper_runs_through_its_importing_specs_gh2146() {
         use super::super::widened::{self, Scope};
@@ -3352,7 +3366,7 @@ mod tests {
         let error = validate_report_with_inherited("playwright", &repo, &report, &[], 1, &BTreeSet::new(), None, &[summary]).unwrap_err();
         assert!(format!("{error:#}").contains("[G-61]"), "{error:#}");
         assert!(validate_report_with_inherited("playwright", &repo, &report, &[], 1, &BTreeSet::new(), None, &[history]).is_ok());
-        assert_eq!(widened::scope(&repo, "e2e/journeys/orphan.ts"), Scope::Package(String::new()));
+        assert_eq!(widened::scope(&repo, "e2e/journeys/orphan.ts"), Scope::Related("e2e/journeys/orphan.ts".into()));
         let runtime = "e2e/journeys/hub-double-runtime.ts";
         let scopes = [widened::scope(&repo, runtime)];
         assert_eq!(widened::commands(Path::new("/cas"), &repo, &[runtime.into()], &scopes, &Default::default()),

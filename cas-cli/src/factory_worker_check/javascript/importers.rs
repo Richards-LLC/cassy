@@ -5,28 +5,13 @@ use std::sync::LazyLock;
 
 const EXTENSIONS: [&str; 8] = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
 
-/// The runner and repository-relative test files that import `path`, directly
-/// or through other modules of its package, when every one is a Playwright
-/// spec (GH #2146) or every one a `node:test` file (a CI guard, GH #2200). A
-/// Playwright spec loads `@playwright/test` at runtime, itself or through its
-/// imports, and imports no other runner. None when no test imports it or
-/// another runner's test does: that helper keeps its other proof. Only
-/// relative specifiers resolve, so an alias-only import finds no importer and
-/// the helper keeps its package proof.
-pub(crate) fn related_tests(repo: &Path, path: &str) -> Option<(&'static str, Vec<String>)> {
+/// Named consumers in the source's package, grouped by their actual runner.
+pub(crate) fn related_specs(repo: &Path, path: &str) -> BTreeMap<&'static str, Vec<String>> {
     let target = normalize(&repo.join(path));
     let mut package = target.clone();
     while package.pop() && package.starts_with(repo) && !package.join("package.json").is_file() {}
     if !package.starts_with(repo) { package = repo.to_path_buf(); }
-    let graph = match GRAPHS.with(|cache| cache.borrow().as_ref().map(|cache| cache.get(&package).cloned())) {
-        Some(Some(graph)) => graph,
-        Some(None) => {
-            let graph = std::rc::Rc::new(graph(repo, &package));
-            GRAPHS.with(|cache| cache.borrow_mut().as_mut().map(|cache| cache.insert(package.clone(), graph.clone())));
-            graph
-        }
-        None => std::rc::Rc::new(graph(repo, &package)),
-    };
+    let graph = cached_graph(repo, &package);
     let Graph { importers, playwright, node, unit } = graph.as_ref();
     let reached = |roots: Vec<PathBuf>| {
         let mut seen = BTreeSet::new();
@@ -39,15 +24,32 @@ pub(crate) fn related_tests(repo: &Path, path: &str) -> Option<(&'static str, Ve
         seen
     };
     let runs_playwright = reached(playwright.clone()).into_iter().chain(playwright.iter().cloned()).collect::<BTreeSet<_>>();
-    let tests: Vec<_> = reached(vec![target]).into_iter().filter_map(|file| {
-        let relative = file.strip_prefix(repo).ok()?.to_str()?.to_owned();
-        super::test_match(&relative, None).then_some((file, relative))
-    }).collect();
-    let runner = |file: &PathBuf| if node.contains(file) { Some("node") }
-        else if runs_playwright.contains(file) && !unit.contains(file) { Some("playwright") } else { None };
-    let first = runner(&tests.first()?.0)?;
-    tests.iter().all(|(file, _)| runner(file) == Some(first))
-        .then(|| (first, tests.into_iter().map(|(_, relative)| relative).collect()))
+    let mut tests = BTreeMap::<_, Vec<_>>::new();
+    for file in reached(vec![target]) {
+        let Some(relative) = file.strip_prefix(repo).ok().and_then(Path::to_str) else { continue };
+        let runner = if node.contains(&file) { Some("node") }
+            else { unit.get(&file).copied().or_else(|| runs_playwright.contains(&file).then_some("playwright")) };
+        if let Some(runner) = runner.filter(|runner| super::test_match(relative, Some(runner))) {
+            tests.entry(runner).or_default().push(relative.to_owned());
+        }
+    }
+    tests
+}
+
+fn cached_graph(repo: &Path, package: &Path) -> std::rc::Rc<Graph> {
+    if let Some(graph) = GRAPHS.with(|cache| cache.borrow().as_ref()?.get(package).cloned()) {
+        return graph;
+    }
+    let graph = std::rc::Rc::new(graph(repo, package));
+    GRAPHS.with(|cache| cache.borrow_mut().as_mut().map(|cache| cache.insert(package.to_path_buf(), graph.clone())));
+    graph
+}
+
+pub(super) fn node_specs(repo: &Path, directory: &Path) -> Vec<PathBuf> {
+    cached_graph(repo, directory).node.iter().filter(|path| {
+        matches!(path.extension().and_then(|ext| ext.to_str()), Some("js" | "mjs" | "cjs"))
+            && super::test_match(&path.to_string_lossy(), Some("node"))
+    }).cloned().collect()
 }
 
 /// One package's import graph: who imports each module, and the files that
@@ -56,7 +58,7 @@ struct Graph {
     importers: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
     playwright: Vec<PathBuf>,
     node: BTreeSet<PathBuf>,
-    unit: BTreeSet<PathBuf>,
+    unit: BTreeMap<PathBuf, &'static str>,
 }
 
 thread_local! {
@@ -85,8 +87,11 @@ fn graph(repo: &Path, package: &Path) -> Graph {
         regex::Regex::new(r#"(?:\bfrom|\bimport|\brequire\s*\()\s*\(?\s*['"](\.\.?/[^'"\n]+)['"]"#).unwrap()
     });
     let mut importers: BTreeMap<PathBuf, BTreeSet<PathBuf>> = BTreeMap::new();
-    let (mut playwright, mut node, mut unit) = (Vec::new(), BTreeSet::new(), BTreeSet::new());
-    for entry in ignore::WalkBuilder::new(package).build().flatten() {
+    let (mut playwright, mut node, mut unit) = (Vec::new(), BTreeSet::new(), BTreeMap::new());
+    let mut walk = ignore::WalkBuilder::new(package);
+    walk.filter_entry(|entry| entry.depth() == 0 || !entry.file_type().is_some_and(|kind| kind.is_dir())
+        || !entry.path().join("package.json").is_file());
+    for entry in walk.build().flatten() {
         let file = entry.path();
         if !entry.file_type().is_some_and(|kind| kind.is_file())
             || !super::javascript(&file.to_string_lossy())
@@ -95,8 +100,9 @@ fn graph(repo: &Path, package: &Path) -> Graph {
         let Ok(source) = std::fs::read_to_string(file) else { continue };
         let file = normalize(file);
         if loads_playwright(&source) { playwright.push(file.clone()); }
-        if source.contains("'node:test'") || source.contains("\"node:test\"") { node.insert(file.clone()); }
-        else if ["'vitest'", "\"vitest\"", "@jest/globals"].iter().any(|runner| source.contains(runner)) { unit.insert(file.clone()); }
+        if source.contains("'vitest'") || source.contains("\"vitest\"") { unit.insert(file.clone(), "vitest"); }
+        else if source.contains("@jest/globals") { unit.insert(file.clone(), "jest"); }
+        else if source.contains("'node:test'") || source.contains("\"node:test\"") { node.insert(file.clone()); }
         for capture in SPECIFIER.captures_iter(&source) {
             if let Some(imported) = resolve(file.parent().unwrap_or(repo), &capture[1]) {
                 importers.entry(imported).or_default().insert(file.clone());

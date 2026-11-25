@@ -212,15 +212,7 @@ fn listed_park_refusals(
         use crate::factory_worker_check::widened::{self as widen, Scope};
         let journeys = widen::deployed_journey_specs(cas_root, proof_repo, head);
         tests.retain(|test| !journeys.contains(&test.path));
-        let widened: Vec<Scope> = widened.into_iter().flat_map(|scope| match &scope {
-            Scope::File(spec) if journeys.contains(spec) => Vec::new(),
-            Scope::Related(helper) => match crate::factory_worker_check::javascript::related_tests(proof_repo, helper) {
-                Some(("playwright", specs)) if specs.iter().any(|spec| journeys.contains(spec)) =>
-                    specs.into_iter().filter(|spec| !journeys.contains(spec)).map(Scope::File).collect(),
-                _ => vec![scope],
-            },
-            _ => vec![scope],
-        }).collect();
+        let widened: Vec<_> = widened.into_iter().filter(|scope| !matches!(scope, Scope::File(spec) if journeys.contains(spec))).collect();
         // GH #2355: a deleted file owes nothing and is no package input.
         let present: Vec<String> = changed_paths.iter().filter(|path| std::process::Command::new("git")
             .args(["cat-file", "-e", &format!("{head}:{path}")]).current_dir(proof_repo)

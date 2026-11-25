@@ -405,8 +405,12 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await input.press("Enter");
         await reload.click();
         await expect(commandPalette(page).getByRole("status")).toContainText("Studio iPad");
+        await openCommands(page);
+        await expect(page.locator("#conversation-commands")).toHaveAttribute("aria-expanded", "true");
+        await expect(commandButton(page, "mcp")).toBeVisible();
         await expect(input).toHaveValue("/reload-cassy");
         expect(mutations()).toHaveLength(2);
+        await captureReload(page, "codex-refused-then-commands", viewport.width);
       });
     });
     test("HUB-J27 dismiss reload refusal and resolve a later observed receipt", journeyPart, async ({ page, journey }) => {
@@ -602,7 +606,14 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const session = machine.sessions[0]!;
         session.ended = { at: journeyStamp(), reason: "prompt_input_exit", workers_stopped: [...session.workers], orphans: [], unverified: [] };
         session.liveness = "stale_metadata"; session.workers = [];
+        const catalog = page.waitForResponse(response => new URL(response.url()).pathname === "/v1/sessions" && response.request().method() === "GET");
         await hub.announceCatalog(machine.id);
+        expect(await (await catalog).json()).toMatchObject({
+          schema_version: 1,
+          freshness_threshold_secs: 30,
+          sessions: [],
+          stopped_sessions: [{ ...session, epic_id: null, ws_port: null, dormant: false, standby: false, dismissed: false, mcp_reload_needed: false }],
+        });
         await expect(conversationRow(page)).toHaveCount(0);
         await expect(composer(page)).toBeHidden();
         // No banner reports the stopped session's machine connection as lost.

@@ -19,6 +19,8 @@ export type Session = {
   supervisor: string;
   project_dir: string;
   workers: string[];
+  epic_id?: string | null;
+  ws_port?: number | null;
   liveness: "live" | "stale_metadata";
   ended?: import("../../src/types").SessionEndOutcome;
   started_at?: string;
@@ -40,6 +42,7 @@ export type Session = {
   machine_online?: boolean;
   mcp_version?: string;
   installed_version?: string;
+  mcp_reload_needed?: boolean;
 };
 
 export type Machine = { id: string; label: string; sessions: Session[] };
@@ -1112,8 +1115,18 @@ export class HubDouble {
     }
     if (path === "/v1/sessions") {
       this.tickBooting(machineId);
-      const sessions = this.sessionsFor(machineId);
-      await route.fulfill({ json: { schema_version: 1, freshness_threshold_secs: 30, sessions, stopped_sessions: [] } });
+      const catalog = this.sessionsFor(machineId).map(session => ({
+        ...session,
+        epic_id: session.epic_id ?? null,
+        ws_port: session.ws_port ?? null,
+        dormant: session.dormant ?? false,
+        standby: session.standby ?? false,
+        dismissed: session.dismissed ?? false,
+        mcp_reload_needed: session.mcp_reload_needed ?? false,
+      }));
+      const sessions = catalog.filter(session => !session.ended && session.liveness === "live" && session.supervisor.trim());
+      const stopped_sessions = catalog.filter(session => session.ended || session.liveness === "stale_metadata");
+      await route.fulfill({ json: { schema_version: 1, freshness_threshold_secs: 30, sessions, stopped_sessions } });
       // Counted once the page has the answer, so a waiter that resumes on it
       // never races the response it is waiting for.
       this.catalogFetches.set(machineId, (this.catalogFetches.get(machineId) ?? 0) + 1);

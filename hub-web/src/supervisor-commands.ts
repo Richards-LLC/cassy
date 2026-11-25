@@ -118,7 +118,9 @@ export class SlashCommands {
   dispose(): void { this.anchor?.setAttribute("aria-expanded", "false"); this.events.abort(); this.panel.remove(); }
   show(anchor?: HTMLElement): void {
     if (anchor && this.anchor === anchor && !this.panel.hidden) { this.close(); return; }
-    if (this.options.session.intent) return;
+    const phase = this.options.session.intent?.phase;
+    if (phase === "confirming" || phase === "sending") return;
+    if (phase === "failed") this.close();
     if (anchor) this.mountAtAnchor(anchor); else this.mountAtComposer();
     this.open = true; this.escaped = false; this.sync(); this.positionDropdown();
     this.panel.querySelector<HTMLButtonElement>("button")?.focus();

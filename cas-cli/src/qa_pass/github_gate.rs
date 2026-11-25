@@ -244,8 +244,7 @@ fn github_merges_in_depth(command: &str, depth: usize, opaque_graphql: &mut bool
             .iter()
             .any(|mutation| statement.contains(mutation))
         {
-            let (ids, complete) = invocation.map(graphql_merge_ids).unwrap_or_default();
-            let unresolved = !complete || ids.is_empty();
+            let (ids, unresolved) = invocation.map(graphql_merge_ids).unwrap_or_default();
             let mut push = |selector| merges.push(GithubMerge {
                 transport: MergeTransport::Api, selector, repo: None, match_head: None,
                 statement: statement_text.to_owned(),
@@ -608,7 +607,12 @@ fn resolve_nodes(cwd: &Path, ids: &[String], host: Option<&str>) -> Vec<Result<P
     (0..ids.len()).map(|index| {
         let alias = format!("n{index}");
         if let Some(value) = data.get(&alias).filter(|value| value.is_object()) {
-            return serde_json::from_value(value.clone()).map_err(|error| format!("Unreadable pull request data: {error}"));
+            let pr: PrMetadata = serde::Deserialize::deserialize(value)
+                .map_err(|error| format!("Unreadable pull request data: {error}"))?;
+            if pr.repository().is_none() || pr.number.is_none() || pr.branch().is_none() || pr.head().is_none() {
+                return Err("GitHub returned incomplete metadata for the pull request node".into());
+            }
+            return Ok(pr);
         }
         let detail = errors.into_iter().flatten()
             .find(|error| error["path"][0].as_str() == Some(alias.as_str()))
@@ -649,34 +653,16 @@ fn graphql_merge_ids(tokens: &[&str]) -> (Vec<String>, bool) {
     let tokens = TOKEN.find_iter(query).map(|token| token.as_str())
         .filter(|token| !token.starts_with('#')).collect::<Vec<_>>();
     let mut ids = Vec::new();
-    let mut complete = true;
-    let mut definitions = &[][..];
+    let mut unresolved = false;
     let mut depth = 0usize;
-    let mut remaining = tokens.as_slice();
-    while let Some((&token, rest)) = remaining.split_first() {
-        remaining = rest;
+    let mut header_arguments = 0usize;
+    for (index, &token) in tokens.iter().enumerate() {
         if depth == 0 {
-            if token == "{" {
-                depth = 1;
-            } else if matches!(token, "query" | "mutation" | "subscription" | "fragment") {
-                let header = match rest {
-                    [name, tail @ ..] if name.starts_with(|ch: char| ch == '_' || ch.is_ascii_alphabetic()) => tail,
-                    _ => rest,
-                };
-                let variables = graphql_group(header, "(", ")");
-                if token != "fragment" {
-                    definitions = variables.unwrap_or_default();
-                }
-                let header = variables.map_or(header, |variables| &header[variables.len() + 2..]);
-                let mut arguments = 0usize;
-                remaining = header.iter().position(|&part| {
-                    match part {
-                        "(" => arguments += 1,
-                        ")" => arguments = arguments.saturating_sub(1),
-                        _ => {}
-                    }
-                    part == "{" && arguments == 0
-                }).map_or(&[], |start| &header[start..]);
+            match token {
+                "(" => header_arguments += 1,
+                ")" => header_arguments = header_arguments.saturating_sub(1),
+                "{" if header_arguments == 0 => depth = 1,
+                _ => {}
             }
             continue;
         }
@@ -689,7 +675,7 @@ fn graphql_merge_ids(tokens: &[&str]) -> (Vec<String>, bool) {
         {
             continue;
         }
-        let ["(", arguments @ ..] = rest else { continue; };
+        let ["(", arguments @ ..] = &tokens[index + 1..] else { continue; };
         let input = match arguments {
             ["input", ":", value @ ..] => value,
             _ => &[],
@@ -697,30 +683,21 @@ fn graphql_merge_ids(tokens: &[&str]) -> (Vec<String>, bool) {
         let object = input.first() == Some(&"$");
         let value = if object { input } else { graphql_object_id(input).unwrap_or_default() };
         let id = if let ["$", name, ..] = value {
-            let default = || graphql_variable_default(definitions, name, object);
             match &body {
-                Some(body) => match body["variables"].get(*name) {
-                    Some(value) if object => value["pullRequestId"].as_str().map(str::to_owned),
-                    Some(value) => value.as_str().map(str::to_owned),
-                    None => default(),
-                },
-                None if object => fields.get(format!("{name}[pullRequestId]").as_str()).map(|id| (*id).to_owned())
-                    .or_else(|| {
-                        let supplied = fields.keys().any(|key| key == name
-                            || key.strip_prefix(*name).is_some_and(|suffix| suffix.starts_with('[')));
-                        if supplied { None } else { default() }
-                    }),
-                None => fields.get(name).map(|id| (*id).to_owned()).or_else(default),
+                Some(body) if object => body["variables"][*name]["pullRequestId"].as_str().map(str::to_owned),
+                Some(body) => body["variables"][*name].as_str().map(str::to_owned),
+                None if object => fields.get(format!("{name}[pullRequestId]").as_str()).map(|id| (*id).to_owned()),
+                None => fields.get(name).map(|id| (*id).to_owned()),
             }
         } else {
-            value.first().and_then(|id| graphql_string_id(id))
+            value.first().and_then(|id| serde_json::from_str::<String>(id).ok())
         };
         match id.filter(|id| !id.is_empty() && !id.starts_with('@')) {
             Some(id) => ids.push(id),
-            None => complete = false,
+            None => unresolved = true,
         }
     }
-    (ids, complete)
+    (ids, unresolved)
 }
 
 fn graphql_group<'a, 'b>(tokens: &'a [&'b str], open: &str, close: &str) -> Option<&'a [&'b str]> {
@@ -747,31 +724,6 @@ fn graphql_object_id<'a, 'b>(tokens: &'a [&'b str]) -> Option<&'a [&'b str]> {
         }
     }
     None
-}
-
-fn graphql_variable_default(definitions: &[&str], name: &str, object: bool) -> Option<String> {
-    let start = definitions.windows(4).position(|tokens| matches!(tokens, ["$", variable, ":", _] if *variable == name))?;
-    let tail = &definitions[start + 4..];
-    let tail = tail.strip_prefix(&["!"]).unwrap_or(tail);
-    let ["=", value @ ..] = tail else { return None; };
-    let value = if object { graphql_object_id(value)? } else { value };
-    graphql_string_id(value.first()?)
-}
-
-fn graphql_string_id(token: &str) -> Option<String> {
-    if !token.starts_with('"') { return None; }
-    if !token.contains("\\u{") { return serde_json::from_str(token).ok(); }
-    static ESCAPE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"\\(?:u\{([0-9a-fA-F]+)\}|.)").expect("valid GraphQL escape pattern")
-    });
-    let json = ESCAPE.replace_all(token, |captures: &regex::Captures<'_>| {
-        let character = captures.get(1).and_then(|digits| u32::from_str_radix(digits.as_str(), 16).ok()).and_then(char::from_u32);
-        match character {
-            Some(character) => character.encode_utf16(&mut [0; 2]).iter().map(|unit| format!("\\u{unit:04x}")).collect::<String>(),
-            None => captures[0].to_owned(),
-        }
-    });
-    serde_json::from_str(&json).ok()
 }
 
 fn repo_identity(value: &str) -> Option<String> {
@@ -886,13 +838,20 @@ pub(crate) fn github_merge_refusal_with_supervisor(
         }
     }
     if lookups.is_empty() { return None; }
-    for (_, lookup) in &lookups {
+    let mut graphql_failure = None;
+    for (merge, lookup) in &lookups {
         match lookup {
             Ok(pr) => if let Some(refusal) = verifier::merge_refusal(cas_root, cwd, pr, supervisor) {
                 return Some(refusal);
             },
+            Err(error) if matches!(&merge.selector, MergeSelector::PullRequestNodes { .. } | MergeSelector::Unresolvable(_)) => {
+                graphql_failure.get_or_insert(error.as_str());
+            }
             Err(error) => tracing::warn!(code = "PR_VERIFIER_LOOKUP_FAILED", %error, "Raw GitHub merge: verifier could not resolve PR head"),
         }
+    }
+    if let Some(error) = graphql_failure {
+        return Some(format!("PR_VERIFIER_UNRESOLVED: {error}. Use factory worktree_merge instead of raw GraphQL."));
     }
     let qa = crate::config::Config::load(cas_root).ok()?.qa();
     if !qa.independent_pass {
@@ -932,14 +891,14 @@ pub(crate) fn github_merge_refusal_with_supervisor(
             let target = lookup.as_ref().ok().and_then(PrMetadata::repository)
                 .or_else(|| merge.repo.as_deref().and_then(repo_identity))
                 .or_else(|| origin_identity(cwd));
-            let scoped: Vec<(Task, Vec<QaPass>)> = gated
+            let scoped: Vec<_> = gated
                 .iter()
                 .zip(&task_repositories)
                 .filter(|(_, repository)| match (&target, repository) {
                     (Some(target), Some((directory, identity))) => same_repository(identity, target, directory),
                     _ => true,
                 })
-                .map(|(entry, _)| entry.clone())
+                .map(|(entry, _)| entry)
                 .collect();
             if scoped.is_empty() {
                 return None;
@@ -953,7 +912,7 @@ fn refusal_for_merge(
     cas_root: &Path,
     cwd: &Path,
     qa: &QaConfig,
-    gated: &[(Task, Vec<QaPass>)],
+    gated: &[&(Task, Vec<QaPass>)],
     merge: &GithubMerge,
     lookup: Result<&PrMetadata, &String>,
 ) -> Option<String> {
@@ -974,6 +933,7 @@ fn refusal_for_merge(
         .or_else(|| resolved.and_then(PrMetadata::head).map(str::to_string));
     let bound: Vec<&(Task, Vec<QaPass>)> = gated
         .iter()
+        .copied()
         .filter(|(task, passes)| {
             pr_number.is_some_and(|number| task.deliverables.delivery_pr_number == Some(number))
                 || head_branch.as_deref().is_some_and(|branch| {
@@ -993,30 +953,15 @@ fn refusal_for_merge(
             // The PR is known and no recorded QA round binds its branch.
             return None;
         }
-        let open: Vec<String> = gated
+        let open = gated
             .iter()
-            .filter_map(|(task, passes)| {
-                let latest = passes.iter().find(|pass| !pass.is_withdrawn())?;
-                (!latest.state.satisfies_gate()).then(|| {
-                    format!(
-                        "{} (round {} {}, pass {})",
-                        task.id, latest.round, latest.state, latest.id
-                    )
-                })
+            .filter(|(_, passes)| {
+                passes.iter().find(|pass| !pass.is_withdrawn())
+                    .is_some_and(|latest| !latest.state.satisfies_gate())
             })
-            .collect();
-        if open.is_empty() {
+            .count();
+        if open == 0 {
             return None;
-        }
-        if let MergeSelector::Unresolvable(why) = &merge.selector {
-            return Some(format!(
-                "INDEPENDENT QA REQUIRED: Cassy cannot tell which delivery `{}` merges ({why}), \
-                 and independent QA is still open for {}. Wait for the verdict, name the PR by number \
-                 or branch, or check with `{prefix}verification action=qa_status task_id=<task>`.",
-                merge.statement,
-                open.join(", "),
-                prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
-            ));
         }
         // cas-0169: the lookup failed, so nothing ties this PR to any open
         // round. Name the failure; listing the open rounds would blame tasks
@@ -1031,7 +976,7 @@ fn refusal_for_merge(
              in its own environment: a login that exists only inside `bash -ic` is invisible \
              to it, so export GH_TOKEN where the hook can see it.",
             merge.statement,
-            open.len(),
+            open,
         ));
     }
 

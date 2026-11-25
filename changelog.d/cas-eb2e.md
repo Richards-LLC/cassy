@@ -1,3 +1,3 @@
 ### Fixed — Factory
 
-- **Raw GitHub merges honor verifier holds** — A pull request cannot merge through the agent hook while its current head has a pending or rejected Cassy review. A supervisor may override a rejection with a recorded reason; pending reviews must finish.
+- **Raw GitHub merges honor verifier holds** — The agent hook holds merges with a pending or rejected review at the current PR head, and visible GraphQL merges whose targets cannot be verified. A supervisor may override a resolved rejection with a recorded reason; pending and unresolved holds cannot be overridden.

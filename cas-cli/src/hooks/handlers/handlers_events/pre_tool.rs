@@ -13819,10 +13819,8 @@ printf '}'
         let graphql_variables = concat!("gh api graphql -f query='mutation($pr: ID!) { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }' -F pr=PR_fixture");
         let graphql_input = concat!("gh api graphql -f query='mutation($input: MergePullRequestInput!) { mergePull", "Request(input: $input) { clientMutationId } }' -F 'input[pullRequestId]=PR_fixture'");
         let graphql_json = concat!("gh api graphql --input - <<< '{\"query\":\"mutation($input: MergePullRequestInput!) { mergePull", "Request(input: $input) { clientMutationId } }\",\"variables\":{\"input\":{\"pullRequestId\":\"PR_fixture\"}}}'");
-        let graphql_default = concat!("gh api graphql -f query='mutation(,$pr,: ID!,= # default )\n \"PR_\\u0066ixture\",) { mergePull", "Request(,input,: {,# target\n pullRequestId,: $pr,},) { clientMutationId } }'");
-        let graphql_keyword_variable = graphql_default.replace("$pr", "$mutation");
-        let graphql_named = concat!("gh api graphql -f query='mutation mergePull", "Request($pr: ID! = \"PR_other\") { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }'");
-        let graphql_object_default = concat!("gh api graphql --input - <<< '{\"query\":\"mutation($input: MergePullRequestInput! = {pullRequestId: \\\"PR_fixture\\\"}) { mergePull", "Request(input: $input) { clientMutationId } }\"}'");
+        let graphql_formatted = concat!("gh api graphql -f query='mutation(,$mutation,: ID!,) { mergePull", "Request(,input,: {,# target\n pullRequestId,: $mutation,},) { clientMutationId } }'");
+        let graphql_named = concat!("gh api graphql -f query='mutation mergePull", "Request($pr: ID!) { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }' -F pr=PR_other");
         let graphql_fragment_default = concat!("gh api graphql -f query='fragment Result on MergePullRequestPayload { clientMutationId } mutation($pr: ID = \"PR_fixture\") { mergePull", "Request(input: {pullRequestId: $pr}) { ...Result } }'");
         let graphql_block_id = concat!("gh api graphql -f query='mutation { enqueuePull", "Request(input: {pullRequestId: \"\"\"PR_fixture\"\"\"}) { clientMutationId } }'");
         let graphql_unresolved = concat!("gh api graphql -f query='mutation($pr: ID!) { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }'");
@@ -13841,7 +13839,6 @@ printf '}'
         run("worker", &command, Some("PR_VERIFIER_PENDING"));
         run("supervisor", api, Some("PR_VERIFIER_PENDING"));
         verdict(&first, VerificationStatus::Rejected);
-        let keyword_variable = probe("worker", &graphql_keyword_variable);
         let unresolved_code = |denial: Option<String>| denial.is_some_and(|text| text.contains("PR_VERIFIER_UNRESOLVED"));
         let fragment_default = probe("worker", graphql_fragment_default);
         let block_id = probe("worker", graphql_block_id);
@@ -13851,11 +13848,12 @@ printf '}'
         let input_denial = denial_for("supervisor", graphql_input);
         let json_denial = denial_for("supervisor", graphql_json);
         authorize(&first);
+        run("supervisor", graphql_fragment_default, Some("PR_VERIFIER_UNRESOLVED"));
         run("worker", &command, Some("PR_VERIFIER_REJECTED"));
         run("worker", graphql, Some("PR_VERIFIER_REJECTED"));
-        let defaulted = probe("worker", graphql_default);
-        let object_defaulted = probe("worker", graphql_object_default);
-        let supplied = probe("worker", &format!("{graphql_default} -F pr=PR_other"));
+        run("worker", &format!("{graphql_formatted} -F mutation=PR_fixture"), Some("PR_VERIFIER_REJECTED"));
+        let unresolved = probe("worker", graphql_unresolved);
+        assert_eq!((unresolved_code(unresolved.0), unresolved.1), (true, 0));
         let lookup_failure = |command: &str| {
             let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let sink = logs.clone();
@@ -13865,7 +13863,6 @@ printf '}'
             let warnings = String::from_utf8_lossy(&logs.lock().unwrap()).matches("PR_VERIFIER_LOOKUP_FAILED").count();
             (denial.is_none(), reads, warnings)
         };
-        let unresolved = lookup_failure(graphql_unresolved);
         let opaque = lookup_failure(&graphql_opaque);
         let opaque_options_first = lookup_failure(&graphql_opaque_options_first);
         let multi_denial = denial_for("worker", graphql_multi);
@@ -13914,7 +13911,7 @@ printf '}'
         run("worker", &command, None);
         run("worker", api, None);
         run("worker", graphql, None);
-        run("worker", graphql_multi, None);
+        run("worker", graphql_multi, Some("PR_VERIFIER_UNRESOLVED"));
         let (approved_wrapped, approved_wrapped_reads) = probe("worker", &graphql_wrapped);
 
         git(&["remote", "set-url", "origin", "https://github.com/old/project.git"]);
@@ -13955,11 +13952,9 @@ printf '}'
             bound_head: head, deadline_at: now + chrono::Duration::minutes(10), max_rounds: 3,
         }, now).unwrap();
         assert!(matches!(qa, cas_store::QaPassOpen::Dispatched(_)));
-        let named = lookup_failure(graphql_named);
-        assert_eq!((rejected(keyword_variable.0), keyword_variable.1, named), (true, 1, (true, 1, 0)));
         assert_eq!(
-            (rejected(defaulted.0), defaulted.1, rejected(object_defaulted.0), object_defaulted.1, supplied.0.is_none(), supplied.1, unresolved, opaque, opaque_options_first),
-            (true, 1, true, 1, true, 1, (true, 0, 1), (true, 0, 1), (true, 0, 1)),
+            (lookup_failure(graphql_named), opaque, opaque_options_first),
+            ((true, 1, 0), (true, 0, 1), (true, 0, 1)),
         );
         assert_eq!(
             (rejected(multi_denial), rejected(wrapped_denial), rejected(enqueue_denial), rejected(large_denial), recorded_fork_denial.is_none(), repaired_fork_denial.is_none(), approved_wrapped.is_none(), wrapped_reads, enqueue_reads, approved_wrapped_reads, empty_discovery_failures, broken_discovery_failures),

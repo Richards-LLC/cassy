@@ -373,6 +373,11 @@ fn inspect_scoped_with_probe(
         .iter()
         .filter_map(|path| path.canonicalize().ok())
         .collect();
+    let report_probe: CacheProcessProbe = if cfg!(target_os = "macos") && named.is_some() {
+        |_, _, _, _, _| None
+    } else {
+        process_block_at
+    };
 
     let mut records = Vec::with_capacity(scanned.len());
     for cache in scanned.drain(..) {
@@ -397,13 +402,16 @@ fn inspect_scoped_with_probe(
                     "unknown owner; review-only. Remediation: manual review, then gc_cleanup reclaim_unknown_target=<exact absolute cache path> force=true dry_run=false; positive quiet window and native/build guards remain mandatory; no ownership adoption".into()
                 },
             )
-        } else if let Err((disposition, reason)) = cache_admission(
+        } else if let Err((disposition, reason)) = cache_admission_at(
             cas_root,
             &cache.worktree,
             &cache.path,
             &canonical_live_roots,
             cache.snapshot.as_ref(),
             false,
+            Path::new("/proc"),
+            false,
+            report_probe,
         ) {
             (disposition, reason)
         } else if cache.newest_write.is_some_and(|modified| {
@@ -562,6 +570,17 @@ pub fn cleanup_selected_with_opt_in(
         reclaim_unknown_target, proc_root)
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn deep_reclaim_target(cas_root: &Path, target: &Path) -> io::Result<TargetCacheReport> {
+    let config = crate::config::Config::load(cas_root).map_err(io::Error::other)?;
+    let policy = TargetCachePolicy::from(config.factory());
+    let agents = crate::store::open_agent_store(cas_root).map_err(io::Error::other)?;
+    let live = crate::mcp::tools::service::factory_ops::live_target_cache_worktrees(agents.as_ref(), cas_root);
+    let mut report = inspect_named(cas_root, policy, target, &live, false)?;
+    cleanup_selected_with_opt_in(cas_root, &mut report, policy, &live, Some(target))?;
+    Ok(report)
+}
+
 fn cleanup_selected_using(
     cas_root: &Path,
     report: &mut TargetCacheReport,
@@ -590,6 +609,15 @@ fn cleanup_selected_with_capacity(
     proc_root: &Path,
     capacity_probe: Option<&dyn Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>>,
 ) -> io::Result<()> {
+    let process_probe: CacheProcessProbe = process_block_at;
+    #[cfg(target_os = "macos")]
+    let process_probe: CacheProcessProbe = if reclaim_unknown_target.is_some() && !report.dry_run {
+        |worktree, cache, descriptors, _, _| {
+            macos_deep_process_uses(worktree, cache, descriptors).then_some(CacheDisposition::Indeterminate)
+        }
+    } else {
+        process_probe
+    };
     let deadline = reclaim_unknown_target.map(|_| Instant::now() + Duration::from_secs(8));
     if let Some(path) = reclaim_unknown_target {
         // Named reclaim never widens into ordinary cache, preview or artifact GC.
@@ -704,6 +732,7 @@ fn cleanup_selected_with_capacity(
             true,
             proc_root,
             explicit_unknown,
+            process_probe,
         ) {
             Ok(guard) => guard,
             Err((disposition, reason)) => {
@@ -776,7 +805,7 @@ fn cleanup_selected_with_capacity(
             .as_ref()
             .map_or_else(Vec::new, legacy::Guard::descriptors);
         let probe_root = probe_root(&record.worktree, &record.path);
-        if let Some(disposition) = process_block_at(
+        if let Some(disposition) = process_probe(
             probe_root,
             &record.path,
             &descriptors,
@@ -836,7 +865,7 @@ fn cleanup_selected_with_capacity(
             }
         }
         let process_block =
-            process_block_at(probe_root, &quarantine, &descriptors, guard.is_some() && !explicit_unknown, proc_root);
+            process_probe(probe_root, &quarantine, &descriptors, guard.is_some() && !explicit_unknown, proc_root);
         if guard
             .as_ref()
             .is_some_and(|guard| !guard.unchanged(&quarantine))
@@ -1507,25 +1536,7 @@ fn scan_cache_until(
     })
 }
 
-fn cache_admission(
-    cas_root: &Path,
-    worktree: &Path,
-    cache: &Path,
-    live: &HashSet<PathBuf>,
-    snapshot: Option<&legacy::Snapshot>,
-    lock: bool,
-) -> Result<Option<legacy::Guard>, (CacheDisposition, String)> {
-    cache_admission_at(
-        cas_root,
-        worktree,
-        cache,
-        live,
-        snapshot,
-        lock,
-        Path::new("/proc"),
-        false,
-    )
-}
+type CacheProcessProbe = fn(&Path, &Path, &[i32], bool, &Path) -> Option<CacheDisposition>;
 
 fn cache_admission_at(
     cas_root: &Path,
@@ -1536,6 +1547,7 @@ fn cache_admission_at(
     lock: bool,
     proc_root: &Path,
     explicit_unknown: bool,
+    process_probe: CacheProcessProbe,
 ) -> Result<Option<legacy::Guard>, (CacheDisposition, String)> {
     if live.contains(worktree) {
         return Err((
@@ -1552,7 +1564,7 @@ fn cache_admission_at(
                     "unsafe unknown-cache snapshot".into(),
                 )
             })?;
-        if let Some(disposition) = process_block_at(worktree, cache, &[], false, proc_root) {
+        if let Some(disposition) = process_probe(worktree, cache, &[], false, proc_root) {
             return Err((
                 disposition,
                 "native process/handle evidence does not prove the unknown cache idle".into(),
@@ -1569,7 +1581,7 @@ fn cache_admission_at(
                 )
             })?;
         if let Some(disposition) =
-            process_block_at(worktree, cache, &guard.descriptors(), false, proc_root)
+            process_probe(worktree, cache, &guard.descriptors(), false, proc_root)
         {
             return Err((
                 disposition,
@@ -1611,7 +1623,7 @@ fn cache_admission_at(
         // target itself (cargo's lock, rustc output, a test binary). A worker's
         // MCP server or shell working in the checkout does not keep it warm.
         if let Some(disposition) =
-            process_block_at(cache, cache, &[], cfg!(target_os = "linux"), proc_root)
+            process_probe(cache, cache, &[], cfg!(target_os = "linux"), proc_root)
         {
             return Err((
                 disposition,
@@ -1627,7 +1639,7 @@ fn cache_admission_at(
                 format!("scratch target build guard refused: {error}"),
             )
         })?;
-        if let Some(disposition) = process_block_at(
+        if let Some(disposition) = process_probe(
             cache,
             cache,
             &guard.descriptors(),
@@ -1647,10 +1659,10 @@ fn cache_admission_at(
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (cas_root, snapshot, lock, proc_root);
-        if live_process_uses(worktree, cache) {
+        let _ = (cas_root, snapshot, lock);
+        if let Some(disposition) = process_probe(worktree, cache, &[], false, proc_root) {
             Err((
-                CacheDisposition::Indeterminate,
+                disposition,
                 "process evidence does not establish idle".into(),
             ))
         } else {
@@ -3312,13 +3324,20 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn cas_49b9_exact_unknown_target_opt_in_reclaims_only_quiet_regenerable_subtree() {
-        let (_temp, cas, target, proc, policy) = unknown_cache_fixture();
+        let (_temp, cas, target, _proc, policy) = unknown_cache_fixture();
         let retired = cas.join("merge-sweeps/assembly-target");
         for (cache, expected_bytes) in [(&target, 11), (&retired, 7)] {
-            let mut report = inspect(&cas, policy, &[], &[], false).unwrap();
+            let report = inspect(&cas, policy, &[], &[], false).unwrap();
             let row = report.caches.iter().find(|row| &row.path == cache).unwrap();
             assert_eq!(row.disposition, CacheDisposition::OwnershipUncertain);
-            cleanup_unknown_fixture(&cas, &mut report, policy, Some(cache), &proc);
+            #[cfg(target_os = "linux")]
+            let report = {
+                let mut report = report;
+                cleanup_unknown_fixture(&cas, &mut report, policy, Some(cache), &_proc);
+                report
+            };
+            #[cfg(target_os = "macos")]
+            let report = deep_reclaim_target(&cas, cache).unwrap();
             let row = report.caches.iter().find(|row| &row.path == cache).unwrap();
             assert!(
                 !cache.exists(),

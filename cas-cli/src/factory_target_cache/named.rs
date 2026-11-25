@@ -532,10 +532,15 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(result.is_error, Some(true), "{result:?}");
-        assert!(
-            !target.exists(),
-            "native MCP named reclaim failed: {result:?}"
-        );
+        #[cfg(target_os = "macos")]
+        {
+            assert!(target.join("debug/output").is_file());
+            assert!(result.content.iter().any(|content| content.as_text().is_some_and(|text| {
+                text.text.contains("cas factory gc deep-reclaim --target")
+            })));
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert!(!target.exists(), "native MCP named reclaim failed: {result:?}");
         assert!(cas.join("worktrees/retired/source.rs").is_file());
         assert!(cas.join("worktrees/retired/target/proof.txt").is_file());
         assert!(

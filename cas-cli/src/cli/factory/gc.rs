@@ -22,7 +22,9 @@ pub(super) fn execute(
             json!({ "action": "gc_report", "json": cli.json, "full": cli.full })
         }
         #[cfg(target_os = "macos")]
-        FactoryGcCommands::DeepReclaim { worker } => return deep_reclaim(cas_root, worker),
+        FactoryGcCommands::DeepReclaim { worker, target } => {
+            return deep_reclaim(cas_root, worker.as_deref(), target.as_deref());
+        }
         FactoryGcCommands::Cleanup {
             force,
             dry_run,
@@ -74,24 +76,40 @@ pub(super) fn execute(
 }
 
 #[cfg(target_os = "macos")]
-fn deep_reclaim(cas_root: &Path, worker: &str) -> Result<()> {
+fn deep_reclaim(cas_root: &Path, worker: Option<&str>, target: Option<&Path>) -> Result<()> {
     use std::io::IsTerminal;
 
+    let label = match (worker, target) {
+        (Some(worker), None) => format!("{worker:?}"),
+        (None, Some(target)) if target.is_absolute() => format!("{target:?}"),
+        _ => bail!("deep reclaim requires one worker name or one exact absolute target path"),
+    };
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {
         bail!("deep reclaim requires an interactive terminal");
     }
-    eprint!("Deep reclaim inspects open files host-wide and may trigger macOS privacy prompts. Reclaim target for {worker:?}? [y/N] ");
+    eprint!("Deep reclaim inspects open files host-wide and may trigger macOS privacy prompts. Reclaim {label}? [y/N] ");
     std::io::stderr().flush()?;
     let mut answer = String::new();
     stdin.read_line(&mut answer)?;
     if !answer.trim().eq_ignore_ascii_case("y") {
         bail!("deep reclaim canceled");
     }
-    if !crate::factory_target_cache::retirement::deep_reclaim(cas_root, worker)? {
-        bail!("retained target for {worker:?}; inspect the factory log for the reason and size");
+    if let Some(worker) = worker {
+        if !crate::factory_target_cache::retirement::deep_reclaim(cas_root, worker)? {
+            bail!("retained target for {worker:?}; inspect the factory log for the reason and size");
+        }
+    } else if let Some(target) = target {
+        let report = crate::factory_target_cache::deep_reclaim_target(cas_root, target)?;
+        if let Some(record) = report.caches.first() {
+            if record.disposition != crate::factory_target_cache::CacheDisposition::Reclaimed {
+                bail!("retained {label} ({} bytes): {}", record.bytes, record.reason);
+            }
+        } else {
+            bail!("{}", report.remediation);
+        }
     }
-    eprintln!("Target cleanup completed for {worker:?}.");
+    eprintln!("Target cleanup completed for {label}.");
     Ok(())
 }
 

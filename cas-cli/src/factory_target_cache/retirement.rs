@@ -608,6 +608,8 @@ mod tests {
         let target = worker.join("target");
         let cargo_lock = fs::File::open(target.join("debug/.cargo-lock")).unwrap();
         cargo_lock.lock_exclusive().unwrap();
+        let subscriber = tracing_subscriber::fmt().with_writer(std::io::stderr).finish();
+        let _trace = tracing::subscriber::set_default(subscriber);
         let retire_target = || retire(&root, &worker, &artifacts, None, retirement_process_uses, |_, _| Ok(false)).unwrap();
         assert!(!retire_target());
         assert!(target.is_dir());

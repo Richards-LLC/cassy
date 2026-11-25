@@ -8809,6 +8809,8 @@ fn cleanup_target_cache_report(
     unknown: Option<&std::path::Path>,
 ) -> std::io::Result<crate::factory_target_cache::TargetCacheReport> {
     let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
+    let terminal_required = cfg!(target_os = "macos") && unknown.is_some();
+    let authorized = authorized && !terminal_required;
     let mut report = if let Some(path) = unknown {
         crate::factory_target_cache::inspect_named(cas_root, policy, path, live, !authorized)?
     } else {
@@ -8817,6 +8819,9 @@ fn cleanup_target_cache_report(
     };
     if authorized || unknown.is_some() {
         crate::factory_target_cache::cleanup_selected_with_opt_in(cas_root, &mut report, policy, live, unknown)?;
+    }
+    if terminal_required {
+        report.remediation = "Named target-cache reclaim is preview-only here on macOS. In a terminal, run cas factory gc deep-reclaim --target <absolute-path>; it may trigger macOS privacy prompts.".to_string();
     }
     Ok(report)
 }
@@ -9569,7 +9574,7 @@ fn live_factory_workers(agent_store: &dyn cas_store::AgentStore) -> LiveFactoryW
     live_factory_workers_from_agents(agent_store.list(None).unwrap_or_default())
 }
 
-fn live_target_cache_worktrees(agent_store: &dyn cas_store::AgentStore, cas_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+pub(crate) fn live_target_cache_worktrees(agent_store: &dyn cas_store::AgentStore, cas_root: &std::path::Path) -> Vec<std::path::PathBuf> {
     agent_store
         .list(None)
         .unwrap_or_default()

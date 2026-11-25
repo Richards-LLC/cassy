@@ -114,7 +114,8 @@ pub(super) fn register_supervisor(cas_dir: &Path, id: &str, machine_id: &str, fo
     let canonical_id = cas::cloud::resolve_canonical_id(cas_dir);
     let mut coordinator = CloudCoordinator::new(config)
         .unwrap()
-        .with_canonical_id(canonical_id);
+        .with_canonical_id(canonical_id)
+        .with_machine_label(Some(machine_id.to_string()));
     let mut agent = Agent::new(id.to_string(), format!("sup-{id}"));
     agent.role = AgentRole::Supervisor;
     agent.machine_id = Some(machine_id.to_string());

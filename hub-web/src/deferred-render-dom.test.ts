@@ -116,6 +116,28 @@ describe("a click that lands during a deferred rebuild", () => {
     expect(guarded.rebuilds()).toBe(1);
   });
 
+  it("keeps a body-mounted header action alive until its click", () => {
+    document.body.innerHTML = '<section id="app"></section><button></button>';
+    const pressed = document.querySelector("button")!;
+    const order: string[] = [];
+    pressed.onclick = () => order.push("click");
+    const afterGesture: (() => void)[] = [];
+    const rebuild = () => { order.push("rebuild"); pressed.replaceWith(document.createElement("button")); };
+    const scheduler = new DeferredRenderScheduler({ render: rebuild, afterGesture: run => afterGesture.push(run) });
+    const events = new AbortController();
+    document.addEventListener("pointerdown", () => scheduler.gestureStarted(), { capture: true, signal: events.signal });
+    document.addEventListener("pointerup", () => scheduler.gestureEnded(), { capture: true, signal: events.signal });
+    try {
+      pressed.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      if (!scheduler.deferDuringGesture()) rebuild();
+      pressed.dispatchEvent(new Event("pointerup", { bubbles: true }));
+      expect(pressed.isConnected).toBe(true);
+      pressed.click();
+      for (const run of afterGesture) run();
+      expect(order).toEqual(["click", "rebuild"]);
+    } finally { events.abort(); }
+  });
+
   it("leaves the field alone while focus merely moves between inputs", () => {
     const guarded = harness({ gestureAware: true });
 

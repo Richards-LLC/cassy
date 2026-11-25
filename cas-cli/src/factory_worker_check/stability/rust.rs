@@ -143,8 +143,8 @@ impl Inventory<'_> {
                         platforms,
                         identity: Identity::exact(path, name), package: package.into(),
                         harness: harness.map(str::to_owned), source: source[begin..node.end_byte()].into(),
-                        parameterized: attrs.iter().any(|(_, attr)| !attr.contains("test]") && attribute.is_match(attr)
-                            && !attr.contains("::test")),
+                        parameterized: attrs.iter().any(|(_, attr)| attribute.captures(attr)
+                            .is_some_and(|kind| &kind[1] != "test")),
                     });
                 }
                 "mod_item" => {
@@ -360,6 +360,13 @@ pub(crate) fn owners(repo: &Path, head: &str, tests: &[Identity]) -> Result<BTre
         owners.entry(test.identity).or_insert((test.package, test.harness));
     }
     Ok(owners)
+}
+
+pub(in crate::factory_worker_check) fn parameterized_tests(repo: &Path, head: &str, tests: &[Identity]) -> Result<Vec<Test>> {
+    let paths = tests.iter().filter(|test| test.path.ends_with(".rs")).map(|test| test.path.clone())
+        .collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+    Ok(inventory(repo, head, &paths)?.0.into_iter()
+        .filter(|test| test.parameterized && tests.contains(&test.identity)).collect())
 }
 
 pub(crate) fn changed(repo: &Path, base: &str, head: &str, paths: &[String]) -> Result<Vec<Test>> {

@@ -72,6 +72,9 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   const changed = double.announceCatalog("fixture", { added: ["running"], removed: ["stale"] });
   await catalog();
   await changed;
+  const refreshed = double.announceCatalog("fixture");
+  await catalog();
+  await refreshed;
   expect((await http("/v1/sessions/running/operations", "POST", {
     op_id: "focus", op: { kind: "focus_epic", epic_id: "epic" }, expected: { epic_id: null },
   })).status).toBe(200);
@@ -109,6 +112,6 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   const result = await http("/v1/sessions/running", "DELETE");
   check("EndSessionReceipt", result.json);
   expect(result.json.outcome).toBe("ended");
-  expect(events.map(event => event.kind)).toEqual(["session_added", "pane_removed", "fleet_changed"]);
+  expect(events.map(event => event.kind)).toEqual(["session_added", "pane_removed", "session_added", "fleet_changed"]);
   for (const event of events) check("MachineEvent", event);
 });

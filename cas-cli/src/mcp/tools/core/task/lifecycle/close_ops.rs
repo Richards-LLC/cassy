@@ -6378,6 +6378,27 @@ impl CasCore {
             }
             Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-28", message))),
         };
+        if existing_delivery.is_none() && task.execution_note.as_deref() == Some("test-first") {
+            let repo = &context.repo_root;
+            let head = &input.commit_sha;
+            let target = &input.target_branch;
+            let ranges = task_commit_identity_in_repo(repo, task, Some(head.clone())).ok()
+                .and_then(|identity| {
+                    let history = agent_store.get_lease_history(&task.id, None).unwrap_or_default();
+                    let window = resolve_task_commit_receipt_window(task.created_at, &history, identity);
+                    task_attribution::range_bounds(repo, target, &window, Some(head))
+                });
+            if let Some(ranges) = ranges.filter(|ranges| !ranges.is_empty())
+                && let Some(paths) = task_attribution::paths_from_ranges(repo, ranges.iter().map(|(base, tip)| (base.as_str(), tip.as_str())))
+                && let Ok((tests, widened)) = receipt_scope::delivered_tests(&self.cas_root, &worker_path, head, target, &paths, Some(&ranges))
+            {
+                let passing = crate::factory_worker_check::PassingTests::new(&self.cas_root, &worker_path, head)
+                    .with_target(target).with_synced(&task.deliverables.test_receipts);
+                if let Some(refusal) = receipt_scope::red_first_refusal(task, &passing, head, &ranges, &tests, &widened) {
+                    return Ok(Self::tool_error(gate_preflight::park_reply(vec![refusal])));
+                }
+            }
+        }
         let hook_evidence = match run_declared_pre_close_hook(
             task,
             &context,
@@ -9575,7 +9596,7 @@ impl CasCore {
                 reviewed = None;
             }
             if let Some(reviewed) = reviewed.as_ref() {
-                match self.track_reviewed_correction(task_store.as_ref(), &task, repo, &resolved_parent_branch, reviewed) {
+                match self.track_reviewed_correction(task_store.as_ref(), &task, repo, &resolved_parent_branch, reviewed, commit_receipt_window.as_ref()) {
                     Ok(Some(current)) => task = current,
                     Ok(None) => {}
                     Err(error) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, error))),

@@ -125,7 +125,7 @@ impl CasCore {
         if let Some(state) = store.get_execution_state(&task.id)?
             && let Some(impact) = state.get("qa_impact")
             && impact["head_sha"].as_str() == Some(head)
-            && deferred.is_none_or(|rows| rows.is_empty() || impact["g61_deferred_journeys"] == serde_json::json!(rows))
+            && deferred.is_none_or(|rows| impact["g61_deferred_journeys"] == serde_json::json!(rows))
         {
             return Ok(impact.clone());
         }
@@ -170,7 +170,7 @@ impl CasCore {
         let mut value = serde_json::to_value(report)?;
         value["head_sha"] = head.into();
         value["base_sha"] = base.into();
-        if let Some(deferred) = deferred.filter(|rows| !rows.is_empty()) {
+        if let Some(deferred) = deferred {
             value["g61_deferred_journeys"] = serde_json::to_value(deferred)?;
         }
         store

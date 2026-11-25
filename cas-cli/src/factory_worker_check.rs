@@ -852,19 +852,22 @@ impl std::fmt::Display for CapacityRefusal {
 }
 impl std::error::Error for CapacityRefusal {}
 
+fn shell_word(arg: &str) -> String {
+    if !arg.is_empty() && arg.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_@.+/=:,-".contains(&byte)) {
+        arg.to_owned()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\"'\"'"))
+    }
+}
+
 /// The exact backgrounded form of this capped command, which the worker
 /// guard routes to a detached, queued run.
 fn queue_command(cas_root: &Path, args: &[String]) -> String {
-    let quote = |arg: &String| if !arg.is_empty() && arg.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_@.+/=:,-".contains(&byte)) {
-        arg.clone()
-    } else {
-        format!("'{}'", arg.replace('\'', "'\"'\"'"))
-    };
-    let words = args.iter().map(quote).collect::<Vec<_>>().join(" ");
+    let words = args.iter().map(|arg| shell_word(arg)).collect::<Vec<_>>().join(" ");
     if javascript::allowed_args(args) {
         // Only Cargo shapes are rewritten by the guard; name the detached runner.
         format!("cas factory worker-check --cas-root {} --detach -- {words} > target/worker-tests.log 2>&1",
-            quote(&cas_root.display().to_string()))
+            shell_word(&cas_root.to_string_lossy()))
     } else if args.first().is_some_and(|arg| arg == "nextest") {
         format!("cargo {words} > target/worker-tests.log 2>&1 &")
     } else {

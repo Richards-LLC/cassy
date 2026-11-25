@@ -20,7 +20,7 @@ use std::path::Path;
 use cas_types::{Task, TaskRisk};
 
 use super::{SourceModule, changed_source_modules, proof_target_matches_module};
-use crate::factory_worker_check::{PassingTests, stability, widened::{self as widen, Scope}};
+use crate::factory_worker_check::{PassingTests, javascript, stability, widened::{self as widen, Scope}};
 use crate::qa_registry::DeferredSpec;
 
 /// The modules a delivery's test receipts cover beyond its declared targets.
@@ -161,27 +161,38 @@ pub(super) fn park_assessment(
             deferred.into_iter().collect()))
 }
 
-fn explicit_checks(cas_root: &Path, repo: &Path, head: &str) -> anyhow::Result<BTreeMap<String, Vec<DeferredSpec>>> {
+#[derive(Default)]
+struct WorkerChecks {
+    explicit: BTreeMap<String, Vec<DeferredSpec>>,
+    deployed: BTreeSet<String>,
+}
+
+fn worker_checks(cas_root: &Path, repo: &Path, head: &str) -> anyhow::Result<WorkerChecks> {
     let path = crate::config::Config::load(cas_root).map(|config| config.qa().registry.path)
         .unwrap_or_else(|_| crate::qa_registry::DEFAULT_PATH.into());
     let Some(registry) = crate::qa_impact::io::git(repo, &["show", &format!("{head}:{path}")]).ok()
-        .and_then(|contents| crate::qa_registry::parse(&contents).ok()) else { return Ok(BTreeMap::new()) };
-    let mut checks = BTreeMap::<String, Vec<DeferredSpec>>::new();
+        .and_then(|contents| crate::qa_registry::parse(&contents).ok()) else { return Ok(WorkerChecks::default()) };
+    let deployed = widen::deployed_journey_specs(repo, &registry);
+    let mut explicit = BTreeMap::<String, Vec<DeferredSpec>>::new();
     for journey in registry.journeys {
-        if let (Some(spec), Some(reason)) = (journey.spec, journey.worker_check) {
-            checks.entry(spec.clone()).or_default().push(DeferredSpec { id: journey.id, spec, reason });
+        if let (Some(spec), Some(reason)) = (journey.spec, journey.worker_check)
+            && javascript::committed_playwright(repo, head, &spec, false)
+        {
+            explicit.entry(spec.clone()).or_default().push(DeferredSpec { id: journey.id, spec, reason });
         }
     }
     for check in registry.spec_checks {
         if let Some(code) = check.problem(|spec| crate::qa_impact::io::git(repo,
-            &["cat-file", "-t", &format!("{head}:{spec}")]).is_ok_and(|kind| kind.trim() == "blob"))
+            &["--literal-pathspecs", "ls-tree", "--full-tree", head, "--", spec])
+                .is_ok_and(|entry| entry.starts_with("100644 blob ") || entry.starts_with("100755 blob ")))
         {
             anyhow::bail!("{code}: {}", check.spec);
         }
         let spec = check.spec;
-        checks.entry(spec.clone()).or_default().push(DeferredSpec { id: spec.clone(), spec, reason: check.worker_check });
+        anyhow::ensure!(javascript::committed_playwright(repo, head, &spec, true), "non_playwright_spec_check: {spec}");
+        explicit.entry(spec.clone()).or_default().push(DeferredSpec { id: spec.clone(), spec, reason: check.worker_check });
     }
-    Ok(checks)
+    Ok(WorkerChecks { explicit, deployed })
 }
 
 fn defer(checks: &BTreeMap<String, Vec<DeferredSpec>>, deferred: &mut BTreeSet<DeferredSpec>, spec: &str) -> bool {
@@ -201,33 +212,31 @@ pub(super) fn delivered_tests(
     paths: &[String],
     ranges: Option<&[(String, String)]>,
 ) -> anyhow::Result<(Vec<stability::Identity>, Vec<Scope>)> {
-    let checks = explicit_checks(cas_root, repo, head)?;
-    selected_tests(cas_root, repo, head, target, paths, ranges, &checks, &mut BTreeSet::new())
+    let checks = worker_checks(cas_root, repo, head)?;
+    selected_tests(repo, head, target, paths, ranges, &checks, &mut BTreeSet::new())
 }
 
 fn selected_tests(
-    cas_root: &Path,
     repo: &Path,
     head: &str,
     target: &str,
     paths: &[String],
     ranges: Option<&[(String, String)]>,
-    checks: &BTreeMap<String, Vec<DeferredSpec>>,
+    checks: &WorkerChecks,
     deferred: &mut BTreeSet<DeferredSpec>,
 ) -> anyhow::Result<(Vec<stability::Identity>, Vec<Scope>)> {
     let (mut tests, widened) = stability::requirements(repo, head, target, paths, ranges)?;
     // GH #2362, #2380: a registered journey against a deployed host follows
     // its declared lane, so neither it nor a helper only such journeys
     // import owes a worker run here; a locally served journey stays owed.
-    let journeys = widen::deployed_journey_specs(cas_root, repo, head);
-    tests.retain(|test| !defer(checks, deferred, &test.path) && !journeys.contains(&test.path));
+    let WorkerChecks { explicit, deployed } = checks;
+    tests.retain(|test| !defer(explicit, deferred, &test.path) && !deployed.contains(&test.path));
     let widened = widened.into_iter().flat_map(|scope| match &scope {
-        Scope::File(spec) if defer(checks, deferred, spec) || journeys.contains(spec) => Vec::new(),
-        Scope::Related(helper) => match crate::factory_worker_check::javascript::related_tests(repo, helper) {
-            Some((runner, specs)) if specs.iter().any(|spec| checks.contains_key(spec)
-                || runner == "playwright" && journeys.contains(spec)) =>
-                specs.into_iter().filter(|spec| !defer(checks, deferred, spec)
-                    && (runner != "playwright" || !journeys.contains(spec))).map(Scope::File).collect(),
+        Scope::File(spec) if defer(explicit, deferred, spec) || deployed.contains(spec) => Vec::new(),
+        Scope::Related(helper) => match javascript::related_tests(repo, helper) {
+            Some(("playwright", specs)) if specs.iter().any(|spec| explicit.contains_key(spec) || deployed.contains(spec)) =>
+                specs.into_iter().filter(|spec| !defer(explicit, deferred, spec)
+                    && !deployed.contains(spec)).map(Scope::File).collect(),
             _ => vec![scope],
         },
         _ => vec![scope],
@@ -306,11 +315,11 @@ fn listed_park_refusals(
         .with_synced(&task.deliverables.test_receipts);
     if proof_repo.join(".git").exists() {
         let started = std::time::Instant::now();
-        let checks = explicit_checks(cas_root, proof_repo, head).unwrap_or_else(|error| {
+        let checks = worker_checks(cas_root, proof_repo, head).unwrap_or_else(|error| {
             refusals.push(crate::gates::tag("G-61", format!("SPEC_CHECK_INVALID: {error:#}")));
-            BTreeMap::new()
+            WorkerChecks::default()
         });
-        let requirements = selected_tests(cas_root, proof_repo, head, target, changed_paths, delivery_ranges, &checks, deferred);
+        let requirements = selected_tests(proof_repo, head, target, changed_paths, delivery_ranges, &checks, deferred);
         tracing::info!(task_id = %task.id, gate = "G-61", phase = "changed_test_discovery", head,
             elapsed_ms = started.elapsed().as_millis() as u64, "Close gate phase");
         let (tests, mut widened) = match requirements {
@@ -370,7 +379,7 @@ fn listed_park_refusals(
         }
         let mut covering = widen::covering(proof_repo, head, &present, &widened);
         for cover in covering.values_mut() {
-            cover.specs.retain(|spec| !defer(&checks, deferred, spec));
+            cover.specs.retain(|spec| !defer(&checks.explicit, deferred, spec));
         }
         widen::declared_checks(proof_repo, head, &mut widened, &covering);
         let missing = widen::missing(&passing, &widened, &covering);

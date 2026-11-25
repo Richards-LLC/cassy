@@ -1943,6 +1943,16 @@ fn local_runners(dir: &Path) -> BTreeSet<&'static str> {
 pub(crate) fn runner_hint(repo: &Path, path: &str) -> Option<&'static str> {
     // A package manifest's dependencies are not a test API import.
     let source = if package_manifest(path) { String::new() } else { std::fs::read_to_string(repo.join(path)).unwrap_or_default() };
+    runner_hint_for_source(repo, path, &source)
+}
+
+pub(crate) fn committed_playwright(repo: &Path, head: &str, path: &str, require_spec: bool) -> bool {
+    javascript(path) && !path.ends_with(".vue") && (!require_spec || test_match(path, None))
+        && show(repo, head, path).ok().flatten().is_some_and(|source|
+            runner_hint_for_source(repo, path, &String::from_utf8_lossy(&source)) == Some("playwright"))
+}
+
+fn runner_hint_for_source(repo: &Path, path: &str, source: &str) -> Option<&'static str> {
     // GH #2380: a unit test may drive a browser through `@playwright/test`'s
     // library (`chromium`); its test API import names the runner.
     if source.contains("'vitest'") || source.contains("\"vitest\"") {

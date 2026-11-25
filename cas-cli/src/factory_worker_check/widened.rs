@@ -121,14 +121,9 @@ pub(crate) const ZERO_SELECTION_REASON: &str = "widened:zero-test selection";
 /// a config it imports. Their declared lane (batch QA against that host)
 /// proves them, never a worker's capped run (GH #2362, #2380). A journey
 /// against a locally served app stays owed by the worker.
-pub(crate) fn deployed_journey_specs(cas_root: &Path, repo: &Path, head: &str) -> BTreeSet<String> {
-    let registry = crate::config::Config::load(cas_root).map(|config| config.qa().registry.path)
-        .unwrap_or_else(|_| crate::qa_registry::DEFAULT_PATH.into());
-    git(repo, &["show", &format!("{head}:{registry}")]).ok()
-        .and_then(|contents| crate::qa_registry::parse(&contents).ok())
-        .map(|registry| registry.journeys.into_iter().filter_map(|journey| journey.spec)
-            .filter(|spec| targets_deployed_host(repo, spec)).collect())
-        .unwrap_or_default()
+pub(crate) fn deployed_journey_specs(repo: &Path, registry: &crate::qa_registry::Registry) -> BTreeSet<String> {
+    registry.journeys.iter().filter_map(|journey| journey.spec.as_ref())
+        .filter(|spec| targets_deployed_host(repo, spec)).cloned().collect()
 }
 
 fn targets_deployed_host(repo: &Path, spec: &str) -> bool {
@@ -223,8 +218,8 @@ pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &
     covering: &BTreeMap<Scope, Covering>) -> Vec<String> {
     scopes.iter().flat_map(|scope| {
         if let Scope::DeclaredCheck(manifest) = scope {
-            return vec![format!("cas factory worker-check --cas-root {} -- {} {manifest}",
-                cas_root.display(), javascript::DECLARED_CHECK)];
+            return vec![format!("cas factory worker-check --cas-root {} -- {} {}",
+                shell_word(&cas_root.to_string_lossy()), javascript::DECLARED_CHECK, shell_word(manifest))];
         }
         let found = covering.get(scope);
         if let Some(Covering { specs, unresolved }) = found && unresolved.is_empty() {

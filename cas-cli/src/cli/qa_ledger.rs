@@ -46,18 +46,23 @@ pub(crate) fn add_release_obligations<'a>(
     store: &dyn crate::store::TaskStore,
     members: impl IntoIterator<Item = (&'a str, &'a str)>,
     journeys: &mut Vec<(String, String)>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let mut owed = std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
     for (task, anchor) in members {
-        let Some(state) = store.get_execution_state(task)? else { continue };
-        let impact = &state["qa_impact"];
-        if impact["head_sha"].as_str() != Some(anchor) { continue; }
-        if let Some(rows) = impact.get("g61_deferred_journeys") {
-            for row in serde_json::from_value::<Vec<crate::qa_registry::DeferredSpec>>(rows.clone())? {
-                owed.entry(row.id).or_default().insert(format!("{} ({})", row.spec, row.reason.as_str()));
-            }
+        let rows = store.get_execution_state(task)?
+            .and_then(|state| {
+                let impact = &state["qa_impact"];
+                (impact["head_sha"].as_str() == Some(anchor))
+                    .then(|| impact.get("g61_deferred_journeys").cloned()).flatten()
+            })
+            .with_context(|| format!("G61_DEFERRED_STATE_MISSING: {task} at {anchor}"))?;
+        for row in serde_json::from_value::<Vec<crate::qa_registry::DeferredSpec>>(rows)
+            .with_context(|| format!("G61_DEFERRED_STATE_INVALID: {task} at {anchor}"))?
+        {
+            owed.entry(row.id).or_default().insert(format!("{} ({})", row.spec, row.reason.as_str()));
         }
     }
+    let ids = owed.keys().cloned().collect();
     for (id, specs) in owed {
         let obligation = format!("Owed to release batch QA: {}", specs.into_iter().collect::<Vec<_>>().join(", "));
         if let Some((_, name)) = journeys.iter_mut().find(|(journey, _)| journey == &id) {
@@ -66,7 +71,7 @@ pub(crate) fn add_release_obligations<'a>(
             journeys.push((id, obligation));
         }
     }
-    Ok(())
+    Ok(ids)
 }
 
 pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
@@ -163,11 +168,24 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                 .or(task.deliverables.parked_branch.as_deref());
             let release = release_scope.as_deref()
                 .map(|scope| super::release_adapters::review_blocks_for_scope(cas_root, scope)).transpose()?;
-            if let Some((inventory, _)) = &release {
-                let members = inventory.deliveries.iter().filter_map(|delivery|
-                    Some((delivery.task_id.as_str(), delivery.anchor.as_deref()?)));
-                add_release_obligations(store.as_ref(), members, &mut journeys)?;
-            }
+            let members = if let Some((inventory, _)) = &release {
+                inventory.deliveries.iter().filter_map(|delivery|
+                    Some((delivery.task_id.clone(), delivery.anchor.clone()?))).collect::<Vec<_>>()
+            } else {
+                let mut members = Vec::new();
+                for id in covers {
+                    let covered = store.get(id)?;
+                    if crate::qa_pass::is_no_code(&covered) || covered.deliverables.evidence_only.is_some() {
+                        continue;
+                    }
+                    let (repo, target) = crate::qa_batch::task_context(cas_root, &covered).map_err(anyhow::Error::msg)?;
+                    let anchor = crate::qa_batch::resolved_delivery_anchor(&repo, &covered, &target)
+                        .with_context(|| format!("G61_DEFERRED_STATE_MISSING: {id} has no delivery anchor"))?;
+                    members.push((id.clone(), anchor));
+                }
+                members
+            };
+            let owed = add_release_obligations(store.as_ref(), members.iter().map(|(id, sha)| (id.as_str(), sha.as_str())), &mut journeys)?;
             let revision = match (release.as_ref(), source) {
                 (Some((inventory, _)), _) => inventory.scope.final_release_sha.clone(),
                 (None, Some(branch)) => {
@@ -247,6 +265,10 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
             };
             let mut report = check(&path, Some(&task));
             report.require_coverage(&covers);
+            for id in owed {
+                ensure!(report.rows.iter().any(|row| row.id == id),
+                    "G61_DEFERRED_ROWS_MISSING: {} needs a row for {id}; nothing was overwritten", path.display());
+            }
             let (ok, rows, diagnostics) = (report.ok, report.rows.len(), report.diagnostics.len());
             if cli.json {
                 let mut json = serde_json::to_value(report)?;

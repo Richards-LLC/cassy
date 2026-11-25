@@ -1586,6 +1586,7 @@ async fn expired_task_close_renews_verification_with_corrected_proof_cas_afd2() 
                     &f.cas_dir(), true, &report, &report,
                 ).unwrap().proof_to_record().unwrap()
             });
+            cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap();
             let old = cas_store::create_verification_dispatch_reviewing_with_conn(
                 &rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap(),
                 id, "nocode-worker-session", "nocode-supervisor-session",
@@ -2063,6 +2064,7 @@ async fn supervisor_close_of_parked_no_code_spike_needs_a_current_verdict_gh2417
                     &f.cas_dir(), true, &report, &report,
                 ).unwrap().proof_to_record().unwrap()
             });
+            cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap();
             let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
             let dispatch = cas_store::create_verification_dispatch_reviewing_with_conn(
                 &conn, id, "nocode-supervisor-session", "nocode-supervisor-session",

@@ -191,8 +191,7 @@ fn file_proves(passing: &PassingTests<'_>, runner: &str, spec: &str) -> bool {
     })
 }
 
-fn outstanding_consumers(passing: &PassingTests<'_>, helper: &str, deployed: &std::cell::OnceCell<BTreeSet<String>>)
-    -> Option<Vec<(&'static str, String)>> {
+fn outstanding_consumers(passing: &PassingTests<'_>, helper: &str) -> Option<Vec<(&'static str, String)>> {
     let consumers = javascript::related_specs(passing.repo, helper);
     if consumers.is_empty() { return None; }
     let packages = owners(passing.repo, helper);
@@ -203,7 +202,7 @@ fn outstanding_consumers(passing: &PassingTests<'_>, helper: &str, deployed: &st
                 || (runner != "playwright" && matches!(&proof.scope, Scope::Related(path) if path == helper)))
         }) { specs.clear(); }
         specs.retain(|spec| {
-            (runner != "playwright" || !deployed.get_or_init(|| deployed_journey_specs(passing.cas_root, passing.repo, passing.head)).contains(spec))
+            (runner != "playwright" || !passing.deployed_journeys().contains(spec))
                 && !file_proves(passing, runner, spec)
         });
         specs.into_iter().map(move |spec| (runner, spec))
@@ -225,10 +224,9 @@ pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &B
     // since it (cas-3080), so a documentation-only descendant keeps it.
     let proofs = || passing.records().iter().filter_map(|(_, _, test)| test.widened.as_ref());
     let recorded = |wanted: &Scope| proofs().any(|proof| &proof.scope == wanted);
-    let deployed = std::cell::OnceCell::new();
     scopes.iter().filter(|scope| {
         if let Scope::Related(helper) = scope
-            && let Some(consumers) = outstanding_consumers(passing, helper, &deployed)
+            && let Some(consumers) = outstanding_consumers(passing, helper)
         {
             return !consumers.is_empty();
         }
@@ -247,10 +245,9 @@ pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &B
 pub(crate) fn commands(passing: &PassingTests<'_>, paths: &[String], scopes: &[Scope],
     covering: &BTreeMap<Scope, Covering>) -> Vec<String> {
     let (cas_root, repo) = (passing.cas_root, passing.repo);
-    let deployed = std::cell::OnceCell::new();
     let planned = scopes.iter().filter_map(|scope| {
         if let Scope::Related(helper) = scope {
-            return outstanding_consumers(passing, helper, &deployed).map(|specs| (scope, specs));
+            return outstanding_consumers(passing, helper).map(|specs| (scope, specs));
         }
         if covering.get(scope).is_some_and(|found| found.unresolved.is_empty()) { return None; }
         let specs = bare_node_specs(repo, scope);

@@ -1522,22 +1522,24 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
     }
     let cas_root = cas_root.as_path();
     let head = super::clean_head(&repo)?;
-    let config = crate::config::Config::load(cas_root)?.factory();
-    let base = super::proof_diff_base(cas_root, &repo, config.epic_base_branch.as_deref())?;
     let mut tests = Vec::new();
     let mut widened = BTreeMap::new();
-    for file in &files {
-        if invocation.whole_file {
-            widened.insert(super::widened::Scope::File(file.clone()), (file.clone(), "whole spec requested".into()));
-            continue;
-        }
-        match changed_tests(&repo, &base, &head, std::slice::from_ref(file), None) {
-            Ok(selected) if !selected.is_empty() => tests.extend(selected),
-            result => {
-                let scope = super::widened::scope(&repo, file);
-                let cause = result.err().map(|error| format!("{error:#}")).unwrap_or_else(|| "no static changed-test selection".into());
-                eprintln!("Widening {file} to {scope:?} for one capped pass: {cause}");
-                widened.entry(scope).or_insert_with(|| (file.clone(), cause));
+    if invocation.whole_file {
+        widened.extend(files.iter().map(|file| (
+            super::widened::Scope::File(file.clone()), (file.clone(), "whole spec requested".into()),
+        )));
+    } else {
+        let config = crate::config::Config::load(cas_root)?.factory();
+        let base = super::proof_diff_base(cas_root, &repo, config.epic_base_branch.as_deref())?;
+        for file in &files {
+            match changed_tests(&repo, &base, &head, std::slice::from_ref(file), None) {
+                Ok(selected) if !selected.is_empty() => tests.extend(selected),
+                result => {
+                    let scope = super::widened::scope(&repo, file);
+                    let cause = result.err().map(|error| format!("{error:#}")).unwrap_or_else(|| "no static changed-test selection".into());
+                    eprintln!("Widening {file} to {scope:?} for one capped pass: {cause}");
+                    widened.entry(scope).or_insert_with(|| (file.clone(), cause));
+                }
             }
         }
     }
@@ -1814,7 +1816,8 @@ fn runner_configs(dir: &Path, runner: &str) -> Vec<PathBuf> {
 /// matches it (GH #2058); with no such config the nearest one stays.
 pub(super) fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(PathBuf, Option<PathBuf>)> {
     let spec = repo.join(path);
-    let mut current = spec.parent().context("test parent")?.to_path_buf();
+    let parent = spec.parent().context("test parent")?;
+    let mut current = parent.to_path_buf();
     let (mut package, mut nearest) = (None, None);
     loop {
         let configs = runner_configs(&current, runner);
@@ -1838,6 +1841,7 @@ pub(super) fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(Path
         if current == repo || !current.pop() {
             return nearest
                 .or_else(|| package.map(|package| (package, None)))
+                .or_else(|| (runner == "node").then(|| (parent.to_path_buf(), None)))
                 .with_context(|| format!("no package.json found for {path}"));
         }
     }

@@ -210,7 +210,7 @@ fn listed_park_refusals(
         // its declared lane, so neither it nor a helper only such journeys
         // import owes a worker run here; a locally served journey stays owed.
         use crate::factory_worker_check::widened::{self as widen, Scope};
-        let journeys = widen::deployed_journey_specs(cas_root, proof_repo, head);
+        let journeys = passing.deployed_journeys();
         tests.retain(|test| !journeys.contains(&test.path));
         let widened: Vec<_> = widened.into_iter().filter(|scope| !matches!(scope, Scope::File(spec) if journeys.contains(spec))).collect();
         // GH #2355: a deleted file owes nothing and is no package input.

@@ -1,4 +1,0 @@
-title: Composer and catalog updates preserve the typed Reload Cassy confirmation without blocking chat
-tasks: [cas-75ce]
-invariants: [HUB-J27-CONFIRM-SHEET, HUB-J27-RELOAD-PROOF]
-journeys: [HUB-J5, HUB-J27]

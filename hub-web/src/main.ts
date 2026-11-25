@@ -154,7 +154,7 @@ const pairingCancellations = new PairingCancellationTracker();
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const supervisorCommands = new Map<string, SupervisorCommandSession>();
 let pendingReload: { machineId: string; session: string; birth?: string } | undefined;
-let slashCommands: { input: HTMLTextAreaElement; thread: string; birth?: string; palette: SlashCommands } | undefined;
+let slashCommands: { input: HTMLTextAreaElement; thread: string; palette: SlashCommands } | undefined;
 function supervisorCommandSession(machineId: string, session: string): SupervisorCommandSession {
   const key = sessionKey(machineId, session);
   let commands = supervisorCommands.get(key);
@@ -251,8 +251,7 @@ function bindSlashCommands(input: HTMLTextAreaElement): void {
   const machineId = selectedMachineId; const session = selectedSession;
   if (!machineId || !session) return;
   const thread = sessionKey(machineId, session);
-  const birth = sessions.get(machineId)?.find(item => item.name === session)?.started_at;
-  if (slashCommands?.input === input && slashCommands.thread === thread && slashCommands.birth === birth) return;
+  if (slashCommands?.input === input && slashCommands.thread === thread) return;
   slashCommands?.palette.dispose();
   const palette = new SlashCommands(input, {
     harness: () => sessions.get(machineId)?.find(item => item.name === session)?.harness,
@@ -260,7 +259,7 @@ function bindSlashCommands(input: HTMLTextAreaElement): void {
     label: () => supervisorPhrase(machineId, session),
     session: supervisorCommandSession(machineId, session),
   });
-  slashCommands = { input, thread, birth, palette };
+  slashCommands = { input, thread, palette };
 }
 
 bindKeyboardViewport(window);

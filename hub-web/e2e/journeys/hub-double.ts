@@ -199,6 +199,15 @@ type InstallationRow = { machine: string; device_id: string; credential_id: stri
 const { hash, verifyInstallation } = runtime;
 const fingerprint = (key: JsonWebKey) => hash(JSON.stringify({ crv: key.crv, kty: key.kty, x: key.x, y: key.y }));
 
+function leaseSummary(callerDeviceId: string, controller: { id: string; label: string } | null) {
+  return {
+    controller_device_id: controller?.id ?? null,
+    controller_label: controller?.label ?? null,
+    expires_at: controller ? "2099-01-01T00:00:00Z" : null,
+    held_by_me: controller?.id === callerDeviceId,
+  };
+}
+
 export class HubDouble {
   readonly sends: SentMessage[] = [];
   readonly exchanges: Array<Record<string, unknown>> = [];
@@ -1181,6 +1190,7 @@ export class HubDouble {
     if (leased) {
       const session = decodeURIComponent(leased[1]!);
       const holder = this.leaseHolders.get(session);
+      const callerDeviceId = active?.device_id ?? "journey-device";
       if (method === "POST") {
         const force = (route.request().postDataJSON() as { force?: boolean } | null)?.force === true;
         const status = !holder ? 200 : !force ? 409 : this.scopesFor(machineId).includes("hub-admin") ? 200 : 403;
@@ -1209,10 +1219,10 @@ export class HubDouble {
           await gate.wait;
         }
         const currentHolder = this.leaseHolders.get(session);
-        if (currentHolder) return route.fulfill({ json: { held_by_me: false, controller_label: currentHolder } });
+        if (currentHolder) return route.fulfill({ json: leaseSummary(callerDeviceId, { id: "other-journey-device", label: currentHolder }) });
       }
-      const held = !this.releasedLeases.has(session);
-      return route.fulfill({ json: { held_by_me: held, controller_label: held ? "Journey browser" : null } });
+      const controller = this.releasedLeases.has(session) ? null : { id: callerDeviceId, label: active?.device_label ?? "Journey browser" };
+      return route.fulfill({ json: leaseSummary(callerDeviceId, controller) });
     }
     if (path.endsWith("/status")) {
       const session = decodeURIComponent(path.split("/")[3] ?? "");

@@ -13819,6 +13819,9 @@ printf '}'
         let graphql_variables = concat!("gh api graphql -f query='mutation($pr: ID!) { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }' -F pr=PR_fixture");
         let graphql_input = concat!("gh api graphql -f query='mutation($input: MergePullRequestInput!) { mergePull", "Request(input: $input) { clientMutationId } }' -F 'input[pullRequestId]=PR_fixture'");
         let graphql_json = concat!("gh api graphql --input - <<< '{\"query\":\"mutation($input: MergePullRequestInput!) { mergePull", "Request(input: $input) { clientMutationId } }\",\"variables\":{\"input\":{\"pullRequestId\":\"PR_fixture\"}}}'");
+        let graphql_escaped_json = graphql_json.replacen(
+            concat!("mergePull", "Request"), concat!(r"\u006d", "ergePull", "Request"), 1,
+        );
         let graphql_formatted = concat!("gh api graphql -f query='mutation(,$mutation,: ID!,) { mergePull", "Request(,input,: {,# target\n pullRequestId,: $mutation,},) { clientMutationId } }'");
         let graphql_named = concat!("gh api graphql -f query='mutation mergePull", "Request($pr: ID!) { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }' -F pr=PR_other");
         let graphql_fragment_default = concat!("gh api graphql -f query='fragment Result on MergePullRequestPayload { clientMutationId } mutation($pr: ID = \"PR_fixture\") { mergePull", "Request(input: {pullRequestId: $pr}) { ...Result } }'");
@@ -13828,6 +13831,7 @@ printf '}'
         std::fs::write(&opaque_body, graphql_json.split('\'').nth(1).unwrap()).unwrap();
         let graphql_opaque = format!("gh api graphql --input {}", shell_words::quote(opaque_body.to_str().unwrap()));
         let graphql_opaque_options_first = format!("gh api --input {} graphql", shell_words::quote(opaque_body.to_str().unwrap()));
+        let graphql_opaque_stdin = format!("gh api graphql --input - <<'PAYLOAD'\n{}\nPAYLOAD", graphql_json.split('\'').nth(1).unwrap());
         let graphql_multi = concat!("/fixture-only/gh api graphql -f query='mutation { a: mergePull", "Request(input: {pullRequestId: \"PR_other\"}) { clientMutationId } b: mergePull", "Request(input: {pullRequestId: \"PR_missing\"}) { clientMutationId } c: mergePull", "Request(input: {pullRequestId: \"PR_fixture\"}) { clientMutationId } }'");
         let graphql_wrapped = format!("bash -c {}", shell_words::quote(&graphql.replace("gh api", "/fixture-only/gh api")));
         let graphql_enqueue = concat!("/fixture-only/gh api graphql -f query='mutation { enqueuePull", "Request(input: {pullRequestId: \"PR_fixture\"}) { clientMutationId } }'");
@@ -13847,6 +13851,7 @@ printf '}'
         run("supervisor", &command, Some("PR_VERIFIER_REJECTED"));
         let input_denial = denial_for("supervisor", graphql_input);
         let json_denial = denial_for("supervisor", graphql_json);
+        let escaped_json_denial = denial_for("supervisor", &graphql_escaped_json);
         authorize(&first);
         run("supervisor", graphql_fragment_default, Some("PR_VERIFIER_UNRESOLVED"));
         run("worker", &command, Some("PR_VERIFIER_REJECTED"));
@@ -13865,6 +13870,7 @@ printf '}'
         };
         let opaque = lookup_failure(&graphql_opaque);
         let opaque_options_first = lookup_failure(&graphql_opaque_options_first);
+        let opaque_stdin = lookup_failure(&graphql_opaque_stdin);
         let multi_denial = denial_for("worker", graphql_multi);
         let (wrapped_denial, wrapped_reads) = probe("worker", &graphql_wrapped);
         let (enqueue_denial, enqueue_reads) = probe("worker", graphql_enqueue);
@@ -13956,6 +13962,7 @@ printf '}'
             (lookup_failure(graphql_named), opaque, opaque_options_first),
             ((true, 1, 0), (true, 0, 1), (true, 0, 1)),
         );
+        assert_eq!((rejected(escaped_json_denial), opaque_stdin), (true, (true, 0, 1)));
         assert_eq!(
             (rejected(multi_denial), rejected(wrapped_denial), rejected(enqueue_denial), rejected(large_denial), recorded_fork_denial.is_none(), repaired_fork_denial.is_none(), approved_wrapped.is_none(), wrapped_reads, enqueue_reads, approved_wrapped_reads, empty_discovery_failures, broken_discovery_failures),
             (true, true, true, true, true, true, true, 1, 1, 1, 0, 1),

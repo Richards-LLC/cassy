@@ -2844,6 +2844,24 @@ bug_families:
     found: '2026-11-24'
     tasks: [cas-6b21]
     journeys: [HUB-J27]
+  commander-same-version-reload:
+    title: Commander reload for same-version rebuilds
+    tasks: [cas-e122]
+    journeys: [HUB-J27]
+    invariants: [HUB-J27-CARD-RELOAD]
+  expired-daemon-verifier-claim:
+    title: An expired daemon verifier claim with no heartbeat and no active lane is released by the owning merge retry so one replacement reviews the same dispatch and candidate
+    tasks: [cas-81c2]
+    invariants: [FACTORY-VERIFIER-CRASH-RETRY]
+    journeys: [FACTORY-MERGE]
+  violet-first-post-not-posted-cause:
+    title: The first violet_post after a fresh claim and reply_intent returns not_posted, and a second intent posts
+    statement: When Violet's lookup has no record of the request for this caller (request_not_found), not_posted is retryable and says to resend with the same request id and arguments, instead of steering the caller to a new reply intent.
+    found: '2026-11-15'
+    fixed_by: [31bab36ff9, 9a79067944]
+    tasks: [cas-71bf, cas-4c2b]
+    invariants: []
+    journeys: [FACTORY-SUPERVISE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

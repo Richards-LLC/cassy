@@ -9,6 +9,7 @@ pub(crate) enum Scope {
     /// or `node:test` helper's graph is the tests importing it (GH #2146, #2200).
     Related(String),
     Package(String),
+    DeclaredCheck(String),
     Crate(String),
 }
 
@@ -28,6 +29,11 @@ pub(crate) struct Proof {
 pub(super) fn valid(proof: &Proof) -> bool {
     let relative = |path: &str| !Path::new(path).is_absolute()
         && Path::new(path).components().all(|part| matches!(part, std::path::Component::Normal(_)));
+    if let Scope::DeclaredCheck(manifest) = &proof.scope {
+        return proof.runner == javascript::DECLARED_CHECK && relative(manifest)
+            && javascript::package_manifest(manifest) && proof.configs.is_empty()
+            && matches!(proof.reason.as_str(), "npm run check" | "npm run test");
+    }
     matches!(proof.runner.as_str(), "nextest" | "vitest" | "jest" | "playwright" | "node")
         && (proof.configs.is_empty() || proof.runner == "playwright")
         && proof.configs.iter().all(|(spec, config)| !spec.is_empty() && relative(spec) && !config.is_empty() && relative(config))
@@ -36,6 +42,7 @@ pub(super) fn valid(proof: &Proof) -> bool {
             Scope::File(path) => proof.runner != "nextest" && !path.is_empty() && relative(path),
             Scope::Related(path) => matches!(proof.runner.as_str(), "jest" | "vitest" | "playwright" | "node") && !path.is_empty() && relative(path),
             Scope::Package(path) => proof.runner != "nextest" && relative(path),
+            Scope::DeclaredCheck(_) => false,
         }
 }
 
@@ -163,6 +170,23 @@ pub(crate) fn covering(repo: &Path, head: &str, paths: &[String], scopes: &[Scop
     }).collect()
 }
 
+pub(crate) fn declared_checks(repo: &Path, head: &str, scopes: &mut [Scope], covering: &BTreeMap<Scope, Covering>) {
+    for scope in scopes {
+        let Scope::Package(directory) = &*scope else { continue };
+        let pathspec = if directory.is_empty() { "." } else { directory.as_str() };
+        let manifest = Path::new(directory).join("package.json").to_string_lossy().into_owned();
+        if covering.contains_key(scope) || javascript::declared_script(repo, head, &manifest).is_none() {
+            continue;
+        }
+        if git(repo, &["--literal-pathspecs", "ls-tree", "-r", "--name-only", head, "--", pathspec])
+            .is_ok_and(|files| !files.lines().any(|path| javascript::javascript(path)
+                && javascript::test_match(path, Some("jest")) && package(repo, path) == *scope))
+        {
+            *scope = Scope::DeclaredCheck(manifest);
+        }
+    }
+}
+
 /// A widened scope is proven by its own pass or, for a package, by a
 /// whole-file pass of every spec that covers its inputs, provided those specs
 /// cover every input: a spec reading one input says nothing about another.
@@ -170,7 +194,10 @@ pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &B
     // Records already carry an ancestor's run only when no proof input changed
     // since it (cas-3080), so a documentation-only descendant keeps it.
     let recorded = |wanted: &Scope| passing.records().iter()
-        .filter_map(|(_, _, test)| test.widened.as_ref()).any(|proof| &proof.scope == wanted);
+        .any(|(tested_head, _, test)| test.widened.as_ref().is_some_and(|proof| {
+            &proof.scope == wanted && (!matches!(wanted, Scope::DeclaredCheck(_))
+                || tested_head == passing.head && valid(proof))
+        }));
     // GH #2146: a Playwright helper holds no tests. Every spec importing it
     // must have run, each under its recorded config, whether through the
     // helper's own run or through that spec's own run.
@@ -195,6 +222,10 @@ pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &B
 pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &[Scope],
     covering: &BTreeMap<Scope, Covering>) -> Vec<String> {
     scopes.iter().flat_map(|scope| {
+        if let Scope::DeclaredCheck(manifest) = scope {
+            return vec![format!("cas factory worker-check --cas-root {} -- {} {manifest}",
+                cas_root.display(), javascript::DECLARED_CHECK)];
+        }
         let found = covering.get(scope);
         if let Some(Covering { specs, unresolved }) = found && unresolved.is_empty() {
             return specs.iter().find_map(|spec| javascript::runner_hint(repo, spec)).map(|runner| vec![runner])

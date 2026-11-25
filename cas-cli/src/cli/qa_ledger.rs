@@ -42,6 +42,33 @@ pub(crate) fn check(path: &Path, task: Option<&cas_types::Task>) -> crate::qa_le
     task.map_or_else(|| crate::qa_ledger::check(path, 1), |task| crate::qa_ledger::check_for_task(path, task))
 }
 
+pub(crate) fn add_release_obligations<'a>(
+    store: &dyn crate::store::TaskStore,
+    members: impl IntoIterator<Item = (&'a str, &'a str)>,
+    journeys: &mut Vec<(String, String)>,
+) -> Result<()> {
+    let mut owed = std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    for (task, anchor) in members {
+        let Some(state) = store.get_execution_state(task)? else { continue };
+        let impact = &state["qa_impact"];
+        if impact["head_sha"].as_str() != Some(anchor) { continue; }
+        if let Some(rows) = impact.get("g61_deferred_journeys") {
+            for row in serde_json::from_value::<Vec<crate::qa_registry::DeferredSpec>>(rows.clone())? {
+                owed.entry(row.id).or_default().insert(format!("{} ({})", row.spec, row.reason.as_str()));
+            }
+        }
+    }
+    for (id, specs) in owed {
+        let obligation = format!("Owed to release batch QA: {}", specs.into_iter().collect::<Vec<_>>().join(", "));
+        if let Some((_, name)) = journeys.iter_mut().find(|(journey, _)| journey == &id) {
+            *name = format!("{name} — {obligation}");
+        } else {
+            journeys.push((id, obligation));
+        }
+    }
+    Ok(())
+}
+
 pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
     match &args.command {
         LedgerCommand::Check { path, task, covers } => {
@@ -122,7 +149,7 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
             } else { repo };
             let config = crate::config::Config::load(cas_root)?;
             let impact = crate::qa_impact::predicted(&repo, &config.qa(), &task)?;
-            let journeys = impact
+            let mut journeys = impact
                 .journeys
                 .into_iter()
                 .filter(|j| j.status == "live")
@@ -136,6 +163,11 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                 .or(task.deliverables.parked_branch.as_deref());
             let release = release_scope.as_deref()
                 .map(|scope| super::release_adapters::review_blocks_for_scope(cas_root, scope)).transpose()?;
+            if let Some((inventory, _)) = &release {
+                let members = inventory.deliveries.iter().filter_map(|delivery|
+                    Some((delivery.task_id.as_str(), delivery.anchor.as_deref()?)));
+                add_release_obligations(store.as_ref(), members, &mut journeys)?;
+            }
             let revision = match (release.as_ref(), source) {
                 (Some((inventory, _)), _) => inventory.scope.final_release_sha.clone(),
                 (None, Some(branch)) => {

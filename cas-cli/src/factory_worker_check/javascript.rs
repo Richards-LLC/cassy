@@ -77,7 +77,7 @@ pub(crate) struct Invocation {
     pub(crate) files: Vec<String>,
 }
 
-pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`, `vitest related --run <source files>`, `jest --findRelatedTests <source files>` or `node --test <test files>`; `<package>/package.json` runs that package";
+pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`, `vitest related --run <source files>`, `jest --findRelatedTests <source files>` or `node --test <test files>`; `<package>/package.json` runs that package, and `package-check <package>/package.json` runs its declared check";
 
 /// Package-manager prefixes and runner subcommands are spelling. The capped
 /// run owns selection, widening caller name filters rather than trusting them.
@@ -128,7 +128,24 @@ pub(crate) fn invocation(args: &[String]) -> Option<Invocation> {
 }
 
 pub(super) fn allowed_args(args: &[String]) -> bool {
-    invocation(args).is_some()
+    invocation(args).is_some() || declared_check_arg(args).is_some()
+}
+
+pub(super) const DECLARED_CHECK: &str = "package-check";
+
+fn declared_check_arg(args: &[String]) -> Option<&str> {
+    match args {
+        [command, manifest] if command == DECLARED_CHECK && safe_path(manifest) && package_manifest(manifest) => Some(manifest),
+        _ => None,
+    }
+}
+
+pub(super) fn declared_script(repo: &Path, head: &str, manifest: &str) -> Option<&'static str> {
+    let bytes = show(repo, head, manifest).ok()??;
+    let manifest: Value = serde_json::from_slice(&bytes).ok()?;
+    ["check", "test"].into_iter().find(|script| {
+        manifest["scripts"][*script].as_str().is_some_and(|body| !body.trim().is_empty())
+    })
 }
 
 /// Whether a refused command was meant as a JavaScript stability run.
@@ -1489,7 +1506,6 @@ fn callback_scope_changed(node: Node<'_>, name: &str, source: &str, lines: &[(us
 }
 
 pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[String]) -> Result<()> {
-    let invocation = invocation(args).context(SHAPE)?;
     if args.iter().any(|arg| arg == "-t" || arg.starts_with("--testNamePattern")) {
         eprintln!("Widening the caller's name filter to the capped changed-test selection");
     }
@@ -1505,6 +1521,21 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
             .map(str::to_owned)
             .with_context(|| format!("{path} is outside the repository"))
     };
+    let cas_root = cas_root.canonicalize()?;
+    if !repo.starts_with(cas_root.join("worktrees"))
+        && !crate::factory_review_scratch::is_managed_checkout(&cas_root, &repo)
+    {
+        return Err(IsolatedCheckoutRequired.into());
+    }
+    let cas_root = cas_root.as_path();
+    let head = super::clean_head(&repo)?;
+    if let Some(manifest) = declared_check_arg(args) {
+        anyhow::ensure!(test_env.is_empty(), "Package checks do not accept test environment overrides");
+        let manifest = relative(manifest)?;
+        let (_lane, _slot) = admit_javascript(cas_root, &repo, args)?;
+        return execute_declared(cas_root, &repo, &head, &manifest);
+    }
+    let invocation = invocation(args).context(SHAPE)?;
     let files = invocation.files.iter().map(|file| relative(file)).collect::<Result<Vec<_>>>()?;
     let runner_config = invocation
         .config
@@ -1521,14 +1552,6 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
             Ok(config)
         })
         .transpose()?;
-    let cas_root = cas_root.canonicalize()?;
-    if !repo.starts_with(cas_root.join("worktrees"))
-        && !crate::factory_review_scratch::is_managed_checkout(&cas_root, &repo)
-    {
-        return Err(IsolatedCheckoutRequired.into());
-    }
-    let cas_root = cas_root.as_path();
-    let head = super::clean_head(&repo)?;
     let config = crate::config::Config::load(cas_root)?.factory();
     let base = super::proof_diff_base(cas_root, &repo, config.epic_base_branch.as_deref())?;
     let mut tests = Vec::new();
@@ -1544,23 +1567,7 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
             }
         }
     }
-    let _lane =
-        super::try_lock_lane_with_command(cas_root, &repo, &super::worker_check_command(args))?
-            .ok_or_else(|| {
-                super::lane_lock_refusal(
-                    &super::lane_lock_path(cas_root, &repo).unwrap_or_default(),
-                )
-            })?;
-    let _slot = super::admit(&super::queue_command(cas_root, args), || {
-        super::admit_daemon_build(cas_root).map_err(|cause| {
-            super::recorded_refusal(
-                cas_root,
-                &repo,
-                &cause,
-                crate::factory_capacity_wait::CapacityKind::Other,
-            )
-        })
-    })?;
+    let (_lane, _slot) = admit_javascript(cas_root, &repo, args)?;
     super::stability::invalidate(cas_root, &repo, &head, &tests)?;
     if invocation.runner == "playwright" {
         for spec in tests.iter().map(|test| &test.path).collect::<BTreeSet<_>>() {
@@ -1586,6 +1593,39 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
             test.path, test.name
         );
     }
+    Ok(())
+}
+
+fn admit_javascript(cas_root: &Path, repo: &Path, args: &[String]) -> Result<(super::LaneLock, std::fs::File)> {
+    let lane = super::try_lock_lane_with_command(cas_root, repo, &super::worker_check_command(args))?
+        .ok_or_else(|| super::lane_lock_refusal(&super::lane_lock_path(cas_root, repo).unwrap_or_default()))?;
+    let slot = super::admit(&super::queue_command(cas_root, args), || {
+        super::admit_daemon_build(cas_root).map_err(|cause| super::recorded_refusal(
+            cas_root, repo, &cause, crate::factory_capacity_wait::CapacityKind::Other,
+        ))
+    })?;
+    Ok((lane, slot))
+}
+
+fn execute_declared(cas_root: &Path, repo: &Path, head: &str, manifest: &str) -> Result<()> {
+    let script = declared_script(repo, head, manifest)
+        .with_context(|| format!("{manifest} declares neither scripts.check nor scripts.test"))?;
+    let scope = super::widened::Scope::DeclaredCheck(manifest.into());
+    super::widened::invalidate(cas_root, repo, head, &scope)?;
+    let config = crate::config::Config::load(cas_root)?.factory();
+    let high = crate::factory_build_memory::memory_high(config.worker_memory_high_gib, config.max_concurrent_builders,
+        &std::fs::read_to_string("/proc/meminfo").unwrap_or_default());
+    let scratch = tempfile::tempdir()?;
+    let mut command = Command::new("npm");
+    let directory = Path::new(manifest).parent().context("package directory")?;
+    command.args(["run", script]).current_dir(repo.join(directory)).env("CI", "1");
+    let reason = format!("npm run {script}");
+    anyhow::ensure!(run_scoped_javascript(command, high, &scratch.path().join("package-check-scope"))?,
+        "{manifest}: {reason} failed");
+    super::widened::record(cas_root, repo, head, super::widened::Proof {
+        runner: DECLARED_CHECK.into(), scope, reason: reason.clone(), configs: Default::default(),
+    }, 1)?;
+    println!("package-check: PASS {head} {manifest} {reason}");
     Ok(())
 }
 

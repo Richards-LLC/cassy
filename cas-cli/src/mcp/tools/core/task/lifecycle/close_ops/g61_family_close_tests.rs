@@ -146,7 +146,7 @@ async fn g61_gabber_declared_check_and_release_only_journeys() {
     let package = fixture(&mut env, &[
         ("package.json", "{}".into()),
         ("playwright.config.ts", "export default {};".into()),
-        (manifest, r#"{"scripts":{"check":"test -f order.vue"}}"#.into()),
+        (manifest, r#"{"scripts":{"check":"test -f order.vue","test":"exit 1"}}"#.into()),
         (source, "<template>Draft order</template>".into()),
     ], &[(source, "<template>Order ready</template>".into())], &[]);
     let close = serde_json::json!({"action": "close", "id": ID, "reason": "fixture delivery"});
@@ -231,7 +231,20 @@ async fn g61_gabber_declared_check_and_release_only_journeys() {
             {"id": raw, "spec": raw, "reason": "staging_only"}
         ]));
         assert_eq!(state["qa_impact"]["journeys"], serde_json::json!([]));
+        let mut rows = Vec::new();
+        crate::cli::qa_ledger::add_release_obligations(store.as_ref(), [(ID, "wrong-anchor")], &mut rows).unwrap();
+        assert!(rows.is_empty());
+        crate::cli::qa_ledger::add_release_obligations(store.as_ref(), [(ID, data.head.as_str())], &mut rows).unwrap();
+        let ledger = crate::qa_ledger::scaffold_with_coverage(&store.get(ID).unwrap(), &rows, &data.head, &[ID.into()]);
+        let ledger = crate::qa_ledger::parse(&ledger, 1);
+        assert_eq!(ledger.rows.iter().map(|row| (row.id.as_str(), row.verdict)).collect::<Vec<_>>(),
+            [(raw, crate::qa_ledger::Verdict::NotExercised)]);
     }
+    let missing = fixture(&mut env, &[(locale, r#"{"hello":"Hi"}"#.into())], &[
+        (registry, format!("spec_checks:\n- {{spec: {raw}, worker_check: staging_only}}\n")),
+    ], &[]);
+    let held = call(&missing.worker, serde_json::json!({"action": "close", "id": ID, "reason": "fixture delivery"})).await;
+    assert!(crate::gates::codes_in(&held).contains(&"G-61") && held.contains("untracked_spec_check"), "{held}");
     assert!(package_failure.is_none() && failures.is_empty(), "Maizzle: {package_failure:?}; journeys: {failures:?}");
 }
 

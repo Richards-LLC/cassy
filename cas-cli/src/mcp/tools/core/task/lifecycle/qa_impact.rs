@@ -13,6 +13,12 @@ fn cell(value: &str) -> String {
     value.replace(['\n', '\r'], " ").replace('|', "\\|")
 }
 
+pub(super) fn deferred_summary(impact: &Value) -> String {
+    impact["g61_deferred_journeys"].as_array().into_iter().flatten().map(|row| {
+        format!("\nG-61 deferred to release batch QA: {} ({}, {}).", text(&row["id"]), text(&row["spec"]), text(&row["reason"]))
+    }).collect()
+}
+
 /// Shared by the task note and independent review brief.
 pub(crate) fn render(impact: &Value) -> String {
     let mut out = String::new();
@@ -80,6 +86,7 @@ pub(crate) fn render(impact: &Value) -> String {
             unowned.len()
         ));
     }
+    out.push_str(&deferred_summary(impact));
     out.push_str("\nRecord one ledger row per live journey: PASS, FAIL, NOT A ROUTE, or NOT EXERCISED: <reason>.\n");
     out
 }
@@ -110,6 +117,7 @@ impl CasCore {
         repo: &Path,
         target: &str,
         head: &str,
+        deferred: Option<&[crate::qa_registry::DeferredSpec]>,
     ) -> Result<Value> {
         let store = self
             .open_task_store()
@@ -117,6 +125,7 @@ impl CasCore {
         if let Some(state) = store.get_execution_state(&task.id)?
             && let Some(impact) = state.get("qa_impact")
             && impact["head_sha"].as_str() == Some(head)
+            && deferred.is_none_or(|rows| rows.is_empty() || impact["g61_deferred_journeys"] == serde_json::json!(rows))
         {
             return Ok(impact.clone());
         }
@@ -161,6 +170,9 @@ impl CasCore {
         let mut value = serde_json::to_value(report)?;
         value["head_sha"] = head.into();
         value["base_sha"] = base.into();
+        if let Some(deferred) = deferred.filter(|rows| !rows.is_empty()) {
+            value["g61_deferred_journeys"] = serde_json::to_value(deferred)?;
+        }
         store
             .patch_execution_state(&task.id, &serde_json::json!({"qa_impact": value}))
             .context("store authoritative QA impact")?;

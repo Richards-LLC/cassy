@@ -51,6 +51,8 @@ pub struct Registry {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub main_journeys: Vec<String>,
     pub journeys: Vec<Journey>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub spec_checks: Vec<SpecCheck>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -388,6 +390,8 @@ pub struct Journey {
     pub fixtures: Vec<String>,
     pub traffic: Option<Traffic>,
     pub spec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_check: Option<WorkerCheck>,
     /// GH #1344: `planned` names a spec a later task will write.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec_status: Option<String>,
@@ -397,6 +401,49 @@ pub struct Journey {
     pub seeded: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerCheck {
+    StagingOnly,
+    Paid,
+}
+
+impl WorkerCheck {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::StagingOnly => "staging_only",
+            Self::Paid => "paid",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpecCheck {
+    pub spec: String,
+    pub worker_check: WorkerCheck,
+}
+
+impl SpecCheck {
+    pub(crate) fn problem(&self, tracked: impl FnOnce(&str) -> bool) -> Option<&'static str> {
+        if self.spec.split('/').any(|part| matches!(part, "" | "." | ".."))
+            || self.spec.contains(['*', '?', '[', ']', '{', '}', '\\', ':', '\n', '\r'])
+        {
+            Some("invalid_spec_check_path")
+        } else if !tracked(&self.spec) {
+            Some("untracked_spec_check")
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) struct DeferredSpec {
+    pub(crate) id: String,
+    pub(crate) spec: String,
+    pub(crate) reason: WorkerCheck,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -824,6 +871,11 @@ impl Registry {
         }
         if self.journeys.is_empty() {
             report.problem("journeys", "registry", "journeys must be a non-empty list");
+        }
+        for check in &self.spec_checks {
+            if let Some(code) = check.problem(|spec| tracked.iter().any(|path| path == spec)) {
+                report.problem(code, &check.spec, "spec_checks requires an exact tracked spec path");
+            }
         }
         if self.selection == Selection::LegacyCatalog {
             for path in ["docs/qa/journeys.md", "scripts/journeys-for-diff.py"] {

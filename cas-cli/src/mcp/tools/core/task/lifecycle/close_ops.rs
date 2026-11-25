@@ -10191,6 +10191,7 @@ impl CasCore {
                     let receipt_tip = if tip_is_pushed && gate_refusals.is_empty() {
                         park_anchor.as_deref()
                     } else { anchor.as_deref() };
+                    let mut g61_deferred = None;
                     if (task.status != TaskStatus::AwaitingMerge
                         || !tip_is_pushed
                         || park_anchor != task.deliverables.factory_branch_anchor)
@@ -10199,7 +10200,7 @@ impl CasCore {
                         && let Some(paths) =
                             task_attribution::paths(&close_project_root, &resolved_parent_branch, window, Some(tip))
                     {
-                        let mut receipt_refusals = receipt_scope::park_refusals(
+                        let (mut receipt_refusals, deferred) = receipt_scope::park_assessment(
                             &self.cas_root,
                             worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
                             &task,
@@ -10210,6 +10211,7 @@ impl CasCore {
                                 &close_project_root, &resolved_parent_branch, window, Some(tip),
                             ).as_deref(),
                         );
+                        g61_deferred = Some(deferred);
                         // GH #2041: authority and reason were validated at entry.
                         // Waive only stability, retaining crate/content obligations.
                         let before = receipt_refusals.len();
@@ -10355,18 +10357,28 @@ impl CasCore {
                     }
                     // G7 never refuses a park. Snapshot the attributed delivery
                     // before QA dispatch, even if independent QA is disabled.
-                    let impact_warning = qa_anchor.as_deref().and_then(|head| {
-                        self.attach_delivery_qa_impact(&task, &close_project_root,
-                            &resolved_parent_branch, head).err()
-                    }).map(|error| format!("\nWARNING: authoritative QA impact unavailable (non-blocking): {error:#}"))
-                        .unwrap_or_default();
+                    let impact_notice = qa_anchor.as_deref().map(|head| {
+                        let deferred = g61_deferred.as_deref().filter(|_| receipt_tip == Some(head));
+                        match self.attach_delivery_qa_impact(&task, &close_project_root,
+                            &resolved_parent_branch, head, deferred) {
+                            Ok(impact) => super::qa_impact::deferred_summary(&impact),
+                            Err(error) => format!("\nWARNING: authoritative QA impact unavailable (non-blocking): {error:#}"),
+                        }
+                    }).unwrap_or_default();
                     // Supervisors keep the full text: it names their exits.
                     let msg = if crate::harness_policy::is_worker_from_env() {
                         gate_text::parked_reply(&msg, qa_anchor.as_deref(), measured_branch.as_deref(), &resolved_parent_branch)
                     } else {
                         msg
                     };
-                    let msg = format!("{msg}{impact_warning}");
+                    let package_checks: String = parking.deliverables.test_receipts.iter().filter_map(|receipt| {
+                        let proof: crate::factory_worker_check::widened::Proof =
+                            serde_json::from_value(receipt.widened.clone()?).ok()?;
+                        let crate::factory_worker_check::widened::Scope::DeclaredCheck(manifest) = proof.scope else { return None };
+                        (Some(receipt.tested_head.as_str()) == qa_anchor.as_deref()).then(||
+                            format!("\nG-61 package-check passed: {manifest} ({}, {}).", proof.reason, receipt.tested_head))
+                    }).collect();
+                    let msg = format!("{msg}{impact_notice}{package_checks}");
                     let msg = match self.dispatch_independent_qa(
                         &task,
                         &close_project_root,

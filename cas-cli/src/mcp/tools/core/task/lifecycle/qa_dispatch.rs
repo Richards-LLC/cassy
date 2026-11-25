@@ -743,7 +743,7 @@ impl CasCore {
         });
         // Explicit QA requests may precede park. Compute the same committed,
         // attributed impact, so registry-owned API/CLI journeys dispatch too.
-        let impact = head.and_then(|head| match self.attach_delivery_qa_impact(task, repo, parent_branch, head) {
+        let impact = head.and_then(|head| match self.attach_delivery_qa_impact(task, repo, parent_branch, head, None) {
             Ok(report) => Some(report),
             Err(error) => {
                 tracing::warn!(task_id = %task.id, %error, "QA impact unavailable; dispatch keeps existing eligibility");

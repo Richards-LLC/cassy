@@ -1313,6 +1313,8 @@ async fn park_requires_red_first_evidence_gh_2422() {
         if case.starts_with("node ") { run(&f.worker_path, &node).unwrap_or_else(|error| panic!("{case}: {error:#}")); }
         let mut request = serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"});
         if case.starts_with("receipt ") {
+            git(f.dir.path(), &["config", "user.name", "CAS Test"]);
+            git(f.dir.path(), &["config", "user.email", "cas@example.test"]);
             let target = git(&f.worker_path, &["rev-parse", "main"]);
             request["completion_receipt"] = serde_json::json!(serde_json::json!({
                 "task_id": ID, "worker_agent_id": "br-worker-session", "repo_selector": format!("project:{PROJECT}"),

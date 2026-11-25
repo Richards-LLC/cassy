@@ -476,6 +476,8 @@ async fn repeat_review_every_entry_refuses_g170_gh2373() {
     core.set_agent_id_for_testing("nocode-supervisor-session".into());
     core.configure_worker_task_queue(WORKER, Some(vec![id.into()]), None).await.unwrap();
     reject_repeat_review_gh2373(&f, id, "A stale queue can claim the successor").await;
+    predecessor.status = TaskStatus::AwaitingMerge;
+    f.put(&predecessor);
     open_agent_store(&f.cas_dir()).unwrap().register(&Agent::new_with_role(
         "replacement-session".into(), "replacement".into(), AgentRole::Worker,
     )).unwrap();
@@ -515,8 +517,6 @@ async fn repeat_review_every_entry_refuses_g170_gh2373() {
     queued.execution_note = Some("no-code".into());
     queued.deliverables.factory_branch_start = None;
     f.put(&queued);
-    predecessor.status = TaskStatus::AwaitingMerge;
-    f.put(&predecessor);
     let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap();
     let cursor = queues.get(session, WORKER).unwrap();
     assert_eq!(cursor.current_task.as_deref(), Some(predecessor.id.as_str()));

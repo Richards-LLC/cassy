@@ -1964,8 +1964,9 @@ fn reset_stale_preassign_holder(
         return Err(format!("task is still held by live worker '{holder}'"));
     }
 
-    agents
-        .release_lease_for_task(&task.id, "Stale pre-assignment force-release")
+    let reason = "Stale pre-assignment force-release";
+    let lease_released = agents
+        .release_lease_for_task(&task.id, reason)
         .map_err(|e| format!("could not release stale holder '{holder}' lease: {e}"))?;
 
     let store = open_task_store_cached(cas_dir)
@@ -1983,16 +1984,16 @@ fn reset_stale_preassign_holder(
     let prior_status = reset.status;
     reset.status = cas_types::TaskStatus::Open;
     reset.assignee = None;
-    let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
-    let audit = format!(
-        "[{timestamp}] ✅ DECISION cas-2327: force-released stale assignee '{holder}' with reset semantics; {prior_status:?}→Open. Notes, branch, and prior work were preserved before pre-assigning a replacement worker."
+    let now = chrono::Utc::now();
+    let audit = crate::mcp::tools::core::task::audit::reset_note(
+        now, prior_status, Some(holder), lease_released, reason,
     );
     reset.notes = if reset.notes.is_empty() {
         audit
     } else {
         format!("{}\n\n{audit}", reset.notes)
     };
-    reset.updated_at = chrono::Utc::now();
+    reset.updated_at = now;
     store.update(&reset)
         .map_err(|e| format!("could not persist stale-holder reset: {e}"))?;
     clear_departed_block(&*store, &task.id);

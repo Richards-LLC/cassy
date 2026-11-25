@@ -40,11 +40,6 @@ pub(crate) fn retire_workers_with_snapshot(
     let Some(worktree) = agent.metadata.get("clone_path") else {
         return Ok(false);
     };
-    let config = crate::config::Config::load(cas_root).map_err(io::Error::other)?;
-    let artifacts = crate::config::project_factory_artifacts_root(
-        cas_root,
-        &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()),
-    );
     // A worker's latest task is the receipt owner. Unassociated retired workers
     // have a separate inventory-only namespace, never closed-task artifact GC.
     if !delivery_safe(agents, tasks) {
@@ -63,7 +58,7 @@ pub(crate) fn retire_workers_with_snapshot(
     retire(
         cas_root,
         Path::new(worktree),
-        &artifacts.join(label),
+        &retirement_artifacts(cas_root)?.join(label),
         None,
         retirement_process_uses,
         |root, worktree| {
@@ -72,6 +67,40 @@ pub(crate) fn retire_workers_with_snapshot(
                 .list(None)
                 .map_err(io::Error::other)?;
             Ok(registered_live_owner(root, worktree)? || !delivery_safe(agents, &tasks))
+        },
+    )
+}
+
+fn retirement_artifacts(cas_root: &Path) -> io::Result<PathBuf> {
+    let config = crate::config::Config::load(cas_root).map_err(io::Error::other)?;
+    Ok(crate::config::project_factory_artifacts_root(
+        cas_root,
+        &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn deep_reclaim(cas_root: &Path, worker: &str) -> io::Result<bool> {
+    if !matches!((Path::new(worker).components().next(), Path::new(worker).file_name()),
+        (Some(std::path::Component::Normal(_)), Some(name)) if name == std::ffi::OsStr::new(worker))
+    {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected one exact worker name"));
+    }
+    let worktree = cas_root.join("worktrees").join(worker);
+    if !fs::symlink_metadata(&worktree)?.is_dir() {
+        return Ok(false);
+    }
+    let mut agent = cas_types::Agent::new(worker.into(), worker.into());
+    agent.metadata.insert("clone_path".into(), worktree.to_string_lossy().into_owned());
+    retire(
+        cas_root,
+        &worktree,
+        &retirement_artifacts(cas_root)?.join("_retired-workers"),
+        None,
+        macos_deep_process_uses,
+        |root, worktree| {
+            let tasks = snapshot_worker_tasks(root, &agent)?;
+            Ok(registered_live_owner(root, worktree)? || !delivery_safe(std::slice::from_ref(&agent), &tasks))
         },
     )
 }
@@ -122,10 +151,30 @@ fn retirement_process_uses(worktree: &Path, cache: &Path, descriptors: &[i32]) -
             true,
         )
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = descriptors;
+        macos_process_arguments_use(worktree, cache)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         process_uses_many(worktree, cache, descriptors)
     }
+}
+
+fn retained(target: &Path, reason: &str) -> io::Result<bool> {
+    let retained_bytes = fs::symlink_metadata(target).ok().filter(|metadata| metadata.is_dir()).map(|_| {
+        WalkDir::new(target)
+            .follow_root_links(false)
+            .same_file_system(true)
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry.file_type().is_file())
+            .filter_map(|entry| entry.metadata().ok().map(|metadata| metadata.len()))
+            .fold(0u64, u64::saturating_add)
+    });
+    tracing::warn!(target = %target.display(), ?retained_bytes, reason, "retired output retained");
+    Ok(false)
 }
 
 fn registered_live_owner(cas_root: &Path, worktree: &Path) -> io::Result<bool> {
@@ -155,30 +204,28 @@ fn retire(
     if worktree.parent() != Some(workers.as_path()) {
         return Ok(false);
     }
+    let target = crate::factory_scratch::worker_target_dir(&worktree);
     if registry(cas_root, &worktree)? {
-        tracing::warn!(target = %crate::factory_scratch::worker_target_dir(&worktree).display(), "retired target deferred: registered owner is live");
-        return Ok(false);
+        return retained(&target, "registered owner or nonterminal delivery");
     }
     let Some(repo) = cas_root.parent() else {
-        return Ok(false);
+        return retained(&target, "worktree Git identity is unavailable");
     };
     let Some(identity) = list_validated_git_worktrees(repo)
         .into_iter()
         .find(|tree| tree.path.canonicalize().ok().as_ref() == Some(&worktree))
     else {
-        return Ok(false);
+        return retained(&target, "worktree Git identity is unavailable");
     };
     let Some(head) = identity.commit.as_deref() else {
         return Ok(false);
     };
     if expected_head.is_some_and(|expected| expected != head) {
-        return Ok(false);
+        return retained(&target, "worktree head changed");
     }
     let Some(_lane) = crate::factory_worker_check::try_lock_lane(cas_root, &worktree)? else {
-        return Ok(false);
+        return retained(&target, "worker lane lock is held");
     };
-    // cas-3f93: follow a target relocated under `[factory] scratch_root`.
-    let target = crate::factory_scratch::worker_target_dir(&worktree);
     let temporary = crate::factory_scratch::test_tmp_dir(cas_root, &worktree);
     let in_use = |old: &Path, new: &Path, descriptors: &[i32]| {
         probe(old, new, descriptors)
@@ -186,34 +233,20 @@ fn retire(
     };
     match fs::symlink_metadata(&target) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            if temporary.exists() && probe(&temporary, &temporary, &[]) { return Ok(false); }
+            if temporary.exists() && probe(&temporary, &temporary, &[]) {
+                return retained(&temporary, "live temporary output or unavailable process evidence");
+            }
             crate::factory_scratch::reclaim_test_tmp(cas_root, &worktree)?;
             return Ok(true);
         },
         Err(error) => return Err(error),
-        Ok(metadata) if metadata.file_type().is_symlink() => return Ok(false),
+        Ok(metadata) if metadata.file_type().is_symlink() => return retained(&target, "target is a symlink"),
         Ok(_) => {}
     }
     #[cfg(unix)]
     let target_lease = match super::owner::for_retirement(cas_root, &worktree) {
         Ok(Some(lease)) => lease,
-        result => {
-            let bytes: u64 = WalkDir::new(&target)
-                .follow_links(false)
-                .into_iter()
-                .flatten()
-                .filter_map(|entry| {
-                    entry
-                        .metadata()
-                        .ok()
-                        .filter(|meta| meta.is_file())
-                        .map(|meta| meta.len())
-                })
-                .sum();
-            tracing::warn!(target = %target.display(), retained_bytes = bytes,
-                reason = ?result.err(), "retired target deferred: legacy/unverifiable ownership or live lifetime lease");
-            return Ok(false);
-        }
+        _ => return retained(&target, "unverified ownership or unavailable lifetime lock"),
     };
     #[cfg(not(unix))]
     return Ok(false); // No verified lifetime lease on this platform.
@@ -221,7 +254,7 @@ fn retire(
         .iter()
         .any(|tree| tree.path.starts_with(&target))
     {
-        return Ok(false);
+        return retained(&target, "target contains a registered Git worktree");
     }
     // Acquire every Cargo profile/triple lock before moving any output. The
     // process probe excludes only these descriptors, never our entire PID.
@@ -232,14 +265,14 @@ fn retire(
             continue;
         }
         if !entry.file_type().is_file() {
-            return Ok(false);
+            return retained(&target, "Cargo lock is not a regular file");
         }
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(entry.path())?;
         if file.try_lock_exclusive().is_err() {
-            return Ok(false);
+            return retained(&target, "Cargo lock is unavailable");
         }
         locks.push(file);
     }
@@ -255,21 +288,7 @@ fn retire(
     #[cfg(not(unix))]
     let descriptors: Vec<i32> = Vec::new();
     if in_use(&target, &target, &descriptors) {
-        let bytes: u64 = WalkDir::new(&target)
-            .follow_links(false)
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| {
-                entry
-                    .metadata()
-                    .ok()
-                    .filter(|metadata| metadata.is_file())
-                    .map(|metadata| metadata.len())
-            })
-            .sum();
-        tracing::warn!(target = %target.display(), retained_bytes = bytes,
-            "retired target deferred: live output or unavailable process evidence; legacy ownership not adopted");
-        return Ok(false);
+        return retained(&target, "live output or unavailable process evidence");
     }
     let stamp = uuid::Uuid::new_v4().to_string();
     let worker = worktree
@@ -295,7 +314,7 @@ fn retire(
     // Recheck identity/liveness after potentially large evidence copies.
     #[cfg(unix)]
     if !target_lease.revalidate(&target)? {
-        return Ok(false);
+        return retained(&target, "target ownership changed before quarantine");
     }
     if registry(cas_root, &worktree)?
         || in_use(&target, &target, &descriptors)
@@ -305,7 +324,7 @@ fn retire(
                 && tree.git_admin_dir == identity.git_admin_dir
         })
     {
-        return Ok(false);
+        return retained(&target, "delivery, process evidence or worktree identity changed");
     }
     crate::factory_scratch::reclaim_test_tmp(cas_root, &worktree)?;
     // A sibling keeps the rename on the target's filesystem; in-tree that
@@ -318,13 +337,13 @@ fn retire(
     #[cfg(unix)]
     if !target_lease.revalidate(&quarantine)? {
         fs::rename(&quarantine, &target)?;
-        return Ok(false);
+        return retained(&target, "target ownership changed during quarantine");
     }
     if in_use(&target, &quarantine, &descriptors) {
         if !target.exists() {
             fs::rename(&quarantine, &target)?;
         }
-        return Ok(false);
+        return retained(&target, "live output or unavailable process evidence after quarantine");
     }
     let receipt = serde_json::json!({
         "worktree": worktree, "head": head, "target": target,
@@ -362,11 +381,16 @@ fn copy_evidence(target: &Path, destination: &Path) -> io::Result<()> {
     // files (logs, JSON receipts, nextest XML, fixture evidence) are preserved.
     let build_root = |entry: &walkdir::DirEntry| {
         entry.depth() == 1
+            && entry.file_type().is_dir()
             && (matches!(
                 entry.file_name().to_str(),
                 Some("debug" | "release" | "doc" | "package" | "tmp")
-            ) || (entry.path().join("debug/.cargo-lock").exists()
-                || entry.path().join("release/.cargo-lock").exists()))
+            ) || ["debug", "release"].iter().any(|name| {
+                let profile = entry.path().join(name);
+                fs::symlink_metadata(&profile).is_ok_and(|metadata| metadata.is_dir())
+                    && fs::symlink_metadata(profile.join(".cargo-lock"))
+                        .is_ok_and(|metadata| metadata.is_file())
+            }))
     };
     for entry in WalkDir::new(target)
         .follow_links(false)

@@ -1796,29 +1796,7 @@ pub(crate) fn review_output_in_use(path: &Path, lease: &fs::File) -> bool {
 /// A retention sweep shares one deadline across all native process probes.
 /// Unavailable or truncated evidence keeps the directory.
 pub(crate) fn review_output_in_use_until(path: &Path, lease: &fs::File, deadline: std::time::Instant) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::fd::AsRawFd;
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() { return true; }
-        let deadline = crate::bounded_process::Deadline::after(remaining);
-        let cap = std::time::Duration::from_secs(2);
-        let Ok(output) = crate::bounded_process::run_command(
-            std::process::Command::new("/usr/sbin/lsof").args(["-nP", "-F0pfn"]), deadline, cap,
-        ) else { return true; };
-        if !output.status.success() || !output.stderr.is_empty()
-            || lsof_uses_many(&output.stdout, path, path, &[lease.as_raw_fd()]) { return true; }
-        let Ok(output) = crate::bounded_process::run_command(
-            std::process::Command::new("/bin/ps").args(["-axo", "pid=,command="]), deadline, cap,
-        ) else { return true; };
-        !output.status.success() || !output.stderr.is_empty()
-            || process_arguments_use(&output.stdout, path, path)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        if std::time::Instant::now() >= deadline { return true; }
-        review_output_in_use(path, lease)
-    }
+    std::time::Instant::now() >= deadline || review_output_in_use(path, lease)
 }
 
 fn live_process_uses(worktree: &Path, cache: &Path) -> bool {
@@ -1831,7 +1809,7 @@ fn process_uses(worktree: &Path, cache: &Path, own_lock_fd: Option<i32>) -> bool
 }
 
 #[cfg(target_os = "macos")]
-fn process_uses_many(worktree: &Path, cache: &Path, own_lock_fds: &[i32]) -> bool {
+fn macos_deep_process_uses(worktree: &Path, cache: &Path, own_lock_fds: &[i32]) -> bool {
     // Unknown/inaccessible evidence must preserve the cache. Include fd fields
     // to exempt precisely the eviction lock, while keeping this process's
     // executable, mappings and every other output handle visible.
@@ -1847,10 +1825,13 @@ fn process_uses_many(worktree: &Path, cache: &Path, own_lock_fds: &[i32]) -> boo
     if lsof_uses_many(&output.stdout, worktree, cache, own_lock_fds) {
         return true;
     }
-    // A build may name a target in argv before opening any file in it.
-    // Keep this in the existing native probe, matching Linux cmdline checks.
+    macos_process_arguments_use(worktree, cache)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_arguments_use(worktree: &Path, cache: &Path) -> bool {
     let Ok(output) = std::process::Command::new("/bin/ps")
-        .args(["-axo", "pid=,command="])
+        .args(["-ww", "-axo", "pid=,command="])
         .output()
     else {
         return true;
@@ -1943,7 +1924,7 @@ fn process_uses_many(worktree: &Path, cache: &Path, own_lock_fds: &[i32]) -> boo
     process_probe::linux_uses_many(Path::new("/proc"), worktree, cache, own_lock_fds)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(target_os = "linux"))]
 fn process_uses_many(_worktree: &Path, _cache: &Path, _own_lock_fds: &[i32]) -> bool {
     true
 }
@@ -3058,8 +3039,6 @@ mod tests {
         cleanup_selected_using(cas, report, policy, &[], opt_in, proc).unwrap();
         #[cfg(target_os = "macos")]
         {
-            // The public entry point must use native lsof/ps, never the fake
-            // Linux process table returned by the shared fixture.
             let _ = proc;
             cleanup_selected_with_opt_in(cas, report, policy, &[], opt_in).unwrap();
         }
@@ -3076,7 +3055,7 @@ mod tests {
             // FD 2 holds the artifact without putting its path in argv. The
             // readiness pipe proves the shell is running; stdin keeps it live.
             let child = Command::new("/bin/sh")
-                .args(["-c", "printf 'ready\\n'; read release"])
+                .args(["-c", "test -f /dev/fd/2 || exit 2; printf 'ready\\n'; read release"])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(fs::File::open(path).unwrap())
@@ -3088,18 +3067,6 @@ mod tests {
                 .read_line(&mut ready)
                 .unwrap();
             assert_eq!(ready, "ready\n");
-            let output = Command::new("/usr/sbin/lsof")
-                .args(["-nP", "-F0pfn", "-p", &child.0.id().to_string()])
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success() && output.stderr.is_empty(),
-                "native child FD observation failed"
-            );
-            assert!(
-                lsof_uses_many(&output.stdout, path.parent().unwrap(), path, &[]),
-                "child must really retain the artifact"
-            );
             child
         }
     }
@@ -3251,8 +3218,6 @@ mod tests {
                 "opaque" => fs::remove_dir(&proc).unwrap(),
                 "cargo-lock" | "assembly-lock" => {
                     held.lock_exclusive().unwrap();
-                    // lsof may veto the handle before lock admission. Prove
-                    // the real assembly/Cargo guard also refuses this lock.
                     let scan = scan_cache(target.parent().unwrap(), &target, false).unwrap();
                     let error = legacy::acquire_explicit(
                         &cas,

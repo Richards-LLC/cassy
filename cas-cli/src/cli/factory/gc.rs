@@ -21,6 +21,8 @@ pub(super) fn execute(
         FactoryGcCommands::Report => {
             json!({ "action": "gc_report", "json": cli.json, "full": cli.full })
         }
+        #[cfg(target_os = "macos")]
+        FactoryGcCommands::DeepReclaim { worker } => return deep_reclaim(cas_root, worker),
         FactoryGcCommands::Cleanup {
             force,
             dry_run,
@@ -68,6 +70,28 @@ pub(super) fn execute(
     if !wrote_text {
         bail!("factory GC handler returned no text report");
     }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn deep_reclaim(cas_root: &Path, worker: &str) -> Result<()> {
+    use std::io::IsTerminal;
+
+    let stdin = std::io::stdin();
+    if !stdin.is_terminal() {
+        bail!("deep reclaim requires an interactive terminal");
+    }
+    eprint!("Deep reclaim inspects open files host-wide and may trigger macOS privacy prompts. Reclaim target for {worker:?}? [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    stdin.read_line(&mut answer)?;
+    if !answer.trim().eq_ignore_ascii_case("y") {
+        bail!("deep reclaim canceled");
+    }
+    if !crate::factory_target_cache::retirement::deep_reclaim(cas_root, worker)? {
+        bail!("retained target for {worker:?}; inspect the factory log for the reason and size");
+    }
+    eprintln!("Target cleanup completed for {worker:?}.");
     Ok(())
 }
 

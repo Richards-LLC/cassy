@@ -1363,6 +1363,10 @@ pub enum FactoryCommands {
 pub enum FactoryGcCommands {
     /// Show the same factory GC report as the coordination gc_report action.
     Report,
+    /// Inspect open files host-wide and reclaim one retired worker target (macOS only).
+    /// Requires terminal confirmation and may cause macOS privacy prompts.
+    #[cfg(target_os = "macos")]
+    DeepReclaim { worker: String },
     /// Run the same cleanup as coordination gc_cleanup.
     ///
     /// Each run may mark stale agents and missing worktrees, purge dead agent

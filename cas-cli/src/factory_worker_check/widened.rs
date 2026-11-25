@@ -1,5 +1,6 @@
 //! One capped pass replaces static selection when an input cannot be classified.
 use super::*;
+use javascript::{NODE_RUNNER, glob_path, runner_words};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Scope {
@@ -28,13 +29,13 @@ pub(crate) struct Proof {
 pub(super) fn valid(proof: &Proof) -> bool {
     let relative = |path: &str| !Path::new(path).is_absolute()
         && Path::new(path).components().all(|part| matches!(part, std::path::Component::Normal(_)));
-    matches!(proof.runner.as_str(), "nextest" | "vitest" | "jest" | "playwright" | "node")
+    matches!(proof.runner.as_str(), "nextest" | "vitest" | "jest" | "playwright" | NODE_RUNNER)
         && (proof.configs.is_empty() || proof.runner == "playwright")
         && proof.configs.iter().all(|(spec, config)| !spec.is_empty() && relative(spec) && !config.is_empty() && relative(config))
         && match &proof.scope {
             Scope::Crate(package) => proof.runner == "nextest" && valid_package(package),
             Scope::File(path) => proof.runner != "nextest" && !path.is_empty() && relative(path),
-            Scope::Related(path) => matches!(proof.runner.as_str(), "jest" | "vitest" | "playwright" | "node") && !path.is_empty() && relative(path),
+            Scope::Related(path) => matches!(proof.runner.as_str(), "jest" | "vitest" | "playwright" | NODE_RUNNER) && !path.is_empty() && relative(path),
             Scope::Package(path) => proof.runner != "nextest" && relative(path),
         }
 }
@@ -42,6 +43,7 @@ pub(super) fn valid(proof: &Proof) -> bool {
 pub(crate) fn scope(repo: &Path, path: &str) -> Scope {
     if javascript::javascript(path) {
         let runner = javascript::runner_hint(repo, path);
+        if glob_path(path) { return runner.map_or_else(|| package(repo, path), |runner| owning_package(repo, path, runner)); }
         if javascript::test_match(path, runner) { return Scope::File(path.into()); }
         // GH #2352: vitest cannot transform a `.vue` file its config has no Vue
         // plugin for, so `vitest related` would crash; that component proves
@@ -72,11 +74,11 @@ fn package(repo: &Path, path: &str) -> Scope {
     }
     let relative = directory.strip_prefix(repo).unwrap_or(Path::new(""));
     if relative.as_os_str().is_empty() && !rust && javascript::runner_hint(repo, "package.json").is_none()
-        && let Some(std::path::Component::Normal(first)) = Path::new(path).components().next()
-        && first != Path::new(path).as_os_str()
-        && !javascript::node_specs(repo, &repo.join(first)).is_empty()
+        && let Some(directory) = Path::new(path).ancestors().skip(1).take_while(|directory| !directory.as_os_str().is_empty())
+            .find(|directory| !directory.components().any(|part| part.as_os_str() == "test")
+                && !javascript::node_specs(repo, &repo.join(directory)).is_empty())
     {
-        return Scope::Package(first.to_string_lossy().into());
+        return Scope::Package(directory.to_string_lossy().into());
     }
     Scope::Package(relative.to_string_lossy().into())
 }
@@ -85,7 +87,7 @@ fn package(repo: &Path, path: &str) -> Scope {
 /// focused run of it selects no test: the directory holding the runner's
 /// config for it, else its nearest manifest.
 pub(crate) fn owning_package(repo: &Path, path: &str, runner: &str) -> Scope {
-    if runner == "node" { return package(repo, path); }
+    if runner == NODE_RUNNER { return package(repo, path); }
     javascript::runner_root(repo, path, runner).ok()
         .and_then(|(directory, _)| directory.strip_prefix(repo).ok().map(|relative| Scope::Package(relative.to_string_lossy().into())))
         .unwrap_or_else(|| package(repo, path))
@@ -97,7 +99,7 @@ fn owners(repo: &Path, path: &str) -> Vec<Scope> {
     if path.ends_with(".rs") { return vec![package(repo, path)]; }
     if !javascript::javascript(path) { return Vec::new(); }
     let mut owners = vec![package(repo, path)];
-    if let Some(runner) = javascript::runner_hint(repo, path).filter(|runner| *runner != "node --test") {
+    if let Some(runner) = javascript::runner_hint(repo, path).filter(|runner| *runner != NODE_RUNNER) {
         owners.push(owning_package(repo, path, runner));
     }
     owners
@@ -204,6 +206,9 @@ fn outstanding_consumers(passing: &PassingTests<'_>, helper: &str) -> Option<Vec
         specs.retain(|spec| {
             (runner != "playwright" || !passing.deployed_journeys().contains(spec))
                 && !file_proves(passing, runner, spec)
+                && !records.iter().filter_map(|(_, _, test)| test.widened.as_ref()).any(|proof| {
+                    proof.runner == runner && proof.scope == owning_package(passing.repo, spec, runner)
+                })
         });
         specs.into_iter().map(move |spec| (runner, spec))
     }).collect())
@@ -238,34 +243,37 @@ pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &B
             .is_some_and(|found| found.unresolved.is_empty() && found.specs.iter().all(|spec| recorded(&Scope::File(spec.clone()))))
         { return false; }
         let specs = bare_node_specs(passing.repo, scope);
-        specs.is_empty() || specs.iter().any(|spec| !file_proves(passing, "node", spec))
+        specs.is_empty() || specs.iter().any(|spec| !file_proves(passing, NODE_RUNNER, spec))
     }).cloned().collect()
 }
 
 pub(crate) fn commands(passing: &PassingTests<'_>, paths: &[String], scopes: &[Scope],
     covering: &BTreeMap<Scope, Covering>) -> Vec<String> {
     let (cas_root, repo) = (passing.cas_root, passing.repo);
+    let command = |argv: Vec<String>| worker_check_command_line(cas_root, &argv);
     let planned = scopes.iter().filter_map(|scope| {
         if let Scope::Related(helper) = scope {
             return outstanding_consumers(passing, helper).map(|specs| (scope, specs));
         }
         if covering.get(scope).is_some_and(|found| found.unresolved.is_empty()) { return None; }
         let specs = bare_node_specs(repo, scope);
-        (!specs.is_empty()).then(|| (scope, specs.into_iter().filter(|spec| !file_proves(passing, "node", spec))
-            .map(|spec| ("node", spec)).collect()))
+        (!specs.is_empty()).then(|| (scope, specs.into_iter().filter(|spec| !file_proves(passing, NODE_RUNNER, spec))
+            .map(|spec| (NODE_RUNNER, spec)).collect()))
     }).collect::<BTreeMap<_, _>>();
     let consumers: BTreeSet<_> = planned.values().flatten().cloned().collect();
     let mut commands: Vec<_> = scopes.iter().filter(|scope| !planned.contains_key(*scope)
         && !matches!(scope, Scope::File(path) if consumers.iter().any(|(_, spec)| spec == path))).flat_map(|scope| {
         let found = covering.get(scope);
         if let Some(Covering { specs, unresolved }) = found && unresolved.is_empty() {
+            let glob = specs.iter().find(|spec| glob_path(spec));
+            let specs = glob.map_or(specs.as_slice(), std::slice::from_ref);
             return specs.iter().find_map(|spec| javascript::runner_hint(repo, spec)).map(|runner| vec![runner])
-                .unwrap_or_else(|| vec!["jest", "vitest", "playwright", "node --test"]).into_iter()
-                .map(|runner| format!("cas factory worker-check --cas-root {} -- {runner} {}", cas_root.display(), specs.join(" ")))
+                .unwrap_or_else(|| vec!["jest", "vitest", "playwright", NODE_RUNNER]).into_iter()
+                .map(|runner| command(runner_words(runner).map(str::to_owned).chain(specs.iter().cloned()).collect()))
                 .collect();
         }
         if let Scope::Crate(package) = scope {
-            return vec![format!("cas factory worker-check --cas-root {} -- nextest run -p {package} --lib -E 'test({package})'", cas_root.display())];
+            return vec![command(["nextest", "run", "-p", package, "--lib", "-E", &format!("test({package})")].map(str::to_owned).into())];
         }
         if let Scope::Related(path) = scope {
             let runner = match javascript::runner_hint(repo, path).unwrap_or("jest") {
@@ -274,7 +282,7 @@ pub(crate) fn commands(passing: &PassingTests<'_>, paths: &[String], scopes: &[S
                 "playwright" => return Vec::new(),
                 runner => runner,
             };
-            return vec![format!("cas factory worker-check --cas-root {} -- {runner} {path}", cas_root.display())];
+            return vec![command(runner_words(runner).chain([path.as_str()]).map(str::to_owned).collect())];
         }
         // Only a JavaScript input reaches the runner; a JSON catalogue or SQL
         // migration in the same package shares the scope but is refused (GH #2224, #2266).
@@ -290,34 +298,42 @@ pub(crate) fn commands(passing: &PassingTests<'_>, paths: &[String], scopes: &[S
         let named = if unresolved.is_empty() { String::new() } else { format!("no spec reads {}; ", unresolved.join(", ")) };
         let node_package = matches!(scope, Scope::Package(directory) if !javascript::node_specs(repo, &repo.join(directory)).is_empty());
         let runners = |path| {
-            if node_package && javascript::runner_hint(repo, path).is_none_or(|runner| runner == "node --test") {
-                return vec!["node --test"];
+            if node_package && javascript::runner_hint(repo, path).is_none_or(|runner| runner == NODE_RUNNER) {
+                return vec![NODE_RUNNER];
             }
-            javascript::runner_hint(repo, path).filter(|runner| *runner != "node --test" || !matches!(scope, Scope::Package(_)))
+            javascript::runner_hint(repo, path).filter(|runner| *runner != NODE_RUNNER || !matches!(scope, Scope::Package(_)))
                 .map(|runner| vec![runner]).unwrap_or_else(|| vec!["jest", "vitest", "playwright"])
         };
         let Some(path) = path else {
             // GH #2164: the package's manifest selects its own run.
             let Scope::Package(directory) = scope else { return Vec::new() };
             let manifest = Path::new(directory).join("package.json").to_string_lossy().into_owned();
-            return runners(&manifest).into_iter()
-                .map(|runner| format!("{named}cas factory worker-check --cas-root {} -- {runner} {manifest}", cas_root.display())).collect();
+            return (!named.is_empty()).then_some(named).into_iter().chain(runners(&manifest).into_iter()
+                .map(|runner| command(runner_words(runner).chain([manifest.as_str()]).map(str::to_owned).collect()))).collect();
         };
         let note = (!named.is_empty() && found.is_some()).then(|| format!("{}the covering specs' passes do not prove the package; run the whole package instead", named));
         note.into_iter().chain(runners(path)
             .into_iter().map(|runner| {
                 // GH #2195: a spec only a non-default config lists runs under it.
-                let config = (runner == "playwright").then(|| javascript::playwright_owner(repo, path)).flatten()
-                    .map(|config| format!("--config {} ", config.display())).unwrap_or_default();
-                format!("cas factory worker-check --cas-root {} -- {runner} {config}{path}", cas_root.display())
+                let config = (runner == "playwright").then(|| javascript::playwright_owner(repo, path)).flatten();
+                command(runner_words(runner).map(str::to_owned)
+                    .chain(config.into_iter().flat_map(|config| ["--config".into(), config.to_string_lossy().into_owned()]))
+                    .chain([path.into()]).collect())
             })).collect()
     }).collect();
     let mut by_runner: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    for (runner, spec) in consumers { by_runner.entry(runner).or_default().push(spec); }
-    commands.extend(by_runner.into_iter().map(|(runner, specs)| {
-        let runner = if runner == "node" { "node --test" } else { runner };
-        format!("cas factory worker-check --cas-root {} -- {runner} --whole-file {}", cas_root.display(), specs.join(" "))
+    let mut by_package = BTreeMap::new();
+    for (runner, spec) in consumers {
+        if glob_path(&spec) { by_package.entry((runner, owning_package(repo, &spec, runner))).or_insert(spec); }
+        else { by_runner.entry(runner).or_default().push(spec); }
+    }
+    commands.extend(by_runner.into_iter().filter_map(|(runner, mut specs)| {
+        if by_package.keys().any(|(package_runner, _)| *package_runner == runner) {
+            specs.retain(|spec| !by_package.contains_key(&(runner, owning_package(repo, spec, runner))));
+        }
+        (!specs.is_empty()).then(|| command(runner_words(runner).chain(["--whole-file"]).map(str::to_owned).chain(specs).collect()))
     }));
+    commands.extend(by_package.into_iter().map(|((runner, _), spec)| command(runner_words(runner).map(str::to_owned).chain([spec]).collect())));
     commands
 }
 
@@ -562,6 +578,24 @@ mod tests {
         let reruns = stability::rerun_commands(&cas_root, &repo, &head, &[stability::Identity::exact(specs[0].clone(), "works")]);
         assert_eq!(reruns.len(), 1);
         assert_eq!(shell_words::split(reruns[0].trim_matches('`')).unwrap(), prefix.map(String::from).into_iter().chain([specs[0].clone()]).collect::<Vec<_>>());
+
+        let glob = format!("{tools}/test/[g]lob.mjs");
+        std::fs::write(repo.join(&glob), "import test from 'node:test';\ntest('literal glob name', () => {});\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "glob-named spec"]);
+        let glob_head = git(&["rev-parse", "HEAD"]);
+        let glob_paths = [glob.clone()];
+        let package = Scope::Package(tools.into());
+        let (tests, scopes) = stability::requirements(&repo, &glob_head, &head, &glob_paths, None).unwrap();
+        assert!(tests.is_empty());
+        assert_eq!(scopes, [package.clone()]);
+        let passing = PassingTests::new(&cas_root, &repo, &glob_head);
+        let plans = commands(&passing, &glob_paths, &scopes, &Default::default());
+        assert_eq!(plans.len(), 1, "{plans:?}");
+        let package_run = shell_words::split(&plans[0]).unwrap();
+        assert_eq!(package_run, prefix.map(String::from).into_iter().chain([glob]).collect::<Vec<_>>());
+        javascript::execute(&cas_root, &package_run[6..], &repo, &[]).unwrap();
+        assert!(missing(&PassingTests::new(&cas_root, &repo, &glob_head), &[package], &Default::default()).is_empty());
     }
 
     #[test]
@@ -614,7 +648,7 @@ mod tests {
         let paths = [helper.into()];
         let plans = || commands(&PassingTests::new(cas_root, repo, &head), &paths, &scopes, &Default::default())
             .iter().map(|plan| {
-                let args = plan.split_once(" -- ").unwrap().1.split_whitespace().map(String::from).collect::<Vec<_>>();
+                let args = shell_words::split(plan.split_once(" -- ").unwrap().1).unwrap();
                 let run = javascript::invocation(&args).unwrap();
                 (run.runner, run.files)
             }).collect::<Vec<_>>();
@@ -655,7 +689,7 @@ mod tests {
         let commands = commands(&passing, &[plain.to_string()], &scopes, &Default::default());
         assert!(!commands.is_empty());
         for command in &commands {
-            let args = command.split_once(" -- ").unwrap().1.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+            let args = shell_words::split(command.split_once(" -- ").unwrap().1).unwrap();
             let files = javascript::invocation(&args).map(|run| run.files).unwrap_or_default();
             assert_eq!(files, [plain], "{command}");
             assert!(files.iter().all(|file| scope(repo.path(), file) == scopes[0]), "{command}");
@@ -678,7 +712,7 @@ mod tests {
         let commands = commands(&passing, &paths, &scopes, &Default::default());
         assert!(!commands.is_empty());
         for command in &commands {
-            let args = command.split_once(" -- ").unwrap().1.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+            let args = shell_words::split(command.split_once(" -- ").unwrap().1).unwrap();
             assert_eq!(javascript::invocation(&args).map(|run| run.files), Some(vec![paths[2].clone()]), "{command}");
         }
         // GH #2164: with no JavaScript input left, the package's manifest
@@ -686,7 +720,7 @@ mod tests {
         let commands = super::commands(&passing, &paths[..2], &scopes, &Default::default());
         assert!(!commands.is_empty());
         for command in &commands {
-            let args = command.split_once(" -- ").unwrap().1.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+            let args = shell_words::split(command.split_once(" -- ").unwrap().1).unwrap();
             let files = javascript::invocation(&args).map(|run| run.files).unwrap_or_default();
             assert_eq!(files.iter().map(|file| scope(repo.path(), file)).collect::<Vec<_>>(), scopes, "{command}");
         }

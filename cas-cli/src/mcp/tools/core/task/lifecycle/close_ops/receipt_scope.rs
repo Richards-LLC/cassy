@@ -1917,7 +1917,7 @@ sys.exit(0 if ok else 1)
         assert_eq!(commands.len(), 1);
         // These bytes are the runnable command consumed by worker-check.
         let (_, command) = commands[0].split_once(" -- ").unwrap();
-        let args = command.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+        let args = shell_words::split(command).unwrap();
         if runner == "jest" {
             assert!(args.iter().any(|arg| arg == "--findRelatedTests"), "{commands:?}");
         } else {
@@ -2007,7 +2007,7 @@ sys.exit(0 if ok else 1)
         assert!(!commands.is_empty());
         for command in &commands {
             let (_, command) = command.split_once(" -- ").unwrap();
-            let args = command.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+            let args = shell_words::split(command).unwrap();
             assert!(crate::factory_worker_check::allowed_args(&args), "{command}");
             if args[0] == "jest" { javascript::execute(root.path(), &args, &repo, &[]).unwrap(); }
         }

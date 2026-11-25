@@ -17,7 +17,7 @@ pub(crate) fn related_specs(repo: &Path, path: &str) -> BTreeMap<&'static str, V
     let mut tests = BTreeMap::<_, Vec<_>>::new();
     for file in graph.reached(vec![target]) {
         let Some(relative) = file.strip_prefix(repo).ok().and_then(Path::to_str) else { continue };
-        let runner = if node.contains(&file) { Some("node") }
+        let runner = if node.contains(&file) { Some(super::NODE_RUNNER) }
             else { unit.get(&file).copied().or_else(|| runs_playwright.contains(&file).then_some("playwright")) };
         if let Some(runner) = runner.filter(|runner| super::test_match(relative, Some(runner))) {
             tests.entry(runner).or_default().push(relative.to_owned());
@@ -40,8 +40,7 @@ pub(in crate::factory_worker_check) fn node_specs(repo: &Path, directory: &Path)
     let mut specs = graph.reached(graph.node.iter().cloned().collect());
     specs.extend(graph.node.iter().cloned());
     specs.into_iter().filter(|path| {
-        matches!(path.extension().and_then(|ext| ext.to_str()), Some("js" | "mjs" | "cjs"))
-            && super::test_match(&path.to_string_lossy(), Some("node"))
+        path.strip_prefix(repo).ok().and_then(Path::to_str).is_some_and(super::node_test_file)
     }).collect()
 }
 

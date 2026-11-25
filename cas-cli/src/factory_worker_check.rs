@@ -1,6 +1,7 @@
 //! Capped compile and targeted-test evidence. The runner serializes admission
 //! and holds OS slot/lane locks until Cargo exits; descendants never inherit them.
 //! A separate target lifetime lease is inherited to protect surviving children.
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
@@ -806,19 +807,32 @@ impl std::fmt::Display for CapacityRefusal {
 }
 impl std::error::Error for CapacityRefusal {}
 
+pub(crate) fn shell_word(word: &str) -> Cow<'_, str> {
+    if !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_@.+/=:,-".contains(&byte)) {
+        Cow::Borrowed(word)
+    } else {
+        Cow::Owned(format!("'{}'", word.replace('\'', "'\"'\"'")))
+    }
+}
+
+pub(crate) fn shell_command<S: AsRef<str>>(words: &[S]) -> String {
+    words.iter().map(|word| shell_word(word.as_ref())).collect::<Vec<_>>().join(" ")
+}
+
+pub(crate) fn worker_check_command_line(cas_root: &Path, argv: &[String]) -> String {
+    let root = cas_root.to_string_lossy();
+    shell_command(&["cas", "factory", "worker-check", "--cas-root", root.as_ref(), "--"]
+        .into_iter().chain(argv.iter().map(String::as_str)).collect::<Vec<_>>())
+}
+
 /// The exact backgrounded form of this capped command, which the worker
 /// guard routes to a detached, queued run.
 fn queue_command(cas_root: &Path, args: &[String]) -> String {
-    let quote = |arg: &String| if !arg.is_empty() && arg.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_@.+/=:,-".contains(&byte)) {
-        arg.clone()
-    } else {
-        format!("'{}'", arg.replace('\'', "'\"'\"'"))
-    };
-    let words = args.iter().map(quote).collect::<Vec<_>>().join(" ");
+    let words = shell_command(args);
     if javascript::allowed_args(args) {
         // Only Cargo shapes are rewritten by the guard; name the detached runner.
         format!("cas factory worker-check --cas-root {} --detach -- {words} > target/worker-tests.log 2>&1",
-            quote(&cas_root.display().to_string()))
+            shell_word(&cas_root.to_string_lossy()))
     } else if args.first().is_some_and(|arg| arg == "nextest") {
         format!("cargo {words} > target/worker-tests.log 2>&1 &")
     } else {
@@ -3035,9 +3049,8 @@ mod tests {
     #[test]
     fn shell_command_round_trips_posix_split() {
         let words = ["nextest", "safe_@.+/=:,-", "with spaces", "a'b", "$value", "*", "[", "", "é"].map(String::from);
-        let background = queue_command(Path::new("/cas"), &words);
-        let rendered = background.strip_prefix("cargo ").unwrap().strip_suffix(" > target/worker-tests.log 2>&1 &").unwrap();
-        assert_eq!(shell_words::split(rendered).unwrap(), words);
+        let rendered = shell_command(&words);
+        assert_eq!(shell_words::split(&rendered).unwrap(), words);
         assert!(rendered.starts_with("nextest safe_@.+/=:,- "));
     }
 

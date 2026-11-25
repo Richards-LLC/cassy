@@ -1852,45 +1852,94 @@ fn macos_deep_process_uses(worktree: &Path, cache: &Path, own_lock_fds: &[i32]) 
 
 #[cfg(target_os = "macos")]
 fn macos_process_arguments_use(worktree: &Path, cache: &Path) -> bool {
-    let Ok(output) = std::process::Command::new("/bin/ps")
-        .args(["-ww", "-axo", "pid=,command="])
-        .output()
-    else {
+    let mut pids = vec![0 as libc::pid_t; 1024];
+    loop {
+        let count = unsafe {
+            libc::proc_listallpids(
+                pids.as_mut_ptr().cast(),
+                std::mem::size_of_val(pids.as_slice()) as libc::c_int,
+            )
+        };
+        if count <= 0 {
+            tracing::warn!(error = %io::Error::last_os_error(), "cannot list macOS processes");
+            return true;
+        }
+        if (count as usize) < pids.len() {
+            pids.truncate(count as usize);
+            break;
+        }
+        if pids.len() >= 65_536 {
+            tracing::warn!(count, "macOS process inventory may be truncated");
+            return true;
+        }
+        pids.resize(pids.len() * 2, 0);
+    }
+    let own_pid = std::process::id() as libc::pid_t;
+    if !pids.contains(&own_pid) || pids.iter().any(|&pid| pid < 0) {
+        tracing::warn!("macOS process inventory is incomplete");
         return true;
+    }
+    let uid = unsafe { libc::geteuid() };
+    for pid in pids.into_iter().filter(|&pid| pid != 0 && pid != own_pid) {
+        match crate::cli::factory::wedged::process_commandline(pid as u32) {
+            Some(argv) if process_arguments_use(&argv, worktree, cache) => {
+                tracing::warn!(pid, "macOS process arguments reference a fenced cache path");
+                return true;
+            }
+            Some(_) => {}
+            None if macos_unreadable_process_is_irrelevant(pid, uid) => {}
+            None => {
+                tracing::warn!(pid, "cannot establish macOS process argument evidence");
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn macos_unreadable_process_is_irrelevant(pid: libc::pid_t, uid: libc::uid_t) -> bool {
+    #[repr(C)]
+    struct ProcBsdShortInfo {
+        _ids: [u32; 3],
+        status: u32,
+        _comm: [libc::c_char; libc::MAXCOMLEN],
+        _flags: u32,
+        uid: libc::uid_t,
+        _remaining_ids_and_reserved: [u32; 6],
+    }
+
+    const PROC_PIDT_SHORTBSDINFO: libc::c_int = 13;
+    const INCLUDE_ZOMBIES: u64 = 1;
+    let mut info = std::mem::MaybeUninit::<ProcBsdShortInfo>::uninit();
+    let size = std::mem::size_of::<ProcBsdShortInfo>() as libc::c_int;
+    let read = unsafe {
+        libc::proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, INCLUDE_ZOMBIES, info.as_mut_ptr().cast(), size)
     };
-    !output.status.success()
-        || !output.stderr.is_empty()
-        || process_arguments_use(&output.stdout, worktree, cache)
+    if read == size {
+        let info = unsafe { info.assume_init() };
+        info.status == libc::SZOMB || info.uid != uid
+    } else {
+        read == 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
 }
 
 #[cfg(all(unix, any(target_os = "macos", test)))]
-fn process_arguments_use(output: &[u8], worktree: &Path, cache: &Path) -> bool {
-    let mut seen = false;
-    for line in output.split(|byte| *byte == b'\n').filter(|line| !line.iter().all(u8::is_ascii_whitespace)) {
-        let line = line.trim_ascii_start();
-        let split = line
-            .iter()
-            .position(u8::is_ascii_whitespace)
-            .unwrap_or(line.len());
-        if split == line.len() || line[split..].iter().all(u8::is_ascii_whitespace) {
-            return true;
+fn process_arguments_use(argv: &[u8], worktree: &Path, cache: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    let matches_path = |bytes: &[u8]| {
+        let path = Path::new(std::ffi::OsStr::from_bytes(bytes));
+        path.is_absolute() && (path.starts_with(worktree) || path.starts_with(cache))
+    };
+    argv.split(|byte| *byte == 0).any(|arg| {
+        if arg.starts_with(b"/") {
+            matches_path(arg)
+        } else {
+            matches_path(arg.strip_prefix(b"@").unwrap_or_default())
+                || arg.split(|byte| *byte == b'=').skip(1).any(matches_path)
         }
-        let Some(pid) = std::str::from_utf8(&line[..split])
-            .ok()
-            .and_then(|pid| pid.parse::<u32>().ok())
-        else {
-            return true;
-        };
-        seen = true;
-        // The invoking GC's argv may carry the explicit path itself. Its
-        // handles, mappings and cwd are still checked above, without waiver.
-        if pid == std::process::id() { continue; }
-        if [worktree, cache].iter().any(|path| {
-            let path = path.as_os_str().as_encoded_bytes();
-            !path.is_empty() && line[split..].windows(path.len()).any(|window| window == path)
-        }) { return true; }
-    }
-    !seen
+    })
 }
 
 #[cfg(all(test, unix))]
@@ -2293,9 +2342,10 @@ mod tests {
         assert!(lsof_uses(own_exe.as_bytes(), cache, cache, Some(17)));
         assert!(lsof_uses(b"", cache, cache, Some(17)));
         assert!(lsof_uses(b"pinvalid\0", cache, cache, Some(17)));
-        assert!(process_arguments_use(format!("{other} cargo --target-dir /tmp/cache/debug\n").as_bytes(), Path::new("/tmp/worktree"), Path::new("/tmp/cache")));
-        assert!(!process_arguments_use(format!("{other} sleep 30\n").as_bytes(), Path::new("/tmp/worktree"), Path::new("/tmp/cache")));
-        assert!(process_arguments_use(b"", cache, cache));
+        assert!(process_arguments_use(b"cargo\0--target-dir\0/repo with spaces/target/debug/output\0", cache, cache));
+        assert!(process_arguments_use(b"cargo\0--target-dir=/repo with spaces/target/debug\0", cache, cache));
+        assert!(!process_arguments_use(b"cargo\0--target-dir=/repo with spaces/target/debugger\0/nested/repo with spaces/target/debug\0", cache, cache));
+        assert!(!process_arguments_use(b"sleep\0--quiet\0", cache, cache));
     }
 
     #[test]

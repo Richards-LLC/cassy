@@ -14,6 +14,7 @@ pub(crate) fn metadata_prefix(role: AgentRole) -> Option<&'static str> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
 pub struct AgentModel {
     pub id: String,
     pub name: String,

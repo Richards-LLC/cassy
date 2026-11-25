@@ -431,6 +431,7 @@ pub enum ProcessExit {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
 pub enum DaemonDeathCause {
     CleanExit {
         code: i32,
@@ -448,6 +449,7 @@ pub enum DaemonDeathCause {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
 pub struct DaemonDeathDiagnostic {
     pub cause: DaemonDeathCause,
     pub next_action: String,
@@ -496,6 +498,7 @@ fn signal_name(signal: i32) -> Option<&'static str> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub enum DaemonLiveness {
     Live,
     StaleMetadata,
@@ -503,6 +506,7 @@ pub enum DaemonLiveness {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
 pub struct HubSession {
     pub name: String,
     /// The live supervisor's fingerprinted MCP daemon epoch, not the hub binary.

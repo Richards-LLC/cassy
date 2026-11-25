@@ -14,6 +14,7 @@ use crate::ui::factory::DaemonMessage;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub enum MachineEventKind {
     SessionAdded,
     SessionRemoved,
@@ -32,6 +33,7 @@ pub enum MachineEventKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub enum AttentionSeverity {
     Critical,
     Warning,
@@ -40,6 +42,7 @@ pub enum AttentionSeverity {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub enum AttentionAction {
     Repair,
     ViewPane,
@@ -49,6 +52,7 @@ pub enum AttentionAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
 pub struct AttentionEnrichment {
     pub severity: AttentionSeverity,
     pub summary: String,
@@ -59,12 +63,14 @@ pub struct AttentionEnrichment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
 pub struct SessionAttentionContext {
     pub title: String,
     pub phase: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
 pub struct MachineEvent {
     pub sequence: u64,
     #[serde(default)]

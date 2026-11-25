@@ -611,6 +611,7 @@ pub struct WsTicket {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
 pub struct LeaseSummary {
     pub controller_device_id: Option<String>,
     pub controller_label: Option<String>,

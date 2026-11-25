@@ -951,6 +951,7 @@ async fn diagnostics<R: SessionReadModel>(
 }
 
 #[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
 struct SessionsResponse {
     schema_version: u32,
     /// Browser catalog expiry shares worker_status's fresh-heartbeat band.
@@ -960,6 +961,9 @@ struct SessionsResponse {
     /// may be filtered or unknown, and must never retire a live attachment.
     stopped_sessions: Vec<HubSession>,
 }
+
+#[cfg(test)]
+mod hub_double_schema;
 
 #[derive(Serialize)]
 struct ProjectsResponse {
@@ -1136,6 +1140,21 @@ async fn launch_session<R: SessionReadModel>(
 /// retire a stale session that still looks live. It needs `factory:manage`,
 /// as spawning and shutting down workers does, and stops the session's daemon
 /// the way `cas kill <name>` does.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
+struct EndSessionReceipt {
+    session: String,
+    outcome: EndSessionReceiptOutcome,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+enum EndSessionReceiptOutcome {
+    Ended,
+    CleanedStale,
+}
+
 async fn end_session<R: SessionReadModel>(
     State(state): State<HubState<R>>,
     Path(session): Path<String>,
@@ -1215,10 +1234,10 @@ async fn end_session<R: SessionReadModel>(
         Ok(Ok(outcome)) => {
             let ended = outcome == crate::cli::factory::EndSessionOutcome::Ended;
             tracing::info!(session = %session, device = %device, ended, "Commander ended a factory session");
-            Json(serde_json::json!({
-                "session": session,
-                "outcome": if ended { "ended" } else { "cleaned_stale" },
-            }))
+            Json(EndSessionReceipt {
+                session,
+                outcome: if ended { EndSessionReceiptOutcome::Ended } else { EndSessionReceiptOutcome::CleanedStale },
+            })
             .into_response()
         }
         Ok(Err(error)) => launch_error(
@@ -4609,6 +4628,15 @@ async fn proxy_machine_socket<R: SessionReadModel>(
     }
 }
 
+#[derive(Serialize)]
+#[serde(tag = "error", rename_all = "snake_case")]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
+enum LeaseRefusal {
+    Unauthorized,
+    ScopeDenied { required_scope: &'static str, message: String },
+    LeaseUnavailable,
+}
+
 // gate-audit[force]: selector Chooses the HubAdmin takeover operation with its own required scope; does not bypass authentication or that scope.
 async fn acquire_lease<R: SessionReadModel>(
     State(state): State<HubState<R>>,
@@ -4633,11 +4661,10 @@ async fn acquire_lease<R: SessionReadModel>(
         Ok(Some(context)) => context,
         Ok(None) => return unauthorized(),
         Err(error) if error.to_string() == "scope denied" && required_scope == Scope::PaneInput => {
-            return with_cors((StatusCode::FORBIDDEN, Json(serde_json::json!({
-                "error": "scope_denied",
-                "required_scope": Scope::PaneInput.as_str(),
-                "message": ClientPermissionRequired::PaneInput.to_string(),
-            }))).into_response(), &headers);
+            return with_cors((StatusCode::FORBIDDEN, Json(LeaseRefusal::ScopeDenied {
+                required_scope: Scope::PaneInput.as_str(),
+                message: ClientPermissionRequired::PaneInput.to_string(),
+            })).into_response(), &headers);
         }
         Err(error) => return with_cors(unauthorized_for(&error), &headers),
     };
@@ -4662,7 +4689,7 @@ async fn acquire_lease<R: SessionReadModel>(
         Err(_) => with_cors(
             (
                 StatusCode::CONFLICT,
-                Json(serde_json::json!({"error":"lease_unavailable"})),
+                Json(LeaseRefusal::LeaseUnavailable),
             )
                 .into_response(),
             &headers,
@@ -4923,7 +4950,7 @@ fn auth_store_unavailable(error: &anyhow::Error) -> Response {
 fn unauthorized() -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        Json(serde_json::json!({"error":"unauthorized"})),
+        Json(LeaseRefusal::Unauthorized),
     )
         .into_response()
 }

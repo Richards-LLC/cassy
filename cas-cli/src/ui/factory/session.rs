@@ -18,6 +18,7 @@ mod socket_cleanup;
 
 /// Confirmed teardown outcome retained after active metadata is removed.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
 pub struct SessionEndOutcome {
     pub at: String,
     pub reason: String,

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub enum SupervisorCommand {
     Compact,
     Clear,
@@ -65,9 +66,11 @@ impl SupervisorCommandKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub enum SupervisorCommandPhase { Queued, Submitted, Observed, Refused, Unconfirmed, Cancelled }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
 pub struct SupervisorCommandReceipt {
     pub device_id: String,
     pub client_ref: String,

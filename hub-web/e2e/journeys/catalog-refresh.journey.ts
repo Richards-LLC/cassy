@@ -20,9 +20,7 @@ test("HUB-J12 event flood leaves the final supervisor visible without hammering 
       if (sequence === 100) machine.sessions.push({
         ...machine.sessions[0]!, name: "final-supervisor", supervisor: "final-supervisor", project_dir: "/projects/final-catalog",
       });
-      await page.evaluate(sequence => (window as unknown as {
-        __journeyMachineEvent: (host: string, data: string) => number;
-      }).__journeyMachineEvent("atlas.test", JSON.stringify({ kind: "session_added", session: "final-supervisor", sequence })), sequence);
+      await hub.emitMachineEvent("atlas", "session_added", "final-supervisor");
       await clock.advance(10);
     }
     expect(hub.catalogFetchCount("atlas") - before).toBeLessThanOrEqual(2);

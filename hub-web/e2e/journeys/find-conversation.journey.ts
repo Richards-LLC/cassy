@@ -860,15 +860,12 @@ for (const width of [1280, 390]) {
     session.workers = ["worker-c"];
     // cas-c095: the hub's events for a deliberate exit, then a crash elsewhere
     // that proves the stream was read. Only the crash becomes attention.
-    const exitEvents = [
-      { kind: "pane_exited", sequence: 9101, session: session.name, pane_id: session.supervisor, payload: { exit_code: 0, role: "supervisor" } },
-      { kind: "daemon_disconnected", sequence: 9102, session: session.name, diagnostic: { cause: { kind: "clean_exit", code: 0 }, next_action: "Inspect the factory daemon log and session metadata." } },
-      { kind: "daemon_disconnected", sequence: 9103, session: "another-session", diagnostic: { cause: { kind: "signal", signal: 9, name: "SIGKILL" }, next_action: "Inspect the factory daemon log and session metadata." } },
-    ];
-    await page.evaluate((rows) => {
-      const wire = window as unknown as { __journeyMachineEvent: (host: string, data: string) => number };
-      for (const event of rows) wire.__journeyMachineEvent("atlas.test", JSON.stringify(event));
-    }, exitEvents);
+    const base = { revision: 0, session: session.name, pane_id: null, at: journeyStamp() };
+    await hub.sendMachineEvents(machine.id, [
+      { ...base, kind: "pane_exited", sequence: 9101, pane_id: session.supervisor, payload: { exit_code: 0, role: "supervisor" } },
+      { ...base, kind: "daemon_disconnected", sequence: 9102, diagnostic: { cause: { kind: "clean_exit", code: 0 }, next_action: "Inspect the factory daemon log and session metadata." } },
+      { ...base, kind: "daemon_disconnected", sequence: 9103, session: "another-session", diagnostic: { cause: { kind: "signal", signal: 9, name: "SIGKILL", core_dumped: null }, next_action: "Inspect the factory daemon log and session metadata." } },
+    ]);
     await expect.poll(() => page.evaluate(async () => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
         const request = indexedDB.open("cas-commander-v1", 2);

@@ -19,11 +19,7 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   const now = "2026-11-24T12:00:00Z";
   let handleHttp!: HttpHandler;
   let handleSocket!: SocketHandler;
-  const browser = {
-    fetch: globalThis.fetch,
-    __journeyResetEvents: (_host: string) => {},
-    __journeyMachineEvent: (_host: string, _data: string) => 0,
-  };
+  const browser = { fetch: globalThis.fetch, __journeyResetEvents: (_host: string) => {} };
   vi.stubGlobal("window", browser);
   vi.stubGlobal("location", { href: origin });
   vi.stubGlobal("navigator", { onLine: true });
@@ -143,32 +139,31 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
     { SupervisorCommandReceipt: { receipt: scripted }, Output: {} },
     { SupervisorCommandReceipt: { receipt: scripted, extra: true } },
   ]) {
-    expect.soft(() => double.send("running", malformed)).toThrow(expect.objectContaining({ schemaId: "urn:cassy:hub:SupervisorCommandReceipt" }));
+    expect.soft(() => double.send("running", malformed)).toThrow(expect.objectContaining({ schemaId: "urn:cassy:hub:SupervisorCommandReceiptFrame" }));
   }
   expect.soft(multiplex.frames).toHaveLength(3);
   expect.soft(multiplex.frames.slice(1).map(frame => frame.channel)).toEqual(["pty:running", "pty:running"]);
   check("DaemonWelcome", multiplex.frames[1]?.message);
   check("DaemonWelcome", { Welcome: { ...multiplex.frames[1]?.message.Welcome, pane_bootstrap: [] } }, false);
-  check("SupervisorCommandReceipt", multiplex.frames[2]?.message);
+  check("SupervisorCommandReceiptFrame", multiplex.frames[2]?.message);
 
   const legacy = connect("/v1/sessions/running/attach");
   legacy.send({ SupervisorCommand: { command: "standby", client_ref: "command", confirmed: true } });
   expect(legacy.frames).toHaveLength(2);
   check("DaemonWelcome", legacy.frames[0]);
-  check("SupervisorCommandReceipt", legacy.frames[1]);
+  check("SupervisorCommandReceiptFrame", legacy.frames[1]);
 
   const result = await http("/v1/sessions/running", "DELETE");
   check("EndSessionReceipt", result.json);
   expect(result.json.outcome).toBe("ended");
-  const raw = { sequence: 4, revision: 0, kind: "daemon_error", session: "running", pane_id: null, at: now, enrichment_pending: true };
-  const emit = (event: unknown) => browser.__journeyMachineEvent("fixture.test", JSON.stringify(event));
-  emit({ kind: "stream_metadata", epoch: "fixture", oldest_sequence: 4, latest_sequence: 4, retained: 1 });
-  emit(raw);
-  emit({ kind: "replay_complete" });
-  emit(raw);
-  expect.soft(() => emit({ ...raw, at: null })).toThrow(expect.objectContaining({ schemaId: "urn:cassy:hub:MachineEvent" }));
+  const raw = { sequence: 4, revision: 0, kind: "daemon_error", session: "running", pane_id: null, at: now, payload: { message: "fixture" }, enrichment_pending: true };
+  const metadata = { kind: "stream_metadata", epoch: "fixture", oldest_sequence: 4, latest_sequence: 4, retained: 1 };
+  await double.sendMachineEvents("fixture", [metadata, raw, { kind: "replay_complete" }, raw]);
+  expect.soft(() => double.sendMachineEvents("fixture", [metadata, { ...raw, at: null }]))
+    .toThrow(expect.objectContaining({ schemaId: "urn:cassy:hub:MachineEvent" }));
   browser.__journeyResetEvents("fixture.test");
   const decoder = new TextDecoder();
+  const markers: string[] = [];
   const events: Array<Record<string, any>> = [];
   for (;;) {
     const { value, done } = await stream.read();
@@ -178,6 +173,7 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
     if (!data) continue;
     const event = JSON.parse(data);
     if (event.kind === "stream_metadata" || event.kind === "replay_complete") {
+      markers.push(event.kind);
       expect.soft(frame.split("\n")[0]).toBe(`event: ${event.kind}`);
       continue;
     }
@@ -186,6 +182,7 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
     expect.soft(event.sequence).toBeGreaterThan(0);
     expect.soft(frame.split("\n").slice(0, 2)).toEqual([`id: ${event.sequence}.${event.revision}`, `event: ${event.kind.replaceAll("_", "")}`]);
   }
+  expect.soft(markers).toEqual(["stream_metadata", "replay_complete"]);
   expect.soft(events.map(event => event.kind)).toEqual(["session_added", "session_removed", "fleet_changed", "daemon_error", "daemon_error"]);
   expect.soft(events.map(event => event.sequence)).toEqual([1, 2, 3, 4, 4]);
   check("MachineEvent", { ...events[0], diagnostic: null }, false);

@@ -117,7 +117,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       const hub = await journey.hub({ machines: [atlas], paired: ["atlas"], multiplex: true, history, fleet: { [PELICAN]: world } });
       // The thread's one status line: the supervisor's reported phase.
       const line = page.getByRole("log").getByRole("status");
-      const refresh = async () => page.evaluate(session => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number }).__journeyMachineEvent("atlas.test", JSON.stringify({ kind: "fleet_changed", session })), PELICAN);
+      const refresh = () => hub.emitMachineEvent("atlas", "fleet_changed", PELICAN);
       await journey.stage("Read the reported phase without opening Show work", async () => {
         await openConversation(page, journey);
         await expect(line).toBeVisible();

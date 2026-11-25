@@ -687,9 +687,7 @@ test("HUB-J12 network switch: single revoked machine stops promising reconnectio
     // cas-ef7a: a definitive refusal can arrive between animation frames.
     // Keep the protocol clock paused: the header and working line must both
     // reflect the authenticated read's refusal without another paint tick.
-    await page.evaluate(session => (window as unknown as {
-      __journeyMachineEvent: (host: string, data: string) => number;
-    }).__journeyMachineEvent("atlas.test", JSON.stringify({ kind: "session_added", session })), PELICAN);
+    await hub.emitMachineEvent("atlas", "session_added", PELICAN);
     await expect(header).toBeVisible();
     await expect(footerBadge(page)).toBeVisible();
     // Neither receipt nor old pane output can claim work after pairing is lost.
@@ -1310,20 +1308,17 @@ test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attach
     atlas.sessions = [...ATLAS.sessions];
     hub.hold(peer);
     hub.drop(peer);
-    const prior = Array.from({ length: 1021 }, (_, index) => ({ kind: "pane_added", sequence: 4180 + index, session: peer }));
+    const base = { revision: 0, session: peer, pane_id: null, at: new Date(clock.now()).toISOString() };
+    const prior = Array.from({ length: 1021 }, (_, index) => ({ ...base, kind: "pane_added", sequence: 4180 + index, pane_id: `worker-${index}` }));
     const tail = [
-      { kind: "pane_exited", sequence: 5201, session: peer, pane_id: "worker" },
-      { kind: "daemon_disconnected", sequence: 5202, session: peer, diagnostic: { cause: { kind: "clean_exit", code: 0 }, next_action: "Inspect the factory daemon log and session metadata; do not infer a cause from a closed socket alone." } },
-      { kind: "session_removed", sequence: 5203, session: peer },
+      { ...base, kind: "pane_exited", sequence: 5201, pane_id: "worker-0", payload: { exit_code: 0 } },
+      { ...base, kind: "daemon_disconnected", sequence: 5202, diagnostic: { cause: { kind: "clean_exit", code: 0 }, next_action: "Inspect the factory daemon log and session metadata; do not infer a cause from a closed socket alone." } },
+      { ...base, kind: "session_removed", sequence: 5203 },
     ];
-    await page.evaluate(({ prior, tail }) => {
-      const wire = window as unknown as { __journeyMachineEvent: (host: string, data: string) => number };
-      const emit = (event: unknown) => wire.__journeyMachineEvent("atlas.test", JSON.stringify(event));
-      const metadata = { kind: "stream_metadata", epoch: "peer-reset", oldest_sequence: 4180, latest_sequence: 5203 };
-      // Initial retained window, its live removal tail, then a replay of the same window.
-      for (const event of [metadata, ...prior, { kind: "replay_complete" }, ...tail,
-        metadata, ...prior, ...tail, { kind: "replay_complete" }]) emit(event);
-    }, { prior, tail });
+    const metadata = { kind: "stream_metadata", epoch: "peer-reset", oldest_sequence: 4180, latest_sequence: 5200, retained: prior.length };
+    const complete = { kind: "replay_complete" };
+    await hub.sendMachineEvents("atlas", [metadata, ...prior, complete, ...tail,
+      { ...metadata, latest_sequence: 5203, retained: prior.length + tail.length }, ...prior, ...tail, complete]);
     await hub.waitFor(() => hub.catalogFetchCount("atlas") > catalogsBeforeReplay);
     await clock.advance(1);
     // cas-c4b7: even the catalog fetched by this replay must leave the
@@ -1345,10 +1340,7 @@ test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attach
     expect(leaseReads).toBe(0);
     controlReads.length = 0;
     // The selected session's live event must still refresh both controls.
-    await page.evaluate(session => {
-      (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number })
-        .__journeyMachineEvent("atlas.test", JSON.stringify({ kind: "pane_added", session }));
-    }, PELICAN);
+    await hub.emitMachineEvent("atlas", "pane_added", PELICAN, "worker");
     await clock.advance(1);
     expect(controlReads.sort()).toEqual([`/v1/sessions/${PELICAN}/lease`, `/v1/sessions/${PELICAN}/status`]);
     // A route hint and repeated event-only loss must not condemn either

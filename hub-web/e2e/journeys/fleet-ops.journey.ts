@@ -177,7 +177,7 @@ for (const colorScheme of ["light", "dark"] as const) {
         await dismiss.focus(); await expect(dismiss).toBeFocused();
         // Real status and shell replacements must retain this keyboard stop.
         world.tasks[0]!.title = "Docs lane refreshed";
-        await page.evaluate((session) => (window as unknown as { __journeyMachineEvent: (host: string, event: string) => void }).__journeyMachineEvent("atlas.test", JSON.stringify({ kind: "fleet_changed", session })), PELICAN);
+        await hub.emitMachineEvent("atlas", "fleet_changed", PELICAN);
         await expect(rail.getByTestId("status-task").filter({ hasText: "cas-1234" })).toContainText("Docs lane refreshed");
         await expect(dismiss).toBeFocused();
         atlas.sessions[0]!.project_dir = "/projects/cas-src-refreshed";

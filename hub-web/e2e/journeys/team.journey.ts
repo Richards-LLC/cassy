@@ -97,7 +97,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       await journey.stage("Same-state workers expose the blocked task before healthy peers", async () => {
         for (const agent of fleet.agents) agent.liveness = "waiting_for_input";
         fleet.tasks[2].status = "blocked";
-        await page.evaluate(([host, session]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => void }).__journeyMachineEvent(host, JSON.stringify({ kind: "fleet_changed", session })), ["atlas.test", PELICAN]);
+        await hub.emitMachineEvent("atlas", "fleet_changed", PELICAN);
         const panel = page.getByRole("tabpanel", { name: "Team", exact: true });
         await expect(teamLanes(page).first()).toHaveAttribute("data-worker", "brisk-wren-9");
         await expect(laneState(page, "brisk-wren-9")).toHaveText("Blocked");
@@ -110,7 +110,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         fleet.agents[0].liveness = "stalled";
         fleet.agents[3].liveness = "offline";
         const started = performance.now();
-        await page.evaluate(([host, session]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => void }).__journeyMachineEvent(host, JSON.stringify({ kind: "fleet_changed", session })), ["atlas.test", PELICAN]);
+        await hub.emitMachineEvent("atlas", "fleet_changed", PELICAN);
         await expect(laneState(page, "swift-lark-3")).toHaveText("Stalled", { timeout: 5_000 });
         const waiting = teamLane(page, "brisk-wren-9");
         const offline = teamLane(page, "calm-heron-5");
@@ -190,7 +190,7 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
       const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, workers: ["builder", "reviewer"] })) };
       const statusReads: string[] = [];
       page.on("request", request => { const match = /\/v1\/sessions\/([^/]+)\/status$/.exec(new URL(request.url()).pathname); if (match) statusReads.push(decodeURIComponent(match[1]!)); });
-      await journey.hub({ machines: [machine, remote], paired: [ATLAS.id, remote.id], fleet: { [PELICAN]: local, "remote-session": follow, "gabber-session": foreign } });
+      const hub = await journey.hub({ machines: [machine, remote], paired: [ATLAS.id, remote.id], fleet: { [PELICAN]: local, "remote-session": follow, "gabber-session": foreign } });
       const status = statusView(page);
       const epics = status.getByTestId("live-epics");
       await journey.stage("Read the project's live epics in Tasks & progress, with nothing above the conversation", async () => {
@@ -261,7 +261,7 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
         // The delivery merges while its task is still parked and its worker still live:
         // the row moves to Merged and the split moves with it.
         follow.tasks[0].delivery_state = "merged";
-        await page.evaluate(([host, session]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => void }).__journeyMachineEvent(host, JSON.stringify({ kind: "fleet_changed", session })), ["prowl.test", "remote-session"]);
+        await hub.emitMachineEvent(remote.id, "fleet_changed", "remote-session");
         await expectRun(peer, [2, 0, 3]);
         await expect(peer).toContainText("3/5");
         await expect(groupLabels(tasks)).toHaveText(["Open · 2", "Merged · 3"]);

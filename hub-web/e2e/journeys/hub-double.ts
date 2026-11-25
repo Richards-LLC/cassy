@@ -213,9 +213,11 @@ function fulfillWire(route: Route, schema: Parameters<typeof assertHubWire>[0], 
 function sendSessionFrame(socket: WebSocketRoute, message: Record<string, unknown>): void {
   const frame = JSON.stringify(message);
   if ("Welcome" in message) assertHubWire("DaemonWelcome", JSON.parse(frame));
-  if ("SupervisorCommandReceipt" in message) assertHubWire("SupervisorCommandReceipt", JSON.parse(frame).SupervisorCommandReceipt?.receipt);
+  if ("SupervisorCommandReceipt" in message) assertHubWire("SupervisorCommandReceiptFrame", JSON.parse(frame));
   socket.send(frame);
 }
+
+type MachineEventFixture = Record<string, unknown> & { kind: string };
 
 export class HubDouble {
   readonly sends: SentMessage[] = [];
@@ -399,15 +401,25 @@ export class HubDouble {
     await this.waitFor(() => this.catalogFetchCount(machineId) > before);
   }
 
-  private emitMachineEvent(machineId: string, kind: "session_added" | "session_removed" | "fleet_changed", session: string): Promise<number> {
+  emitMachineEvent(machineId: string, kind: "session_added" | "session_removed" | "fleet_changed" | "pane_added", session: string, paneId: string | null = null): Promise<number> {
     const sequence = (this.eventSequences.get(machineId) ?? 0) + 1;
+    return this.sendMachineEvents(machineId, [{ sequence, revision: 0, kind, session, pane_id: paneId, at: this.stamp() }]);
+  }
+
+  sendMachineEvents(machineId: string, events: readonly MachineEventFixture[]): Promise<number> {
+    let sequence = this.eventSequences.get(machineId) ?? 0;
+    const frames = events.map(event => {
+      const data = JSON.stringify(event);
+      const wire = JSON.parse(data);
+      if (wire.kind === "stream_metadata" || wire.kind === "replay_complete") return `event: ${wire.kind}\ndata: ${data}\n\n`;
+      assertHubWire("MachineEvent", wire);
+      sequence = Math.max(sequence, wire.sequence);
+      return `id: ${wire.sequence}.${wire.revision}\nevent: ${wire.kind.replaceAll("_", "")}\ndata: ${data}\n\n`;
+    });
     this.eventSequences.set(machineId, sequence);
-    const event = { sequence, revision: 0, kind, session, pane_id: null, at: this.stamp() };
-    assertHubWire("MachineEvent", event);
-    const frame = `id: ${sequence}.${event.revision}\nevent: ${kind.replaceAll("_", "")}\ndata: ${JSON.stringify(event)}\n\n`;
     return this.page.evaluate(
-      ([host, data]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string, framed: boolean) => number }).__journeyMachineEvent(host, data, true),
-      [`${machineId}.test`, frame] as const,
+      ([host, frames]) => (window as unknown as { __journeyMachineEvent: (host: string, frames: string[]) => number }).__journeyMachineEvent(host, frames),
+      [`${machineId}.test`, frames] as const,
     );
   }
 
@@ -499,7 +511,7 @@ export class HubDouble {
       const streams = new Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>();
       const w = window as unknown as {
         __journeyOutage: (host: string, isDown: boolean, reset: boolean) => void;
-        __journeyMachineEvent: (host: string, data: string, framed?: boolean) => number;
+        __journeyMachineEvent: (host: string, frames: string[]) => number;
         __journeyResetEvents: (host: string) => void;
         __journeyEventStreamOpens: Record<string, number>;
       };
@@ -513,11 +525,14 @@ export class HubDouble {
       };
       // cas-9772: a machine event on the open streams, as the hub announces
       // a session list change. Returns how many streams carried it.
-      w.__journeyMachineEvent = (host, data, framed = false) => {
-        const bytes = new TextEncoder().encode(framed ? data : `data: ${data}\n\n`);
+      w.__journeyMachineEvent = (host, frames) => {
+        const encoder = new TextEncoder();
         let delivered = 0;
-        for (const controller of streams.get(host) ?? []) {
-          try { controller.enqueue(bytes); delivered += 1; } catch { /* closed */ }
+        for (const frame of frames) {
+          const bytes = encoder.encode(frame);
+          for (const controller of streams.get(host) ?? []) {
+            try { controller.enqueue(bytes); delivered += 1; } catch { /* closed */ }
+          }
         }
         return delivered;
       };
@@ -1018,7 +1033,7 @@ export class HubDouble {
       if (this.outages.get(machineId)?.http !== "auth_store_unavailable") return route.abort("internetdisconnected");
       if (path === "/v1/health") return route.fulfill({ json: { ok: true, installation_protocol: 1 } });
       const reason = "auth_store_unavailable";
-      return route.fulfill({ status: 503, headers: { "retry-after": "2", "x-cas-refusal": reason }, json: { error: reason, reason, retryable: true, server_time: Math.floor(this.now() / 1000) } });
+      return fulfillWire(route, "LeaseRefusal", { status: 503, headers: { "retry-after": "2", "x-cas-refusal": reason }, json: { error: reason, reason, retryable: true, server_time: Math.floor(this.now() / 1000) } });
     }
     if (path === "/v1/auth/pairing/protocol") return route.fulfill({ json: { installation_protocol: 1 } });
     if (path === "/v1/health") return route.fulfill({ json: { ok: true, installation_protocol: 1 } });

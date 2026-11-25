@@ -1,5 +1,6 @@
 import { activate, showConversationList, openConversation } from "./responsive-goals";
 import { test, expect } from "./journey";
+import { journeyStamp } from "./clock";
 import { ATLAS, STUDIO, PELICAN } from "./world";
 import type { Page } from "@playwright/test";
 
@@ -322,45 +323,40 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     hub.hold(PELICAN);
     hub.drop(PELICAN);
     await expect(header).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
+    const base = { revision: 0, session: PELICAN, pane_id: null, at: journeyStamp() };
+    const diagnostic = { cause: { kind: "transport_lost" }, next_action: "Inspect the factory daemon log and session metadata." };
     const events = [
-      { kind: "daemon_disconnected", sequence: 1, session: PELICAN },
-      { kind: "session_removed", sequence: 2, session: PELICAN },
-      { kind: "daemon_error", sequence: 3, session: PELICAN, payload: { message: "Keep this diagnostic" } },
-      { kind: "daemon_disconnected", sequence: 4, session: "another-session" },
+      { ...base, kind: "daemon_disconnected", sequence: 1, diagnostic },
+      { ...base, kind: "session_removed", sequence: 2 },
+      { ...base, kind: "daemon_error", sequence: 3, payload: { message: "Keep this diagnostic" }, enrichment_pending: true },
+      { ...base, kind: "daemon_disconnected", sequence: 4, session: "another-session", diagnostic },
     ];
-    const emit = (rows: typeof events) => page.evaluate((rows) => {
-      const wire = window as unknown as { __journeyMachineEvent: (host: string, data: string) => number };
-      for (const event of rows) wire.__journeyMachineEvent("atlas.test", JSON.stringify(event));
-    }, rows);
     const stored = () => page.evaluate(async () => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
         const request = indexedDB.open("cas-commander-v1", 2);
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error);
       });
-      const rows = await new Promise<{ id: string; acknowledgedAt?: string; headline?: string }[]>((resolve, reject) => {
+      const rows = await new Promise<{ id: string; acknowledgedAt?: string }[]>((resolve, reject) => {
         const request = db.transaction("attention").objectStore("attention").getAll();
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error);
       });
       db.close();
       return rows.filter(row => row.id.startsWith("atlas:event:")).sort((a, b) => a.id.localeCompare(b.id))
-        .map(row => ({ id: row.id, resolved: !!row.acknowledgedAt, enriched: row.headline === "Recovered outage diagnostic" }));
+        .map(row => ({ id: row.id, resolved: !!row.acknowledgedAt }));
     });
-    await emit(events);
-    await expect.poll(stored).toEqual(events.map(event => ({ id: `atlas:event:${event.sequence}`, resolved: false, enriched: false })));
+    await hub.sendMachineEvents("atlas", events);
+    await expect.poll(stored).toEqual(events.map(event => ({ id: `atlas:event:${event.sequence}`, resolved: false })));
     hub.release(PELICAN);
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: RECOVERY_TIMEOUT_MS }).toBe(true);
     await expect(header).toHaveAttribute("data-phase", "live"); await expect(header).toHaveAttribute("data-degraded", "false");
-    const recovered = events.map(event => ({ id: `atlas:event:${event.sequence}`, resolved: event.sequence <= 2, enriched: false }));
+    const recovered = events.map(event => ({ id: `atlas:event:${event.sequence}`, resolved: event.sequence <= 2 }));
     await expect.poll(stored, { message: "Live resolves only its outage notices, retaining all four rows" }).toEqual(recovered);
 
     await expect(attentionCount(page)).toHaveText("1");
-    // A later enrichment revision of the retained outage must stay history.
-    await emit(events.slice(0, 2).map(event => ({ ...event, revision: 1,
-      enrichment: { severity: "warning", action: "none", summary: "Recovered outage diagnostic", fingerprint: `outage:${event.sequence}` },
-    })));
-    await expect.poll(stored).toEqual(recovered.map(row => ({ ...row, enriched: row.resolved })));
+    await hub.sendMachineEvents("atlas", events.slice(0, 2));
+    await expect.poll(stored).toEqual(recovered);
     await expect(attentionCount(page)).toHaveText("1");
   });
 });

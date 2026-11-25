@@ -279,6 +279,117 @@ pub(crate) fn invalidate(cas_root: &Path, repo: &Path, head: &str, scope: &Scope
 mod tests {
     use super::*;
 
+    #[test]
+    fn gh2482_visual_qa_delivery_selects_runnable_node_proof() {
+        let repo = tempfile::tempdir().unwrap();
+        let repo = repo.path().canonicalize().unwrap();
+        let paths = [
+            "Cargo.lock",
+            "cas-cli/Cargo.toml",
+            "cas-cli/src/artifacts/proof.rs",
+            "cas-cli/src/builtins/skills/cas-qa-craft/references/independent-pass.md",
+            "cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs",
+            "cas-cli/src/builtins/skills/cas-worker/references/details.md",
+            "cas-cli/src/config/settings.rs",
+            "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs",
+            "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/blast_radius_park_tests.rs",
+            "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/g61_family_close_tests.rs",
+            "cas-cli/src/mcp/tools/core/task/lifecycle/qa_evidence_gate.rs",
+            "cas-cli/src/mcp/tools/core/workflow/premerge_verification/automatic.rs",
+            "cas-cli/src/qa_evidence.rs",
+            "cas-cli/src/qa_evidence_tests.rs",
+            "cas-cli/src/qa_ledger.rs",
+            "changelog.d/cas-0304.md",
+            "docs/product-overview.d/cas-0304.md",
+            "docs/qa/batch-qa.md",
+            "docs/qa/evidence-close-gate.md",
+            "scripts/qa-candidate-build.py",
+            "scripts/test-qa-candidate-build.py",
+            "scripts/visual-qa-fixtures/batch-park/pass/127-0-0-1-52391-ranking-expanded-light-390x800.png",
+            "scripts/visual-qa-fixtures/batch-park/pass/127-0-0-1-52391-ranking-light-390x800.png",
+            "scripts/visual-qa-fixtures/batch-park/pass/visual-qa.json",
+            "scripts/visual-qa-fixtures/batch-park/scoped-base/127-0-0-1-52519-ranking-expanded-light-390x800.png",
+            "scripts/visual-qa-fixtures/batch-park/scoped-base/127-0-0-1-52519-ranking-light-390x800.png",
+            "scripts/visual-qa-fixtures/batch-park/scoped-base/visual-qa.json",
+            "scripts/visual-qa-fixtures/batch-park/scoped-tip/127-0-0-1-52460-ranking-expanded-light-390x800.png",
+            "scripts/visual-qa-fixtures/batch-park/scoped-tip/127-0-0-1-52460-ranking-light-390x800.png",
+            "scripts/visual-qa-fixtures/batch-park/scoped-tip/visual-qa.json",
+            "scripts/visual-qa-fixtures/batch-park/stale/127-0-0-1-52573-ranking-expanded-light-390x800.png",
+            "scripts/visual-qa-fixtures/batch-park/stale/127-0-0-1-52573-ranking-light-390x800.png",
+            "scripts/visual-qa-fixtures/batch-park/stale/visual-qa.json",
+            "scripts/visual-qa.mjs",
+        ].map(String::from);
+        let packaged = paths[4].as_str();
+        let entry = paths.last().unwrap().as_str();
+        let write = |path: &str, text: &str| {
+            let file = repo.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, text).unwrap();
+        };
+        let git = |args: &[&str]| super::git(&repo, &[
+            &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"], args,
+        ].concat()).unwrap();
+        write("package.json", "{}");
+        write("hub-web/package.json", "{}");
+        write("scripts/visual-qa.test.mjs", "import test from 'node:test'; import './visual-qa.mjs'; import '../cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs'; test('capture', () => {});");
+        write("hub-web/preview/visual-qa.test.ts", "import { test } from 'vitest'; import '../../scripts/visual-qa.mjs'; test('preview', () => {});");
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        for path in &paths {
+            let body = if path == packaged || path == entry {
+                "export const receipt = './visual-qa-fixtures/batch-park/pass/visual-qa.json';"
+            } else if path.ends_with(".json") { "{}" } else { "" };
+            write(path, body);
+        }
+        git(&["add", "."]);
+        git(&["commit", "-qm", "delivery"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        assert_eq!(git(&["diff", "--name-only", &base, &head]).lines().collect::<Vec<_>>(), paths);
+        let (tests, scopes) = stability::requirements(&repo, &head, &base, &paths, None).unwrap();
+        assert!(tests.is_empty());
+        assert_eq!(scopes, [Scope::Related(packaged.into()), Scope::Related(entry.into())]);
+        let commands = commands(Path::new("/cas"), &repo, &paths, &scopes, &Default::default());
+        assert_eq!(commands.len(), 2);
+        for command in commands {
+            let (_, args) = command.split_once(" -- ").unwrap();
+            let invocation = javascript::invocation(&args.split_whitespace().map(String::from).collect::<Vec<_>>()).unwrap();
+            assert_eq!(invocation.runner, "node");
+            assert_eq!(javascript::related_tests(&repo, &invocation.files[0]).unwrap().1, ["scripts/visual-qa.test.mjs"]);
+        }
+    }
+
+    #[test]
+    fn gh2471_playwright_helper_uses_related_proof_beside_a_vitest_consumer() {
+        let repo = tempfile::tempdir().unwrap();
+        let repo = repo.path();
+        let helper = "hub-web/e2e/journeys/hub-double.ts";
+        let journey = "hub-web/e2e/journeys/supervisor-commands.journey.ts";
+        let preview = "hub-web/preview/browser-page.test.ts";
+        for (path, contents) in [
+            ("hub-web/package.json", r#"{"devDependencies":{"@playwright/test":"1","vitest":"3"}}"#),
+            (helper, "import type { Page } from '@playwright/test'; export class HubDouble {}"),
+            (journey, "import { test } from '@playwright/test'; import './hub-double'; test('journey', () => {});"),
+            (preview, "import { test } from 'vitest'; import '../e2e/journeys/hub-double'; test('preview', () => {});"),
+        ] {
+            let file = repo.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, contents).unwrap();
+        }
+        let scopes = [scope(repo, helper)];
+        assert_eq!(scopes, [Scope::Related(helper.into())]);
+        let runs = commands(Path::new("/cas"), repo, &[helper.into(), journey.into(), preview.into()], &scopes, &Default::default());
+        let runners = runs.iter().map(|command| {
+            let (_, args) = command.split_once(" -- ").unwrap();
+            javascript::invocation(&args.split_whitespace().map(String::from).collect::<Vec<_>>()).unwrap()
+        }).map(|invocation| {
+            assert_eq!(invocation.files, [helper]);
+            invocation.runner
+        }).collect::<BTreeSet<_>>();
+        assert_eq!(runners, BTreeSet::from(["playwright", "vitest"]));
+    }
+
     /// GH #2352: vitest cannot transform a `.vue` file without a Vue plugin, so
     /// `vitest related --run <file>.vue` crashes and no receipt can satisfy it.
     /// Such a component proves through its package run, and every command

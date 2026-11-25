@@ -108,15 +108,14 @@ pub(crate) const WORKER_ASSIGNMENT_TEST_POLICY: &str = concat!(
 /// Queue the assignment once for the current worker in its factory session. This
 /// does not depend on the task appearing in the director's focused snapshot.
 pub(crate) fn enqueue(cas_dir: &Path, task: &Task) -> crate::Result<Option<i64>> {
-    enqueue_with_queue_occurrence(cas_dir, task, None, false)
+    enqueue_with_queue_occurrence(cas_dir, task, None, false, "")
 }
 
-pub(crate) fn enqueue_queued(cas_dir: &Path, task: &Task, occurrence: u64, initial: bool) -> crate::Result<Option<i64>> {
-    enqueue_with_queue_occurrence(cas_dir, task, Some(occurrence), initial)
+pub(crate) fn enqueue_queued(cas_dir: &Path, task: &Task, occurrence: u64, initial: bool, repair_brief: &str) -> crate::Result<Option<i64>> {
+    enqueue_with_queue_occurrence(cas_dir, task, Some(occurrence), initial, repair_brief)
 }
 
-// gate-audit[initial]: selector Chooses the initial or continuation prompt; both run the review authority guard.
-fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option<u64>, initial: bool) -> crate::Result<Option<i64>> {
+fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option<u64>, initial: bool, repair_brief: &str) -> crate::Result<Option<i64>> {
     if !matches!(task.status, TaskStatus::Open | TaskStatus::InProgress)
         || matches!(task.task_type, TaskType::Epic | TaskType::Gate)
     {
@@ -193,11 +192,7 @@ fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option
         text = format!("You have been assigned a new task:\nTask ID: {}\nTitle: {}\n\nCassy started this task automatically from your queue. Branch: {branch}. No assignment ACK is needed.\n\nView full details: {prefix}task action=show id={}\n\n{}\n\nWhile working, post progress notes with {prefix}task action=notes id={}.", task.id, task.title, task.id, WORKER_ASSIGNMENT_TEST_POLICY, task.id);
     }
     text.push_str(&crate::finding_triage::focus_brief(cas_dir));
-    let repair_brief = if occurrence.is_some() {
-        crate::mcp::tools::core::task::repeat_review::admit_repair(cas_dir, &task.id)
-            .map_err(|error| crate::error::CasError::Other(error.message.into_owned()))?.brief()
-    } else { String::new() };
-    text.push_str(&repair_brief);
+    text.push_str(repair_brief);
     if occurrence.is_some() && task.status == TaskStatus::InProgress {
         text = crate::prompt_revalidation::attach_queue_continuation(&text, &task.id);
     }

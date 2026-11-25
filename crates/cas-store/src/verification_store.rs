@@ -4358,7 +4358,12 @@ mod tests {
 
     #[test]
     fn automatic_premerge_repair_is_atomic_and_dispatch_bound_cas_ed08() {
+        use crate::{AgentStore, SqliteAgentStore};
         let dir = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(dir.path()).unwrap();
+        agents.init().unwrap();
+        let owner = Agent::new_with_role("owner".into(), "supervisor".into(), AgentRole::Supervisor);
+        agents.register(&owner).unwrap();
         let tasks = SqliteTaskStore::open(dir.path()).unwrap();
         tasks.init().unwrap();
         let mut task = Task::new("repair".into(), "Repair".into());
@@ -4371,11 +4376,18 @@ mod tests {
             Utc::now() + Duration::minutes(10)).unwrap();
         let mut verdict = Verification::new("rejected".into(), task.id.clone());
         verdict.status = VerificationStatus::Rejected;
-        verdict.provenance = cas_types::VerificationProvenance::System;
+        verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+        verdict.agent_id = Some(owner.id.clone());
+        verdict.issuer_agent_id = Some(owner.id.clone());
         verdict.dispatch_id = Some(dispatch.id.clone());
-        add_system_verification(dir.path(), &verdict).unwrap();
-        let conn = rusqlite::Connection::open(dir.path().join("cas.db")).unwrap();
-        resolve_verification_dispatch_with_conn(&conn, &dispatch.id, "owner", None, true).unwrap();
+        let record = |verdict: &Verification, dispatch: &VerificationDispatch| {
+            let mut connection = rusqlite::Connection::open(dir.path().join("cas.db")).unwrap();
+            let transaction = connection.transaction().unwrap();
+            add_verification_with_conn(&transaction, verdict).unwrap();
+            assert!(resolve_verification_dispatch_with_conn(&transaction, &dispatch.id, &owner.id, None, true).unwrap().is_some());
+            transaction.commit().unwrap();
+        };
+        record(&verdict, &dispatch);
         let grant = |owner: &str, id: &str, anchor: &str| auto_return_premerge_rejection(
             dir.path(), &task.id, owner, "evidence repair", id, anchor).unwrap();
         for (owner, id, anchor) in [("foreign", dispatch.id.as_str(), "a".repeat(40)),
@@ -4411,8 +4423,7 @@ mod tests {
             Utc::now() + Duration::minutes(10)).unwrap();
         verdict.id = "next".into();
         verdict.dispatch_id = Some(next.id.clone());
-        add_system_verification(dir.path(), &verdict).unwrap();
-        resolve_verification_dispatch_with_conn(&conn, &next.id, "owner", None, true).unwrap();
+        record(&verdict, &next);
         assert!(grant("owner", &next.id, &"b".repeat(40)).is_none());
         assert_eq!(tasks.get(&task.id).unwrap().deliverables.premerge_repair, Some(receipt));
         // Explicit supervisor request-changes creates a new manual work cycle.

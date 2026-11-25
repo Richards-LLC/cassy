@@ -2609,13 +2609,15 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskStartRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.start_task_and_relaunch_sandbox(req, None).await
+        self.start_task_and_relaunch_sandbox(req, None, None).await
     }
 
     pub(crate) async fn task_start_for_queue(
         &self, req: TaskStartRequest, principal: crate::worker_task_queue::QueueStartPrincipal,
-    ) -> Result<CallToolResult, McpError> {
-        self.start_task_and_relaunch_sandbox(req, Some(principal)).await
+    ) -> Result<(CallToolResult, String), McpError> {
+        let mut repair_brief = String::new();
+        let result = self.start_task_and_relaunch_sandbox(req, Some(principal), Some(&mut repair_brief)).await?;
+        Ok((result, repair_brief))
     }
 
     /// cas-f157: a sandboxed worker's launched profile grants only the tasks
@@ -2624,10 +2626,11 @@ impl CasCore {
     /// for its current tasks and resumes this one.
     async fn start_task_and_relaunch_sandbox(
         &self, req: TaskStartRequest, principal: Option<crate::worker_task_queue::QueueStartPrincipal>,
+        assignment_brief: Option<&mut String>,
     ) -> Result<CallToolResult, McpError> {
         let worker = principal.as_ref().map(|principal| principal.agent().clone());
         let task_id = req.id.clone();
-        let mut result = self.start_task_with_principal(req, principal).await?;
+        let mut result = self.start_task_with_principal(req, principal, assignment_brief).await?;
         let worker = match worker {
             Some(worker) => Some(worker),
             None => self.get_agent_id().ok().and_then(|id| self.open_agent_store().ok()?.get(&id).ok()),
@@ -2652,6 +2655,7 @@ impl CasCore {
     // gate-audit[force]: bypass G-15 Starts despite an actual peer claim; peer_notes carries the successful tag.
     async fn start_task_with_principal(
         &self, req: TaskStartRequest, principal: Option<crate::worker_task_queue::QueueStartPrincipal>,
+        assignment_brief: Option<&mut String>,
     ) -> Result<CallToolResult, McpError> {
         let mut queued_start = principal.is_some();
         let agent_id = match principal.as_ref() {
@@ -4206,6 +4210,9 @@ impl CasCore {
         }
 
         let repair_brief = repeat_admission.brief();
+        if let Some(assignment_brief) = assignment_brief {
+            assignment_brief.clone_from(&repair_brief);
+        }
         if brief {
             // Keep scope, resume state and recent evidence within 2000 bytes.
             // Complete fields remain available through show/notes full or pages.

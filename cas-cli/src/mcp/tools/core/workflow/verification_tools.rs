@@ -1265,8 +1265,7 @@ impl CasCore {
         let repeat_hold = if verification.status == VerificationStatus::Rejected {
             crate::mcp::tools::core::task::repeat_review::settle(&self.cas_root, &task.id)
         } else { Ok(None) };
-        let repeat_notice_queued = matches!(&repeat_hold, Ok(Some(_)));
-        let repeat_review_held = repeat_hold.is_err() || repeat_notice_queued;
+        let repeat_review_held = !matches!(&repeat_hold, Ok(None));
         let close_retry = if let Err(error) = &repeat_hold {
             format!("\nVerdict recorded; repeat-review action incomplete: {error}. Repair remains held; retry this exact verdict.")
         } else if let Ok(Some(hold)) = repeat_hold {
@@ -1356,7 +1355,6 @@ impl CasCore {
         if repeat_review_held {
             result.structured_content = Some(serde_json::json!({
                 "repeat_review_held": true,
-                "repeat_review_notice_queued": repeat_notice_queued,
             }));
         }
         Ok(result)

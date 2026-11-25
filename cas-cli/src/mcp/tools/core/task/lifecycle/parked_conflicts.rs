@@ -8,6 +8,7 @@ use cas_types::{Task, TaskStatus};
 
 use super::{close_ops, supervisor_push};
 use crate::mcp::tools::core::task::repo_context;
+use crate::mcp::tools::core::task::repeat_review::{is_repair_hold, repair_parked};
 use crate::worktree::GitOperations;
 
 // Polling unchanged delivery/target pairs must not repeat the Git check.
@@ -39,7 +40,7 @@ pub(crate) fn return_to_worker(
         "merge_conflicted: {} @ {tip} conflicts with {} @ {target_tip}; conflicting paths: {paths}. Merge the target into the delivery branch, resolve, and re-deliver.",
         GitOperations::visible_git_label(source), GitOperations::visible_git_label(target),
     );
-    let (_, reason) = super::super::repeat_review::repair_parked(root, &expected.id, actor, &reason)?;
+    let (_, reason) = repair_parked(root, &expected.id, actor, &reason)?;
     let _ = crate::store::publish_direct_task_write(root, &expected.id);
     let returned = store.get(&expected.id)?;
     let notice = supervisor_push::queue_merge_conflict_reopen_notice(root, &returned, tip, target_tip, &reason)
@@ -80,8 +81,12 @@ pub(crate) fn recheck_target(root: &Path, repo: &Path, target: &str, target_tip:
         let paths = git.preflight_merge_conflicts(target_tip, anchor)?;
         if paths.is_empty() {
             cache.lock().unwrap_or_else(|e| e.into_inner()).insert(key, proof);
-        } else {
-            return_to_worker(root, &task, target, target_tip, &paths, actor)?;
+        } else if let Err(error) = return_to_worker(root, &task, target, target_tip, &paths, actor) {
+            if let Some(hold) = error.downcast_ref::<rmcp::ErrorData>().filter(|hold| is_repair_hold(hold)) {
+                tracing::warn!(task_id = %task.id, %target, reason = %hold.message, "conflicted parked delivery held for whole-flow review");
+                continue;
+            }
+            return Err(error);
         }
     }
     Ok(())

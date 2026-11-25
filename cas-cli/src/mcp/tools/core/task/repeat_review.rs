@@ -9,6 +9,7 @@ use super::release_train;
 
 const REVIEW_NOTE: &str = "whole-flow review:";
 const KEEP_NOTE: &str = "keep release train:";
+const REPAIR_HOLD_RULE: &str = "repeat_review_required";
 
 fn latest_repeated_rejection(root: &Path, task_id: &str) -> anyhow::Result<Option<(String, chrono::DateTime<chrono::Utc>, u64)>> {
     Ok(SqliteVerificationStore::open(root)?.latest_repeated_rejection(task_id)?)
@@ -33,8 +34,12 @@ fn refusal(task_id: &str, rejection_id: Option<&str>, count: Option<u64>) -> Mcp
         message: crate::gates::tag("G-170", format!(
             "Whole-flow review required for {task_id}: {count} all-time verifier rejections. Have an independent reviewer publish a Markdown review from the task's artifacts directory: a table with Actor, Operation, Design and Observed columns that compares every actor and operation against the design, followed by a Mismatches heading and a list of every mismatch. Publish it with `{prefix}artifact action=publish task_id={task_id} path=<file>`. A supervisor then links it with `{prefix}task action=notes id={task_id} note_type=decision notes=\"{REVIEW_NOTE} <artifact-id>\"`. Retry with a repair brief covering the full mismatch list."
         )).into(),
-        data: Some(serde_json::json!({"rule_id":"repeat_review_required", "task_id":task_id, "rejection_id":rejection_id})),
+        data: Some(serde_json::json!({"rule_id":REPAIR_HOLD_RULE, "task_id":task_id, "rejection_id":rejection_id})),
     }
+}
+
+pub(crate) fn is_repair_hold(error: &McpError) -> bool {
+    error.data.as_ref().and_then(|data| data.get("rule_id")).and_then(|rule| rule.as_str()) == Some(REPAIR_HOLD_RULE)
 }
 
 pub(crate) fn require_review(root: &Path, task_id: &str) -> Result<Option<String>, McpError> {
@@ -157,11 +162,11 @@ pub(crate) fn transition_error(root: &Path, task_id: &str, error: StoreError) ->
 
 pub(crate) fn repair_parked(
     root: &Path, task_id: &str, owner: &str, reason: &str,
-) -> anyhow::Result<(RequestChangesOutcome, String)> {
+) -> Result<(RequestChangesOutcome, String), McpError> {
     repair_transition(root, task_id, reason, |brief, reviewed| {
         request_changes_for_reviewed_delivery(root, task_id, owner, brief, &[], reviewed)
             .map_err(|error| transition_error(root, task_id, error))
-    }).map_err(|error| anyhow::anyhow!(error.message.into_owned()))
+    })
 }
 
 pub(crate) struct RepeatHold {

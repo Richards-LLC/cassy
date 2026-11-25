@@ -851,11 +851,21 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         }) if supervisor.id != "operator" => {
             // A run can be listed after the run-less exit was relayed. The
             // notice is already delivered, but its repair may still be new.
-            let Ok(task) = task_store.get(task_id) else {
-                return WorkerAttentionRelayOutcome::Pending;
-            };
-            if !repair.apply(cas_dir, &task, &supervisor.id, &detail) {
-                return WorkerAttentionRelayOutcome::Pending;
+            if !matches!(repair, MergeQueueRepair::None) {
+                let Ok(Some(previous)) = supervisor_queue.get_by_transition_key(&key) else {
+                    return WorkerAttentionRelayOutcome::Pending;
+                };
+                let Ok(payload) = serde_json::from_str::<serde_json::Value>(&previous.payload) else {
+                    return WorkerAttentionRelayOutcome::Pending;
+                };
+                if payload["failed_run_id"].is_null() {
+                    let Ok(task) = task_store.get(task_id) else {
+                        return WorkerAttentionRelayOutcome::Pending;
+                    };
+                    if repair.apply(cas_dir, &task, &supervisor.id, &detail).is_none() {
+                        return WorkerAttentionRelayOutcome::Pending;
+                    }
+                }
             }
             return WorkerAttentionRelayOutcome::Persisted {
                 notification_id: id,
@@ -873,10 +883,36 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     let Ok(prompt_queue) = crate::store::open_prompt_queue_store(cas_dir) else {
         return WorkerAttentionRelayOutcome::Pending;
     };
-    let next_step = match repair {
-        MergeQueueRepair::Return { .. } => "\nCassy returned the task Open to its worker for its one repair cycle (rule-176(5)); no request_changes is needed.",
-        MergeQueueRepair::PageOperator { .. } => "\nThis is the task's second failed ejection; rule-176(5) allows one repair cycle, so the task stays parked and the operator was paged (P0). Decide the next step with the operator.",
-        MergeQueueRepair::None => "\nInspect the failed run and requeue or request changes.",
+    let Ok(mut task) = task_store.get(task_id) else {
+        return WorkerAttentionRelayOutcome::Pending;
+    };
+    let marker = format!("merge-queue-ejection occurrence={occurrence}");
+    if !task.notes.contains(&marker) {
+        let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+        let note = format!("[{timestamp}] 🚫 BLOCKER {detail} ({marker}).");
+        task.notes = if task.notes.is_empty() {
+            note
+        } else {
+            format!("{}\n\n{note}", task.notes)
+        };
+        task.updated_at = chrono::Utc::now();
+        if let Err(error) = task_store.update(&task) {
+            tracing::warn!(task_id, pr_number, %error, "merge-queue ejection task note write failed");
+            return WorkerAttentionRelayOutcome::Pending;
+        }
+    }
+    let Some(repair_outcome) = repair.apply(cas_dir, &task, &supervisor.id, &detail) else {
+        return WorkerAttentionRelayOutcome::Pending;
+    };
+    let repair_outcome = match repair_outcome {
+        MergeQueueRepairOutcome::Unchanged => MergeQueueRepair::recorded_outcome(&task, worker, failed_run_id, exit.head_sha),
+        outcome => outcome,
+    };
+    let next_step = match &repair_outcome {
+        MergeQueueRepairOutcome::Returned(_) => "\nCassy returned the task Open to its worker for its one repair cycle (rule-176(5)); no request_changes is needed.",
+        MergeQueueRepairOutcome::Held(reason) => reason,
+        MergeQueueRepairOutcome::OperatorPaged => "\nThis is the task's second failed ejection; rule-176(5) allows one repair cycle, so the task stays parked and the operator was paged (P0). Decide the next step with the operator.",
+        MergeQueueRepairOutcome::Unchanged => "\nInspect the failed run and requeue or request changes.",
     };
     let supervisor_body = format!(
         "<worker-attention kind=\"merge_queue_ejected\" worker=\"{worker}\" task_id=\"{task_id}\" notification_id=\"{notification_id}\">\n{detail}{next_step}\n</worker-attention>"
@@ -912,13 +948,13 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     }
     // cas-d511: a worker that can only wait for the supervisor gets its copy
     // on the next turn. cas-25ce: a returned task is the worker's to start.
-    let worker_body = if matches!(repair, MergeQueueRepair::Return { .. }) {
-        format!("{detail}\nCassy returned {task_id} to you for its one merge-queue repair cycle (rule-176(5)). Start it, run every remaining queue check locally in parallel, fix all failures in one batch, then re-deliver. A second ejection goes to the operator.")
-    } else {
-        format!("{}\n{detail}\nWait for the supervisor's merge recovery instructions before starting other work.",
-            cas_store::QUIET_MESSAGE_MARKER)
+    let worker_body = match repair_outcome {
+        MergeQueueRepairOutcome::Returned(brief) => Some(format!("{brief}\nCassy returned {task_id} to you. Start it now.")),
+        MergeQueueRepairOutcome::Held(_) => None,
+        _ => Some(format!("{}\n{detail}\nWait for the supervisor's merge recovery instructions before starting other work.",
+            cas_store::QUIET_MESSAGE_MARKER)),
     };
-    if !worker.is_empty() && prompt_queue.enqueue_idempotent(
+    if !worker.is_empty() && let Some(worker_body) = worker_body && prompt_queue.enqueue_idempotent(
         "merge-queue-ejection",
         worker,
         &worker_body,
@@ -930,30 +966,6 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     ).is_err() {
         return WorkerAttentionRelayOutcome::Pending;
     }
-    let Ok(mut task) = task_store.get(task_id) else {
-        return WorkerAttentionRelayOutcome::Pending;
-    };
-    let marker = format!("merge-queue-ejection occurrence={occurrence}");
-    if !task.notes.contains(&marker) {
-        let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
-        let note = format!("[{timestamp}] 🚫 BLOCKER {detail} ({marker}).");
-        task.notes = if task.notes.is_empty() {
-            note
-        } else {
-            format!("{}\n\n{note}", task.notes)
-        };
-        task.updated_at = chrono::Utc::now();
-        if let Err(error) = task_store.update(&task) {
-            tracing::warn!(task_id, %error, "merge-queue ejection task note write failed");
-            return WorkerAttentionRelayOutcome::Pending;
-        }
-    }
-    if !repair.apply(cas_dir, &task, &supervisor.id, &detail) {
-        return WorkerAttentionRelayOutcome::Pending;
-    }
-    // Keep the durable outbox replayable until the task-note receipt exists;
-    // otherwise a one-off store failure would leave an alert with no audit
-    // trail while future polls short-circuited as already delivered.
     if supervisor_queue
         .mark_prompt_delivered(notification_id)
         .is_err()
@@ -989,11 +1001,36 @@ enum MergeQueueRepair {
     PageOperator { run: u64, head: String },
 }
 
+enum MergeQueueRepairOutcome {
+    Unchanged,
+    Returned(String),
+    Held(String),
+    OperatorPaged,
+}
+
 impl MergeQueueRepair {
     const MARKER: &'static str = "merge-queue-repair run=";
 
     fn marker(run: u64, head: &str) -> String {
         format!("({}{run} head={head})", Self::MARKER)
+    }
+
+    fn recorded_outcome(task: &cas_types::Task, worker: &str, run: Option<u64>, head: &str) -> MergeQueueRepairOutcome {
+        use cas_types::TaskStatus;
+        let Some(run) = run else { return MergeQueueRepairOutcome::Unchanged };
+        let marker = Self::marker(run, head);
+        for note in task.notes.split("\n\n").rev().filter(|note| note.contains(&marker)) {
+            if task.status == TaskStatus::Open && task.assignee.as_deref() == Some(worker)
+                && let Some((_, brief)) = note.split_once(cas_store::REQUEST_CHANGES_AUDIT_PREFIX)
+                && brief.starts_with("merge_queue_ejected: ")
+            {
+                return MergeQueueRepairOutcome::Returned(brief.to_string());
+            }
+            if task.status == TaskStatus::AwaitingMerge && note.contains("Merge-queue repair cycle 2: operator paged") {
+                return MergeQueueRepairOutcome::OperatorPaged;
+            }
+        }
+        MergeQueueRepairOutcome::Unchanged
     }
 
     /// Recorded repair-cycle runs, from this task's notes.
@@ -1050,29 +1087,32 @@ impl MergeQueueRepair {
         }
     }
 
-    /// Idempotent: the recorded marker retires the run, and the operator
-    /// page is keyed on it. Returns false when a retry is needed.
     fn apply(
         &self,
         cas_dir: &std::path::Path,
         task: &cas_types::Task,
         actor: &str,
         detail: &str,
-    ) -> bool {
+    ) -> Option<MergeQueueRepairOutcome> {
+        use crate::mcp::tools::core::task::repeat_review::{is_repair_hold, repair_parked};
         match self {
-            Self::None => true,
+            Self::None => Some(MergeQueueRepairOutcome::Unchanged),
             Self::Return { run, head } => {
                 let reason = format!(
                     "merge_queue_ejected: {detail}\nMerge-queue repair cycle 1 of 1 (rule-176(5)) {}: run every remaining queue check locally in the runner's environment and in parallel, fix all failures in one batch, then re-deliver. A second ejection pages the operator.",
                     Self::marker(*run, head),
                 );
-                let returned = crate::mcp::tools::core::task::repeat_review::repair_parked(cas_dir, &task.id, actor, &reason)
-                    .map_err(|error| tracing::warn!(task_id = %task.id, %error, "cas-25ce: ejected delivery not returned"))
-                    .is_ok();
-                if returned {
-                    let _ = crate::store::publish_direct_task_write(cas_dir, &task.id);
+                match repair_parked(cas_dir, &task.id, actor, &reason) {
+                    Ok((_, brief)) => {
+                        let _ = crate::store::publish_direct_task_write(cas_dir, &task.id);
+                        Some(MergeQueueRepairOutcome::Returned(brief))
+                    }
+                    Err(error) if is_repair_hold(&error) => Some(MergeQueueRepairOutcome::Held(format!("\n{}", error.message))),
+                    Err(error) => {
+                        tracing::warn!(task_id = %task.id, %error, "cas-25ce: ejected delivery not returned");
+                        None
+                    }
                 }
-                returned
             }
             // gate[N-28 notice]: Second merge-queue ejection operator page
             Self::PageOperator { run, head } => {
@@ -1083,9 +1123,9 @@ impl MergeQueueRepair {
                     format!("{detail}\nThis is the second failed merge-queue ejection for {} at head {head}. Rule-176(5) allows one repair cycle; the task stays parked until you decide the next step.", task.id),
                     &format!("merge-queue-second-ejection:{}:{run}", task.id),
                 );
-                paged && Self::record(cas_dir, &task.id, &format!(
+                (paged && Self::record(cas_dir, &task.id, &format!(
                     "Merge-queue repair cycle 2: operator paged (P0) {}.", Self::marker(*run, head)
-                ))
+                ))).then_some(MergeQueueRepairOutcome::OperatorPaged)
             }
         }
     }

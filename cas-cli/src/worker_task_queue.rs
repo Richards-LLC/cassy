@@ -863,9 +863,9 @@ impl CasCore {
                     lease.agent_id == worker.id && lease.status == cas_types::LeaseStatus::Active
                 });
             if started {
-                return Ok(());
+                return Ok(String::new());
             }
-            let output = self
+            let (output, repair_brief) = self
                 .task_start_for_queue(
                     TaskStartRequest {
                         id: id.clone(),
@@ -884,7 +884,7 @@ impl CasCore {
                     "Queued start did not commit; inspect the task before retrying",
                 ));
             }
-            Ok(())
+            Ok(repair_brief)
         }
         .await;
         if result.is_err()
@@ -898,7 +898,7 @@ impl CasCore {
                 .map_err(error)?;
         }
         match result {
-            Ok(()) => {
+            Ok(repair_brief) => {
                 queue.current_started = true;
                 // Persist the executed cursor even if its brief cannot be queued.
                 queues
@@ -909,6 +909,7 @@ impl CasCore {
                     &tasks.get(&id).map_err(error)?,
                     queue.dispatch_revision,
                     queue.dispatch_from.is_none(),
+                    &repair_brief,
                 )
                 .map_err(error)?;
                 if notification.is_none() {

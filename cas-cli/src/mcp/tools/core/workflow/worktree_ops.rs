@@ -4521,6 +4521,8 @@ impl CasCore {
             &self.cas_root, task, &worktree.parent_branch, target_tip, &paths, &actor,
         ) {
             Ok(detail) => format!("\n{detail}"),
+            Err(error) if error.downcast_ref::<McpError>()
+                .is_some_and(crate::mcp::tools::core::task::repeat_review::is_repair_hold) => format!("\n{error}"),
             Err(error) => format!("\nCassy could not return task {} to its worker ({error}); run task action=request_changes id={}.", task.id, task.id),
         }
     }

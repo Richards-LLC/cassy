@@ -141,10 +141,13 @@ fn launch_account(cli: cas_mux::SupervisorCli, root: &Path) -> Result<Option<Str
     ))
 }
 
+fn verifier_route() -> Result<cas_factory::RoutingDecision, cas_factory::RoutingError> {
+    cas_factory::resolve_lane("standard", &cas_factory::CapabilitySnapshot::default())
+}
+
 /// The verifier command, plus a notice when it fell back to Claude.
 fn command(root: &Path, output: &Path) -> Result<(Command, Option<String>), String> {
-    let route = cas_factory::resolve_lane("standard", &cas_factory::CapabilitySnapshot::default())
-        .map_err(|e| e.to_string())?;
+    let route = verifier_route().map_err(|e| e.to_string())?;
     let mut cli = route.spec.cli;
     let mut model = route.spec.model.ok_or("verifier route has no model")?;
     let mut effort = route.spec.effort.ok_or("verifier route has no effort")?;
@@ -939,6 +942,15 @@ pub(super) async fn approved(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_verifier_uses_pinned_codex_route() {
+        let spec = verifier_route().unwrap().spec;
+        assert_eq!(
+            (spec.model.as_deref(), spec.effort),
+            (Some("gpt-6.1-sol"), Some(cas_mux::Effort::High))
+        );
+    }
 
     /// A no-code close bypasses candidate preparation. Its real launcher must
     /// resolve peer proof before a verifier command can be prepared.

@@ -124,6 +124,8 @@ pub use setup::SetupArgs;
 pub use status::StatusArgs;
 pub use statusline::StatusLineArgs;
 pub use sync::SyncCommands;
+#[cfg(target_os = "macos")]
+pub use update::sign_installed_macos;
 pub use update::{UpdateArgs, startup_config_notices};
 
 /// Build version string including git hash and date

@@ -1036,6 +1036,8 @@ When Cassy's automatic verifier approves a saved no-code or no-delivery close, C
 
 - **Queued capped runs** - A backgrounded capped run (a Cargo check, a named nextest selection or a Vitest/Jest/Playwright file) that meets a capacity refusal waits in its own detached session instead of exiting. It records the refusal in the durable capacity wait, so priority order and the 20-minute supervisor notice still apply, re-checks admission every 10 seconds, starts when admitted and wakes its worker once with the log that holds the result and receipt. Waiting sends the worker no wake. If the worker is gone the run exits with the refusal; if the run is killed while waiting, the daemon's detached-run scan reports it to the worker once. A foreground capped run is refused at once and the refusal names the exact backgrounded command to run instead.
 
+When Violet's lookup has no record of a post for this caller (`not_posted` with reason `request_not_found`), Cassy resends it once on its own after a closed connection. Otherwise the error is retryable and says to resend with the same request ID and arguments.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.
@@ -1223,6 +1225,10 @@ Reload Cassy identifies a build by its version and its build hash: each MCP back
 `cas scorecard --release vX.Y.Z` (also `cas ledger report`) opens with a sensor-health list: every sensor is OK, EMPTY (no samples in the window) or BROKEN (missing or impossible input), each with its reason. It then shows spend per task and per harness, model and effort, with cached input kept apart; turns recorded before the producer stored model identity show as `unknown`. Wakes without a notice kind are grouped by cause, and another project's actor is never blamed on this project's agent store.
 
 Before a worker parks a delivery it runs the `cas-no-comments` skill on its own diff: comments outside a short keep list are deleted, and code that needed a comment is flagged for a reshape instead. Doc comments that clap or schemars turn into CLI help or MCP descriptions are never deleted.
+
+- **Stable macOS identity on install and update** — Previously, a new Cassy build could ask again for granted privacy permissions. Now per-user installs reuse an automatically created local signing identity in a separate keychain, without a login password or Apple Developer account. If signing fails, Cassy keeps the installed binary and warns that macOS may ask for access again.
+
+- Commander offers Reload Cassy when the installed build differs from the supervisor's loaded version or commit.
 
 ## Authoritative Sources
 

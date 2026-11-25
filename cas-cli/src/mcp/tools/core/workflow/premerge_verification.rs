@@ -1228,12 +1228,7 @@ impl CasCore {
                 // A lost response/wake retries the same queue key, not the decline.
                 if task.status == TaskStatus::Open && task.deliverables.delivery_cycle == receipt.repair_cycle {
                     crate::store::publish_direct_task_write(&self.cas_root, &task.id).map_err(fail)?;
-                    let events = crate::store::open_event_store(&self.cas_root).map_err(fail)?
-                        .list_for_entity(cas_types::EventEntityType::Task, &task.id, 10_000).map_err(fail)?;
-                    let brief = events.iter().filter_map(|event| event.metadata.as_ref())
-                        .filter(|metadata| metadata["premerge_repair_dispatch"].as_str() == Some(dispatch.id.as_str()))
-                        .find_map(|metadata| metadata["repair_brief"].as_str()).unwrap_or(findings);
-                    if supervisor_push::queue_premerge_repair_notice(&self.cas_root, task, &dispatch.id, brief)
+                    if supervisor_push::queue_premerge_repair_notice(&self.cas_root, task, &dispatch.id, findings)
                         .map_err(fail)?.is_none()
                     { return Ok(None); }
                 }
@@ -1257,14 +1252,9 @@ impl CasCore {
         { return Ok(None); }
         let Some(candidate) = candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)? else { return Ok(None); };
         let reason = format!("Automatic non-behavioural repair for dispatch {}.\n{findings}", dispatch.id);
-        let (outcome, brief) = crate::mcp::tools::core::task::repeat_review::repair_transition(
-            &self.cas_root, &task.id, &reason, |brief, reviewed| {
-                cas_store::auto_return_premerge_rejection(&self.cas_root, &task.id,
-                    &dispatch.owner_agent_id, brief,
-                    &dispatch.id, &candidate.source_sha, reviewed)
-                    .map_err(|error| crate::mcp::tools::core::task::repeat_review::transition_error(&self.cas_root, &task.id, error))
-            },
-        )?;
+        let outcome = cas_store::auto_return_premerge_rejection(&self.cas_root, &task.id,
+            &dispatch.owner_agent_id, &reason, &dispatch.id, &candidate.source_sha)
+            .map_err(|error| crate::mcp::tools::core::task::repeat_review::transition_error(&self.cas_root, &task.id, error))?;
         if outcome.is_none() {
             let current = self.open_task_store()?.get(&task.id).map_err(fail)?;
             if current.deliverables.premerge_repair.as_ref().is_some_and(|receipt| receipt.dispatch_id == dispatch.id) {
@@ -1274,7 +1264,7 @@ impl CasCore {
         }
         crate::store::publish_direct_task_write(&self.cas_root, &task.id).map_err(fail)?;
         let returned = self.open_task_store()?.get(&task.id).map_err(fail)?;
-        if supervisor_push::queue_premerge_repair_notice(&self.cas_root, &returned, &dispatch.id, &brief)
+        if supervisor_push::queue_premerge_repair_notice(&self.cas_root, &returned, &dispatch.id, &reason)
             .map_err(fail)?.is_none()
         { return Ok(None); }
         Ok(Some("\nCassy returned the delivery to its assigned worker with the findings for one automatic repair. A new source commit and independent approval are required; another rejection holds for the supervisor.".into()))
@@ -2575,6 +2565,7 @@ mod tests {
             })).await.unwrap();
             let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
             for _ in 0..2 {
+                assert!(crate::mcp::tools::core::task::repeat_review::settle(&root, &task.id).unwrap().is_none());
                 core.continue_premerge_after_verdict(&dispatch, verdict.status).await.unwrap();
             }
             let mut current = core.open_task_store().unwrap().get(&task.id).unwrap();
@@ -2628,8 +2619,7 @@ mod tests {
                 verdict.dispatch_id = Some(next.id.clone());
                 cas_store::add_system_verification(&root, &verdict).unwrap();
                 cas_store::resolve_verification_dispatch_with_conn(&conn, &next.id, &owner.id, None, true).unwrap();
-                restarted.continue_premerge_after_verdict(&next, verdict.status).await.unwrap();
-                restarted.continue_premerge_after_verdict(&dispatch, verdict.status).await.unwrap();
+                assert!(crate::mcp::tools::core::task::repeat_review::settle(&root, &task.id).unwrap().is_some());
                 assert_eq!(core.open_task_store().unwrap().get(&task.id).unwrap().status, task.status);
                 let after = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(200).unwrap();
                 assert_eq!(after.iter().filter(|p| p.target == worker.name).count(), worker_prompts.len());
@@ -2761,6 +2751,7 @@ mod tests {
         verdict.summary = "REJECTED: candidate loses the operator draft".into();
         verdict.dispatch_id = Some(dispatch.id.clone());
         cas_store::add_system_verification(&root, &verdict).unwrap();
+        assert!(crate::mcp::tools::core::task::repeat_review::settle(&root, &task.id).unwrap().is_none());
         core.continue_premerge_after_verdict(&dispatch, verdict.status).await.unwrap();
         let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
         assert_eq!(prompts.len(), 1);

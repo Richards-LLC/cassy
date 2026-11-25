@@ -2826,10 +2826,9 @@ pub fn auto_return_premerge_rejection(
     reason: &str,
     dispatch_id: &str,
     rejected_anchor: &str,
-    reviewed_rejection: Option<&str>,
 ) -> Result<Option<RequestChangesOutcome>> {
     request_changes_for_parked_delivery_impl(
-        cas_dir, task_id, owner_id, reason, &[], Some((dispatch_id, rejected_anchor)), None, reviewed_rejection,
+        cas_dir, task_id, owner_id, reason, &[], Some((dispatch_id, rejected_anchor)), None, None,
     )
 }
 
@@ -3145,10 +3144,7 @@ fn request_changes_for_parked_delivery_impl(
             "request_changes task transition raced".to_string(),
         ));
     }
-    let mut event = Event::new(EventType::TaskNoteAdded, EventEntityType::Task, task_id, note);
-    if let Some((dispatch_id, _)) = automatic_repair {
-        event = event.with_metadata(serde_json::json!({"premerge_repair_dispatch": dispatch_id, "repair_brief": reason}));
-    }
+    let event = Event::new(EventType::TaskNoteAdded, EventEntityType::Task, task_id, note);
     record_event_with_conn(&tx, &event)?;
     tx.commit()?;
     Ok(Some(RequestChangesOutcome {
@@ -4376,7 +4372,7 @@ mod tests {
         let conn = rusqlite::Connection::open(dir.path().join("cas.db")).unwrap();
         resolve_verification_dispatch_with_conn(&conn, &dispatch.id, "owner", None, true).unwrap();
         let grant = |owner: &str, id: &str, anchor: &str| auto_return_premerge_rejection(
-            dir.path(), &task.id, owner, "evidence repair", id, anchor, None).unwrap();
+            dir.path(), &task.id, owner, "evidence repair", id, anchor).unwrap();
         for (owner, id, anchor) in [("foreign", dispatch.id.as_str(), "a".repeat(40)),
             ("owner", "superseded", "a".repeat(40)), ("owner", dispatch.id.as_str(), "b".repeat(40))] {
             assert!(grant(owner, id, &anchor).is_none());
@@ -4391,7 +4387,7 @@ mod tests {
             std::thread::spawn(move || {
                 barrier.wait();
                 auto_return_premerge_rejection(&root, &task_id, "owner", "evidence repair",
-                    &dispatch_id, &"a".repeat(40), None).unwrap().is_some()
+                    &dispatch_id, &"a".repeat(40)).unwrap().is_some()
             })
         }).collect();
         assert_eq!(jobs.into_iter().map(|job| job.join().unwrap()).filter(|granted| *granted).count(), 1);

@@ -50,10 +50,10 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   });
   await double.install();
 
-  const http = async (path: string, method = "GET", body: unknown = null) => {
+  const http = async (path: string, method = "GET", body: unknown = null, headers: Record<string, string> = {}) => {
     let response: Response | undefined;
     await handleHttp({
-      request: () => ({ url: () => `${origin}${path}`, method: () => method, postDataJSON: () => body, headers: () => ({}) }),
+      request: () => ({ url: () => `${origin}${path}`, method: () => method, postDataJSON: () => body, headers: () => headers }),
       fulfill: async (result: Response) => { response = result; },
     } as unknown as Route);
     expect(response, `${method} ${path}`).toBeDefined();
@@ -67,7 +67,10 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   };
   const { sessions, stopped_sessions } = await catalog();
   check("HubSession", sessions[0]);
-  check("SessionEndOutcome", stopped_sessions.find((session: { name: string }) => session.name === "ended")?.ended);
+  const stopped = stopped_sessions.find((session: { name: string }) => session.name === "ended");
+  check("SessionEndOutcome", stopped?.ended);
+  expect(sessions[0].machine_online).toBe(true);
+  expect(stopped?.machine_online).toBe(false);
   const changed = double.announceCatalog("fixture", { added: ["running"], removed: ["stale"] });
   await catalog();
   await changed;
@@ -85,6 +88,15 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   const forceDenied = await http(lease, "POST", { force: true });
   check("LeaseRefusal", forceDenied.json);
   expect([forceDenied.status, forceDenied.json.error]).toEqual([401, "unauthorized"]);
+  double.installations.set("installed", {
+    machine: "fixture", device_id: "installed", credential_id: "installed", credential_generation: 1,
+    credential: "fixture-only", scopes: SCOPES, device_label: "Installed", operator_label: "Operator",
+    controller_origin: origin, public_key_jwk: {}, revoked_at: null,
+  });
+  double.setScopes("fixture", [...SCOPES, "hub-admin", "factory-manage"]);
+  const installedDenied = await http(lease, "POST", { force: true }, { authorization: "DPoP fixture-only" });
+  check("LeaseRefusal", installedDenied.json);
+  expect([installedDenied.status, installedDenied.json.error]).toEqual([401, "unauthorized"]);
   double.setScopes("fixture", ["session-read", "hub-admin", "factory-manage"]);
   const inputDenied = await http(lease, "POST", { force: false });
   check("LeaseRefusal", inputDenied.json);

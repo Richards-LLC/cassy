@@ -489,6 +489,43 @@ BIN
   rm -rf "$tmp"
 }
 
+test_darwin_signing_warning_layout() {
+  local tmp out
+  tmp="$(new_fixture)"; out="$tmp/out"
+  cat >"$tmp/warning-frame" <<'SH'
+set -euo pipefail
+test -t 1
+cd "$1"
+export CAS_UPDATE_SOURCE_ONLY=1 CAS_SRC=source CAS_UPDATE_TARGET_DIR="$PWD/target"
+export CAS_INSTALL="./bin/$(printf '%065d' 0)-cas"
+source "$2"
+uname() { printf 'Darwin\n'; }
+cargo() {
+  mkdir -p "$CARGO_TARGET_DIR/release-fast"
+  printf '#!/bin/bash\n[ "$1" = --version ] && printf "cas 2.52.0\\n"\n' >"$CARGO_TARGET_DIR/release-fast/cas"
+  chmod +x "$CARGO_TARGET_DIR/release-fast/cas"
+}
+DO_PULL=0; FORCE_BUILD=1
+build_and_install
+: > frame-complete
+SH
+  (
+    export NO_COLOR=1 LC_ALL=C CAS_TEST_TMP="$tmp" CAS_TEST_HELPER="$helper"
+    if [ "$(uname -s)" = Darwin ]; then
+      script -q /dev/null /bin/bash "$tmp/warning-frame" "$tmp" "$helper"
+    else
+      script -qec 'exec /bin/bash "$CAS_TEST_TMP/warning-frame" "$CAS_TEST_TMP" "$CAS_TEST_HELPER"' /dev/null
+    fi
+  ) </dev/null >"$out" 2>&1
+  if [ -f "$tmp/frame-complete" ] && assert_not_contains "$out" $'\033'; then
+    pass 'the signing warning frame emits no escapes under NO_COLOR on a TTY'
+  else fail 'the signing warning frame emits no escapes under NO_COLOR on a TTY'; fi
+  if [ -f "$tmp/frame-complete" ] && LC_ALL=C awk '{ gsub(/\033\[[0-9;]*m/, ""); sub(/\r$/, ""); if (length > 80) exit 1 }' "$out"; then
+    pass 'the signing warning frame fits 80 cells with a 75-cell install path'
+  else fail 'the signing warning frame fits 80 cells with a 75-cell install path'; fi
+  rm -rf "$tmp"
+}
+
 test_source_resolution() {
   local tmp out checkout_root
   tmp="$(new_fixture)"; out="$tmp/out"
@@ -663,6 +700,7 @@ test_no_process_and_flag_semantics
 test_darwin_turnover_is_explicitly_unverified
 test_darwin_turns_the_hub_over_through_the_cli
 test_darwin_signs_before_hashing
+test_darwin_signing_warning_layout
 test_source_resolution
 test_native_project_refresh_delegation
 test_turnover_precedes_native_project_refresh

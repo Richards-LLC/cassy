@@ -88,8 +88,8 @@ OLD_PROCESS_FILE=""
 TURNOVER_RESULTS_FILE=""
 SERVER_RECORD_FILE=""
 
-if [ -t 1 ]; then
-  BOLD='\033[1m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
+if [ -t 1 ] && [ -z "${NO_COLOR+x}" ]; then
+  BOLD='\033[1m'; GREEN='\033[38;5;29m'; YELLOW='\033[38;5;136m'
   RED='\033[0;31m'; DIM='\033[2m'; RESET='\033[0m'
 else
   BOLD=''; GREEN=''; YELLOW=''; RED=''; DIM=''; RESET=''
@@ -593,7 +593,11 @@ build_and_install() {
   resolve_cas_src
   [ -n "$CAS_SRC" ] || { error "CAS_SRC could not be found; set it to your Cassy source checkout (for example: export CAS_SRC=\"\$HOME/code/cassy\")"; return 1; }
   [ -d "$CAS_SRC" ] || { error "CAS_SRC source checkout not found at $CAS_SRC"; return 1; }
-  info "src: $CAS_SRC"; info "branch: $BRANCH"; info "target: $CAS_INSTALL"; info "profile: $PROFILE"
+  local install_target="target: $CAS_INSTALL"
+  if [ "${#install_target}" -gt 78 ]; then
+    install_target="target:"$'\n'"  $CAS_INSTALL"
+  fi
+  info "src: $CAS_SRC"; info "branch: $BRANCH"; info "$install_target"; info "profile: $PROFILE"
   if ! command -v cargo >/dev/null 2>&1 && [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi
   command -v cargo >/dev/null 2>&1 || { error "cargo not on PATH"; return 1; }
   local build_src="$CAS_SRC" fetched_commit="" target_hash installed_git_hash target_dirty=0

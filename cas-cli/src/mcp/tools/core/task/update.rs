@@ -1045,7 +1045,8 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
-        let stored_task = task.clone();
+        let stored_task = matches!(req.status.as_deref().map(str::parse::<TaskStatus>), Some(Ok(TaskStatus::Closed)))
+            .then(|| task.clone());
         let review_dispatch_update = req.review_dispatch_id.as_deref()
             .map(|value| self.normalize_review_dispatch_id(Some(value))).transpose()?;
         self.ensure_review_assignee(
@@ -2483,11 +2484,11 @@ impl CasCore {
                 lifecycle_status_change = Some((task.status, new_status));
             }
             let closing = new_status == TaskStatus::Closed && task.status != TaskStatus::Closed;
-            let verification = self.load_config();
+            let verification_on = closing && self.load_config().verification_enabled();
             if closing {
                 use super::lifecycle::report_proof::{ReportGate, require_report_verdict};
                 closing_report = match require_report_verdict(
-                    &self.cas_root, verification.verification_enabled(), &stored_task, &task,
+                    &self.cas_root, verification_on, stored_task.as_ref().unwrap_or(&task), &task,
                 ) {
                     Ok(gate @ (ReportGate::Exempt | ReportGate::Bound(_))) => gate,
                     Ok(_) => return Ok(Self::tool_error(crate::gates::tag("G-68", format!(
@@ -2500,7 +2501,7 @@ impl CasCore {
             }
             if closing
                 && !closing_report.covered()
-                && verification.verification_enabled()
+                && verification_on
                 && task.depth != cas_types::TaskDepth::Light
                 && crate::harness_policy::verification_required_for_task_type(task.task_type)
             {
@@ -3083,15 +3084,15 @@ impl CasCore {
         } else {
             None
         };
-        #[cfg(test)]
-        super::lifecycle::close_ops::lifecycle_race_hook::fire(&task.id);
         task.updated_at = if closing_report.covered() {
+            #[cfg(test)]
+            super::lifecycle::close_ops::lifecycle_race_hook::fire(&task.id);
             let current = task_store.get(&task.id).map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to update: {e}")),
                 data: None,
             })?;
-            if let Err(change) = closing_report.recheck(&self.cas_root, &stored_task, &task, &current) {
+            if let Err(change) = closing_report.recheck(&self.cas_root, stored_task.as_ref().unwrap_or(&task), &task, &current) {
                 return Ok(Self::tool_error(crate::gates::tag("G-68", format!(
                     "VERIFICATION REQUIRED: task {} changed while this update was running ({change}), so update status=closed did not close it. \
                      Use task action=close to request a review of the current report.",

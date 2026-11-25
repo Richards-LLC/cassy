@@ -766,6 +766,9 @@ pub(crate) fn reconcile_members(
             let report = report_proof::read_report_verdict(&conn, verification_on, &task, &task)
                 .map_err(|_| "REVIEW_MISSING".to_string())?;
             if report.covered() && report.approval().is_none() {
+                if write && !already_closed {
+                    report.retire_stale(root).map_err(|_| "REVIEW_MISSING".to_string())?;
+                }
                 return Err("REVIEW_MISSING".into());
             }
             let exempt = !report.covered() && delivery.membership != ReleaseMembership::ExplicitNoCode && no_review

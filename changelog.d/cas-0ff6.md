@@ -13,9 +13,9 @@
   record still equals the report. A task stays covered once a review has
   recorded its proof, even if its fields are edited in the same request. The
   verifier is handed the recorded reference and artifacts, never a later
-  listing. A changed, republished or revoked report retires the stale dispatch
-  and the next close or merge requests a new review; a temporary download
-  failure retries the same dispatch. A revocation Cloud reports is recorded
+  listing. A changed, republished or revoked report retires the stale dispatch,
+  on release apply as well, and the next close or merge requests a new review;
+  a temporary download failure retries the same dispatch. A revocation Cloud reports is recorded
   locally, so that new review leaves the artifact out. The approval is checked
   again at the final write of close, `task update status=closed` and release
   apply and at merge admission, so a report edited, republished or revoked

@@ -11193,11 +11193,19 @@ impl CasCore {
                             && (task.deliverables.factory_branch_start.is_some()
                                 || task.deliverables.parked_branch.as_deref().is_some_and(|branch| branch.starts_with("factory/")))
                         {
-                            return Ok(Self::tool_error(crate::gates::tag("G-70", format!(
-                                "PRE-MERGE APPROVAL MISSING: factory delivery {} has no reusable pre-merge verdict. Close does not dispatch a post-merge verifier. For a historical delivery already integrated, a live registered supervisor audits its ancestry and content, then uses `{}task action=close id={} commit_receipt={} supervisor_override=true reason=\"Reviewed the integrated historical delivery and missing pre-merge approval\"`. This records a recovery decision; it does not create a pre-merge approval. An already-contained worktree_merge cannot supply the missing verdict. Request changes only when a code correction is needed, then review that correction before publication.",
-                                task.id, crate::mcp::tools::core::guidance::supervisor_prefix(), task.id,
-                                task.deliverables.factory_branch_anchor.as_deref().unwrap_or("<integrated-delivery-sha>")
-                            ))));
+                            let refusal = if report_covered {
+                                format!(
+                                    "PRE-MERGE APPROVAL MISSING: no-code report {} has no approved independent verdict for its current report. Close does not dispatch a post-merge verifier. The report closes on a fresh approval that matches it: request changes so it is delivered and reviewed again.",
+                                    task.id,
+                                )
+                            } else {
+                                format!(
+                                    "PRE-MERGE APPROVAL MISSING: factory delivery {} has no reusable pre-merge verdict. Close does not dispatch a post-merge verifier. For a historical delivery already integrated, a live registered supervisor audits its ancestry and content, then uses `{}task action=close id={} commit_receipt={} supervisor_override=true reason=\"Reviewed the integrated historical delivery and missing pre-merge approval\"`. This records a recovery decision; it does not create a pre-merge approval. An already-contained worktree_merge cannot supply the missing verdict. Request changes only when a code correction is needed, then review that correction before publication.",
+                                    task.id, crate::mcp::tools::core::guidance::supervisor_prefix(), task.id,
+                                    task.deliverables.factory_branch_anchor.as_deref().unwrap_or("<integrated-delivery-sha>")
+                                )
+                            };
+                            return Ok(Self::tool_error(crate::gates::tag("G-70", refusal)));
                         }
                         let proof_boundary = if crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(
                                 &proof_worktree,

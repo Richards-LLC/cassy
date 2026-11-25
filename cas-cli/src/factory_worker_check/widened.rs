@@ -247,6 +247,19 @@ pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &B
     }).cloned().collect()
 }
 
+pub(crate) fn coverage_notes(repo: &Path, paths: &[String], scopes: &[Scope], covering: &BTreeMap<Scope, Covering>) -> String {
+    scopes.iter().filter(|scope| matches!(scope, Scope::Package(_))).filter_map(|scope| {
+        let unresolved = match covering.get(scope) {
+            Some(found) => found.unresolved.iter().map(String::as_str).collect::<Vec<_>>(),
+            None if !paths.iter().any(|path| javascript::javascript(path) && &self::scope(repo, path) == scope) => {
+                paths.iter().map(String::as_str).filter(|path| package_input(repo, path, scope)).collect()
+            }
+            None => return None,
+        };
+        (!unresolved.is_empty()).then(|| format!(" No covering spec reads {}; use the package's own proof.", unresolved.join(", ")))
+    }).collect()
+}
+
 pub(crate) fn commands(passing: &PassingTests<'_>, paths: &[String], scopes: &[Scope],
     covering: &BTreeMap<Scope, Covering>) -> Vec<String> {
     let (cas_root, repo) = (passing.cas_root, passing.repo);
@@ -289,13 +302,6 @@ pub(crate) fn commands(passing: &PassingTests<'_>, paths: &[String], scopes: &[S
         let path = paths.iter().filter(|path| javascript::javascript(path))
             .find(|path| &self::scope(repo, path) == scope).map(String::as_str)
             .or_else(|| if let Scope::File(path) = scope { Some(path.as_str()) } else { None });
-        // The inputs nothing covers: some specs read the other inputs, but
-        // their passes do not stand in for the whole package.
-        let unresolved: Vec<&str> = match found {
-            Some(found) => found.unresolved.iter().map(String::as_str).collect(),
-            None => paths.iter().map(String::as_str).filter(|input| package_input(repo, input, scope)).collect(),
-        };
-        let named = if unresolved.is_empty() { String::new() } else { format!("no spec reads {}; ", unresolved.join(", ")) };
         let node_package = matches!(scope, Scope::Package(directory) if !javascript::node_specs(repo, &repo.join(directory)).is_empty());
         let runners = |path| {
             if node_package && javascript::runner_hint(repo, path).is_none_or(|runner| runner == NODE_RUNNER) {
@@ -308,18 +314,16 @@ pub(crate) fn commands(passing: &PassingTests<'_>, paths: &[String], scopes: &[S
             // GH #2164: the package's manifest selects its own run.
             let Scope::Package(directory) = scope else { return Vec::new() };
             let manifest = Path::new(directory).join("package.json").to_string_lossy().into_owned();
-            return (!named.is_empty()).then_some(named).into_iter().chain(runners(&manifest).into_iter()
-                .map(|runner| command(runner_words(runner).chain([manifest.as_str()]).map(str::to_owned).collect()))).collect();
+            return runners(&manifest).into_iter()
+                .map(|runner| command(runner_words(runner).chain([manifest.as_str()]).map(str::to_owned).collect())).collect();
         };
-        let note = (!named.is_empty() && found.is_some()).then(|| format!("{}the covering specs' passes do not prove the package; run the whole package instead", named));
-        note.into_iter().chain(runners(path)
-            .into_iter().map(|runner| {
+        runners(path).into_iter().map(|runner| {
                 // GH #2195: a spec only a non-default config lists runs under it.
                 let config = (runner == "playwright").then(|| javascript::playwright_owner(repo, path)).flatten();
                 command(runner_words(runner).map(str::to_owned)
                     .chain(config.into_iter().flat_map(|config| ["--config".into(), config.to_string_lossy().into_owned()]))
                     .chain([path.into()]).collect())
-            })).collect()
+            }).collect()
     }).collect();
     let mut by_runner: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     let mut by_package = BTreeMap::new();

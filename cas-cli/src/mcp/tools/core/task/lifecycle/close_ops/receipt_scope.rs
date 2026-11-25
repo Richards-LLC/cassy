@@ -259,10 +259,11 @@ fn listed_park_refusals(
         let covering = widen::covering(proof_repo, head, &present, &widened);
         let missing = widen::missing(&passing, &widened, &covering);
         if !missing.is_empty() {
+            let notes = widen::coverage_notes(proof_repo, &present, &missing, &covering);
             // Classification is uncertain, but the broader capped receipt is
             // proven missing. Park reads proof; it never starts a test process.
             refusals.push(crate::gates::tag("G-61", format!(
-                "FOCUSED PROOF REQUIRED: task {} widened uncertain test selection to {missing:?}; one passing capped run is missing at {short}. Run: {}. Identified changed tests still require five passes.",
+                "FOCUSED PROOF REQUIRED: task {} widened uncertain test selection to {missing:?}; one passing capped run is missing at {short}.{notes} Run: {}. Identified changed tests still require five passes.",
                 task.id, widen::commands(&passing, &present, &missing, &covering).join("; ")
             )));
         }
@@ -1802,10 +1803,10 @@ raise SystemExit(1 if failed else 0)
         assert!(refusals.iter().any(|reply| crate::gates::codes_in(reply).contains(&"G-61") && reply.contains(unread)), "{refusals:?}");
         assert_eq!(widened::missing(&crate::factory_worker_check::PassingTests::new(root.path(), &repo, &mixed), &scopes, &covering), [package.clone()]);
         let commands = widened::commands(&PassingTests::new(root.path(), &repo, &mixed), &paths, &[package.clone()], &covering);
-        assert!(commands.iter().any(|command| command.contains(unread)));
+        assert!(!commands.is_empty());
         for command in &commands {
-            let args = command.split_once(" -- ").map_or("", |(_, args)| args);
-            assert!(specs.iter().all(|spec| !args.contains(spec)), "{command}: a covering spec is not the package's proof");
+            let args = shell_words::split(command.split_once(" -- ").unwrap().1).unwrap();
+            assert!(specs.iter().all(|spec| !args.iter().any(|arg| arg == spec)), "{command}: a covering spec is not the package's proof");
         }
     }
 

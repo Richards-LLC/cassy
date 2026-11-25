@@ -19,7 +19,11 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   const now = "2026-11-24T12:00:00Z";
   let handleHttp!: HttpHandler;
   let handleSocket!: SocketHandler;
-  const browser = { fetch: globalThis.fetch, __journeyResetEvents: (_host: string) => {} };
+  const browser = {
+    fetch: globalThis.fetch,
+    __journeyResetEvents: (_host: string) => {},
+    __journeyMachineEvent: (_host: string, _data: string) => 0,
+  };
   vi.stubGlobal("window", browser);
   vi.stubGlobal("location", { href: origin });
   vi.stubGlobal("navigator", { onLine: true });
@@ -31,7 +35,7 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
       if (pattern === "https://*.test/**") handleHttp = handler;
     },
     routeWebSocket(_matcher: unknown, handler: SocketHandler) { handleSocket = handler; },
-    async evaluate<T>(callback: (args: readonly [string, string]) => T, args: readonly [string, string]) { return callback(args); },
+    async evaluate<Args, Result>(callback: (args: Args) => Result, args: Args) { return callback(args); },
   } as unknown as Page;
   const row = { supervisor: "lead", project_dir: "/fixture", workers: [], started_at: now };
   const ended = { at: now, reason: "exit", workers_stopped: [], worker_states: [], orphans: [], unverified: [] };
@@ -65,6 +69,8 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   const { sessions, stopped_sessions } = await catalog();
   check("HubSession", sessions[0]);
   check("HubSession", { ...sessions[0], machine_online: null }, false);
+  check("HubSession", { ...sessions[0], agents: [] }, false);
+  check("HubSession", { ...sessions[0], ws_port: null });
   const stopped = stopped_sessions.find((session: { name: string }) => session.name === "ended");
   check("SessionEndOutcome", stopped?.ended);
   const changed = double.announceCatalog("fixture", { added: ["running"], removed: ["stale"] });
@@ -110,6 +116,12 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   const released = await http(lease, "DELETE");
   expect([released.status, released.body]).toEqual([204, ""]);
   check("LeaseSummary", (await http(lease)).json);
+  await double.down("fixture", { http: "auth_store_unavailable" });
+  const unavailable = await http(lease, "POST", { force: false });
+  check("LeaseRefusal", unavailable.json);
+  expect.soft([unavailable.status, unavailable.json.error, unavailable.json.reason, unavailable.json.retryable])
+    .toEqual([503, "auth_store_unavailable", "auth_store_unavailable", true]);
+  await double.up("fixture");
 
   const connect = (path: string) => {
     let clientSend!: (text: string) => void;
@@ -130,16 +142,24 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   await expect(double.send("running", { SupervisorCommandReceipt: { receipt: { ...scripted, client_ref: null } } })).rejects.toMatchObject({
     schemaId: "urn:cassy:hub:SupervisorCommandReceipt",
   });
-  expect(multiplex.frames).toHaveLength(3);
-  expect(multiplex.frames.slice(1).map(frame => frame.channel)).toEqual(["pty:running", "pty:running"]);
+  for (const malformed of [
+    { SupervisorCommandReceipt: { receipt: scripted }, Output: {} },
+    { SupervisorCommandReceipt: { receipt: scripted, extra: true } },
+  ]) {
+    const failure = await double.send("running", malformed).catch((error: unknown) => error);
+    expect.soft(failure).toEqual(expect.objectContaining({ schemaId: "urn:cassy:hub:SupervisorCommandReceipt" }));
+  }
+  expect.soft(multiplex.frames).toHaveLength(3);
+  expect.soft(multiplex.frames.slice(1).map(frame => frame.channel)).toEqual(["pty:running", "pty:running"]);
   check("DaemonWelcome", multiplex.frames[1]?.message);
-  check("SupervisorCommandReceipt", multiplex.frames[2]?.message.SupervisorCommandReceipt.receipt);
+  check("DaemonWelcome", { Welcome: { ...multiplex.frames[1]?.message.Welcome, pane_bootstrap: [] } }, false);
+  check("SupervisorCommandReceipt", multiplex.frames[2]?.message);
 
   const legacy = connect("/v1/sessions/running/attach");
   legacy.send({ SupervisorCommand: { command: "standby", client_ref: "command", confirmed: true } });
   expect(legacy.frames).toHaveLength(2);
   check("DaemonWelcome", legacy.frames[0]);
-  check("SupervisorCommandReceipt", legacy.frames[1]?.SupervisorCommandReceipt.receipt);
+  check("SupervisorCommandReceipt", legacy.frames[1]);
 
   vi.useFakeTimers();
   try {
@@ -153,6 +173,13 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   const result = await http("/v1/sessions/running", "DELETE");
   check("EndSessionReceipt", result.json);
   expect(result.json.outcome).toBe("ended");
+  const raw = { sequence: 4, revision: 0, kind: "daemon_error", session: "running", pane_id: null, at: now, enrichment_pending: true };
+  const emit = (event: unknown) => browser.__journeyMachineEvent("fixture.test", JSON.stringify(event));
+  emit({ kind: "stream_metadata", epoch: "fixture", oldest_sequence: 4, latest_sequence: 4, retained: 1 });
+  emit(raw);
+  emit({ kind: "replay_complete" });
+  emit(raw);
+  expect.soft(() => emit({ ...raw, at: null })).toThrow(expect.objectContaining({ schemaId: "urn:cassy:hub:MachineEvent" }));
   browser.__journeyResetEvents("fixture.test");
   const decoder = new TextDecoder();
   const events: Array<Record<string, any>> = [];
@@ -163,12 +190,17 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
     const data = /^data: (.+)$/m.exec(frame)?.[1];
     if (!data) continue;
     const event = JSON.parse(data);
+    if (event.kind === "stream_metadata" || event.kind === "replay_complete") {
+      expect.soft(frame.split("\n")[0]).toBe(`event: ${event.kind}`);
+      continue;
+    }
     events.push(event);
     check("MachineEvent", event);
     expect.soft(event.sequence).toBeGreaterThan(0);
     expect.soft(frame.split("\n").slice(0, 2)).toEqual([`id: ${event.sequence}.${event.revision}`, `event: ${event.kind.replaceAll("_", "")}`]);
   }
-  expect.soft(events.map(event => event.kind)).toEqual(["session_added", "session_removed", "fleet_changed"]);
-  expect.soft(events.map(event => event.sequence)).toEqual([1, 2, 3]);
+  expect.soft(events.map(event => event.kind)).toEqual(["session_added", "session_removed", "fleet_changed", "daemon_error", "daemon_error"]);
+  expect.soft(events.map(event => event.sequence)).toEqual([1, 2, 3, 4, 4]);
   check("MachineEvent", { ...events[0], diagnostic: null }, false);
+  check("MachineEvent", { ...raw, enrichment_pending: false }, false);
 });

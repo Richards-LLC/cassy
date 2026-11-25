@@ -2598,7 +2598,10 @@ if [ "$1 $2" = 'pr view' ]; then
     *) exit 1;;
   esac
   if [ "$1" = '--repo' ]; then
-    [ "$2" = 'acme/gabber' ] || exit 1
+    case "$2" in
+      acme/gabber|github.com/acme/gabber) ;;
+      *) exit 1;;
+    esac
     shift 2
   fi
   [ "$#" -eq 2 ] && [ "$1" = '--json' ] || exit 1

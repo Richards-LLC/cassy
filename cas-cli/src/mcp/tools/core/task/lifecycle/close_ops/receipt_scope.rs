@@ -263,7 +263,7 @@ fn listed_park_refusals(
             // proven missing. Park reads proof; it never starts a test process.
             refusals.push(crate::gates::tag("G-61", format!(
                 "FOCUSED PROOF REQUIRED: task {} widened uncertain test selection to {missing:?}; one passing capped run is missing at {short}. Run: {}. Identified changed tests still require five passes.",
-                task.id, widen::commands(cas_root, proof_repo, &present, &missing, &covering).join("; ")
+                task.id, widen::commands(&passing, &present, &missing, &covering).join("; ")
             )));
         }
     }
@@ -1716,7 +1716,7 @@ raise SystemExit(1 if failed else 0)
     /// in one runnable command and accepts their whole-file passes for it.
     #[test]
     fn package_proof_resolves_and_accepts_covering_specs_gh2266() {
-        use crate::factory_worker_check::{stability, widened};
+        use crate::factory_worker_check::{PassingTests, stability, widened};
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("worktrees/worker");
@@ -1765,7 +1765,7 @@ raise SystemExit(1 if failed else 0)
         assert_eq!(found.specs, specs.map(String::from));
         assert!(found.unresolved.is_empty(), "every changed input is read by a covering spec");
         // Every prescribed package command targets exactly the covering specs.
-        let commands = widened::commands(root.path(), &repo, &paths, &[package.clone()], &covering);
+        let commands = widened::commands(&PassingTests::new(root.path(), &repo, &head), &paths, &[package.clone()], &covering);
         assert!(!commands.is_empty());
         for command in &commands {
             let (_, args) = command.split_once(" -- ").unwrap();
@@ -1801,7 +1801,7 @@ raise SystemExit(1 if failed else 0)
         let refusals = park_refusals(root.path(), &repo, &task, &paths, &mixed, "main", None);
         assert!(refusals.iter().any(|reply| crate::gates::codes_in(reply).contains(&"G-61") && reply.contains(unread)), "{refusals:?}");
         assert_eq!(widened::missing(&crate::factory_worker_check::PassingTests::new(root.path(), &repo, &mixed), &scopes, &covering), [package.clone()]);
-        let commands = widened::commands(root.path(), &repo, &paths, &[package.clone()], &covering);
+        let commands = widened::commands(&PassingTests::new(root.path(), &repo, &mixed), &paths, &[package.clone()], &covering);
         assert!(commands.iter().any(|command| command.contains(unread)));
         for command in &commands {
             let args = command.split_once(" -- ").map_or("", |(_, args)| args);
@@ -1913,7 +1913,7 @@ sys.exit(0 if ok else 1)
         let paths = vec![source.to_owned()];
         let task = Task::new("cas-1587".into(), "related source proof".into());
         let scopes = vec![widened::scope(&repo, source)];
-        let commands = widened::commands(root.path(), &repo, &paths, &scopes, &Default::default());
+        let commands = widened::commands(&PassingTests::new(root.path(), &repo, &head), &paths, &scopes, &Default::default());
         assert_eq!(commands.len(), 1);
         // These bytes are the runnable command consumed by worker-check.
         let (_, command) = commands[0].split_once(" -- ").unwrap();
@@ -2003,7 +2003,7 @@ sys.exit(0 if ok else 1)
         let (tests, scopes) = stability::requirements(&repo, &head, "main", &paths, None).unwrap();
         assert!(tests.is_empty());
         assert_eq!(scopes, [widened::Scope::Package("apps/backend".into())]);
-        let commands = widened::commands(root.path(), &repo, &paths, &scopes, &Default::default());
+        let commands = widened::commands(&PassingTests::new(root.path(), &repo, &head), &paths, &scopes, &Default::default());
         assert!(!commands.is_empty());
         for command in &commands {
             let (_, command) = command.split_once(" -- ").unwrap();

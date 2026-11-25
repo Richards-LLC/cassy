@@ -16,12 +16,6 @@ mod web_attribution;
 pub(crate) use importers::related_specs;
 pub(super) use importers::node_specs;
 
-#[cfg(test)]
-pub(super) fn related_tests(repo: &Path, path: &str) -> Option<(&'static str, Vec<String>)> {
-    let tests = related_specs(repo, path);
-    (tests.len() == 1).then(|| tests.into_iter().next()).flatten()
-}
-
 #[derive(Debug, thiserror::Error)]
 #[error("Worker check requires an isolated worktree or a managed review checkout")]
 struct IsolatedCheckoutRequired;
@@ -71,6 +65,7 @@ pub(super) fn test_match(path: &str, runner: Option<&str>) -> bool {
     let stem = Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
     !stem.ends_with(".d")
         && ([".test", ".spec", ".journey", ".integration"].iter().any(|suffix| stem.ends_with(suffix))
+            || (matches!(runner, Some("node" | "node --test")) && stem.starts_with("test-"))
             || (runner == Some("jest") && path.split('/').any(|part| part == "__tests__")))
 }
 
@@ -82,9 +77,10 @@ pub(crate) struct Invocation {
     pub(crate) config: Option<String>,
     /// Test files relative to the invocation directory.
     pub(crate) files: Vec<String>,
+    pub(crate) whole_file: bool,
 }
 
-pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`, `vitest related --run <source files>`, `jest --findRelatedTests <source files>` or `node --test <test files>`; `<package>/package.json` runs that package";
+pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`, `vitest related --run <source files>`, `jest --findRelatedTests <source files>` or `node --test <test files>`; `--whole-file` runs the named specs once; `<package>/package.json` runs that package";
 
 /// Package-manager prefixes and runner subcommands are spelling. The capped
 /// run owns selection, widening caller name filters rather than trusting them.
@@ -106,9 +102,11 @@ pub(crate) fn invocation(args: &[String]) -> Option<Invocation> {
     };
     let mut config = None;
     let mut files = Vec::new();
+    let mut whole_file = false;
     let mut rest = rest.iter();
     while let Some(arg) = rest.next() {
         let value = match *arg {
+            "--whole-file" if !whole_file => { whole_file = true; continue; }
             "--config" | "-c" => Some(*rest.next()?),
             "--runInBand" | "-i" if runner == "jest" => continue,
             "--run" if runner == "vitest" => continue,
@@ -131,7 +129,8 @@ pub(crate) fn invocation(args: &[String]) -> Option<Invocation> {
             return None;
         }
     }
-    (!files.is_empty()).then_some(Invocation { runner, config, files })
+    (!files.is_empty() && (!whole_file || files.iter().all(|file| test_match(file, Some(runner)))))
+        .then_some(Invocation { runner, config, files, whole_file })
 }
 
 pub(super) fn allowed_args(args: &[String]) -> bool {
@@ -1528,6 +1527,10 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
     let mut tests = Vec::new();
     let mut widened = BTreeMap::new();
     for file in &files {
+        if invocation.whole_file {
+            widened.insert(super::widened::Scope::File(file.clone()), (file.clone(), "whole spec requested".into()));
+            continue;
+        }
         match changed_tests(&repo, &base, &head, std::slice::from_ref(file), None) {
             Ok(selected) if !selected.is_empty() => tests.extend(selected),
             result => {
@@ -2221,8 +2224,9 @@ fn execute_selection(
                 attribution_notes.push(note);
                 inherited
             };
+            let exact_file = matches!(widened, Some((super::widened::Scope::File(_), _, _)));
             validate_report_with_inherited(runner, repo, &report, &selected, 1, &inherited, None,
-                if consumers.is_empty() { &[] } else { std::slice::from_ref(&path) })?
+                if exact_file || !consumers.is_empty() { std::slice::from_ref(&path) } else { &[] })?
         } else { verify_repeats(runner, repo, &selected, &expected_rows, run)? };
         count += ran;
         inactive.extend(skipped);
@@ -3301,12 +3305,10 @@ pub(super) mod tests {
         let (tests, scopes) = super::super::stability::requirements(&repo, "HEAD", "HEAD~1", &[helper.into()], None).unwrap();
         assert!(tests.is_empty());
         assert_eq!(scopes, [Scope::Related(helper.into())]);
-        assert_eq!(related_tests(&repo, helper), Some(("playwright", vec![summary.into(), pair.into()])));
-        assert_eq!(related_tests(&repo, extra), Some(("playwright", vec![partial.into()])));
-        assert_eq!(related_tests(&repo, "e2e/journeys/world.ts"),
-            Some(("playwright", vec![partial.into(), history.into(), summary.into(), pair.into()])));
-        let command = widened::commands(Path::new("/cas"), &repo, &[helper.into()], &scopes, &Default::default());
-        assert_eq!(command, [format!("cas factory worker-check --cas-root /cas -- playwright {helper}")]);
+        assert_eq!(related_specs(&repo, helper), BTreeMap::from([("playwright", vec![summary.into(), pair.into()])]));
+        assert_eq!(related_specs(&repo, extra), BTreeMap::from([("playwright", vec![partial.into()])]));
+        assert_eq!(related_specs(&repo, "e2e/journeys/world.ts"),
+            BTreeMap::from([("playwright", vec![partial.into(), history.into(), summary.into(), pair.into()])]));
         assert!(widened::valid(&widened::Proof { runner: "playwright".into(), scope: scopes[0].clone(), reason: String::new(), configs: Default::default() }));
 
         // Park's receipt matcher (receipt_scope.rs reads it): a helper is covered
@@ -3343,7 +3345,7 @@ pub(super) mod tests {
         let extra_scope = Scope::Related(extra.into());
         exec(&["playwright", partial]).unwrap();
         assert!(!covered(&extra_scope), "a partial selection is no proof");
-        exec(&["playwright", extra]).unwrap();
+        exec(&["playwright", "--whole-file", partial]).unwrap();
         assert!(covered(&extra_scope));
         // The helper's own run finds each owning config and records it.
         exec(&["playwright", helper]).unwrap();
@@ -3369,9 +3371,12 @@ pub(super) mod tests {
         assert_eq!(widened::scope(&repo, "e2e/journeys/orphan.ts"), Scope::Related("e2e/journeys/orphan.ts".into()));
         let runtime = "e2e/journeys/hub-double-runtime.ts";
         let scopes = [widened::scope(&repo, runtime)];
-        assert_eq!(widened::commands(Path::new("/cas"), &repo, &[runtime.into()], &scopes, &Default::default()),
-            [format!("cas factory worker-check --cas-root /cas -- vitest related --run {runtime}")]);
-        assert!(related_tests(&repo, "src/shared.ts").is_none());
+        let command = widened::commands(&passing, &[runtime.into()], &scopes, &Default::default());
+        let args = command[0].split_once(" -- ").unwrap().1.split_whitespace().map(String::from).collect::<Vec<_>>();
+        assert_eq!(invocation(&args), Some(Invocation { runner: "vitest", config: None, files: vec![runtime.into()], whole_file: false }));
+        assert_eq!(related_specs(&repo, "src/shared.ts"), BTreeMap::from([
+            ("playwright", vec![pair.into()]), ("vitest", vec!["src/shared.test.ts".into()]),
+        ]));
     }
 
     /// GH #2200: a workflow change and the `node:test` CI guard that reads it
@@ -3412,11 +3417,13 @@ pub(super) mod tests {
         let (tests, scopes) = super::super::stability::requirements(repo.path(), "HEAD", "HEAD~1", &paths, None).unwrap();
         assert!(tests.is_empty());
         assert_eq!(scopes, [Scope::Related(helper.into())]);
-        let prescribed = widened::commands(Path::new("/cas"), repo.path(), &paths, &scopes, &Default::default());
-        assert_eq!(prescribed, [format!("cas factory worker-check --cas-root /cas -- node --test {helper}")]);
-        let args: Vec<String> = ["node", "--test", helper].map(String::from).into();
-        let invocation = invocation(&args).expect("the prescribed command is a capped runner");
         let cas_root = tempfile::tempdir().unwrap();
+        let receipt = super::super::PassingTests::new(cas_root.path(), repo.path(), &head);
+        let prescribed = widened::commands(&receipt, &paths, &scopes, &Default::default());
+        let args = prescribed[0].split_once(" -- ").unwrap().1.split_whitespace().map(String::from).collect::<Vec<_>>();
+        assert_eq!(invocation(&args), Some(Invocation { runner: "node", config: None, files: vec!["tests/ci/workflow.test.mjs".into()], whole_file: true }));
+        let args: Vec<String> = ["node", "--test", helper].map(String::from).into();
+        let invocation = invocation(&args).expect("the helper command is a capped runner");
         let passing = |head: &str| widened::missing(&super::super::PassingTests::new(cas_root.path(), repo.path(), head), &scopes, &Default::default());
         assert_eq!(passing(&head), scopes);
         execute_tests(cas_root.path(), repo.path(), &head, invocation.runner, None, &[], Some((&scopes[0], helper, "uncertain")), &[]).unwrap();
@@ -3904,7 +3911,7 @@ process.exit(listed.length ? 0 : 1);
         ] {
             assert_eq!(
                 parse(command),
-                Some(Invocation { runner, config: config.map(String::from), files: file() }),
+                Some(Invocation { runner, config: config.map(String::from), files: file(), whole_file: false }),
                 "{command}"
             );
         }

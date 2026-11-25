@@ -2927,9 +2927,9 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
     #[cfg(unix)]
     discard_shared_fingerprints(&target_dir)?;
     let count_file = slots.join(format!("count-{lane_key}"));
-    let red_task = if !crate_run && widened_proof.is_none() {
-        red_first_task(&cas_root, &repo).filter(|task| test.is_some() || (args.iter().any(|arg| arg == "--tests")
-            && task.deliverables.factory_branch_start.as_ref().is_some_and(|start| start.base_sha == head)))
+    let red_task = if !crate_run && widened_proof.is_none() && (test.is_some() || args.iter().any(|arg| arg == "--tests")) {
+        red_first_task(&cas_root, &repo).filter(|task| test.is_some() || task.deliverables.factory_branch_start
+            .as_ref().is_some_and(|start| start.base_sha == head))
     } else { None };
     let selected_log = if test.is_some() || red_task.is_some() {
         // Each attempt keeps its own untouched Cargo output. Keep it beside

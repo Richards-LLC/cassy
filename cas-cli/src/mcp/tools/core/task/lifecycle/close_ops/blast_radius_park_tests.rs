@@ -99,8 +99,10 @@ fn fixture_with_gear(env: &mut TestEnvGuard, base: &str, checkpoint: &str) -> Fi
     git(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
     git(repo, &["push", "-q", "origin", "main"]);
     git(repo, &["checkout", "-q", "-b", LANE]);
-    std::fs::write(repo.join("crates/widget/src/gear.rs"), checkpoint).unwrap();
-    git(repo, &["commit", "-q", "-am", &format!("fix({ID}): turn the gear")]);
+    if checkpoint != base {
+        std::fs::write(repo.join("crates/widget/src/gear.rs"), checkpoint).unwrap();
+        git(repo, &["commit", "-q", "-am", &format!("fix({ID}): turn the gear")]);
+    }
     git(repo, &["push", "-q", "origin", LANE]);
     git(repo, &["checkout", "-q", "main"]);
 
@@ -1167,7 +1169,7 @@ async fn park_requires_red_first_evidence_gh_2422() {
         ("node subtest hook failure", Some("test-first"), Some(("HEAD^", &node[..])), false),
         ("node suite failure under a test", Some("test-first"), Some(("HEAD^", &node[..])), false),
         ("node inactive regression", Some("test-first"), Some(("HEAD^", &node[..])), false),
-        ("node dynamic regression", Some("test-first"), Some(("HEAD^", &node[..])), true),
+        ("node dynamic regression", Some("test-first"), None, true),
         ("captured outer Nextest failure", Some("test-first"), Some(("HEAD^", &outer[..])), false),
         ("captured nested Nextest failure", Some("test-first"), Some(("HEAD^", &nextest[..])), false),
         ("captured Nextest signal", Some("test-first"), Some(("HEAD^", &signal[..])), false),
@@ -1181,7 +1183,8 @@ async fn park_requires_red_first_evidence_gh_2422() {
     ] {
         let broken_base = matches!(case, "compile failure at base" | "compile failure of the library at base"
             | "compile failure across crates at base");
-        let f = fixture_with_gear(&mut env, if broken_base { &broken } else { &red }, &checkpoint);
+        let node_case = case.starts_with("node ");
+        let f = fixture_with_gear(&mut env, if broken_base { &broken } else { &red }, if node_case { &red } else { &checkpoint });
         if matches!(case, "compile failure in another crate at base" | "compile failure across crates at base") {
             let repo = f.dir.path();
             let spare = repo.join("crates/spare");
@@ -1206,7 +1209,7 @@ async fn park_requires_red_first_evidence_gh_2422() {
         open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
         let gear_path = f.worker_path.join("crates/widget/src/gear.rs");
         let mut passing_rust = &nextest;
-        let mut green_source = if case == "node dynamic regression" { gear("2", "assert_eq!(turn(), 2);") } else { green.clone() };
+        let mut green_source = green.clone();
         if matches!(case, "nextest timeout" | "nextest leak failure") {
             let (config, regression) = if case == "nextest timeout" {
                 ("slow-timeout = { period = '250ms', terminate-after = 2 }", "std::thread::sleep(std::time::Duration::from_secs(5));")
@@ -1231,7 +1234,7 @@ async fn park_requires_red_first_evidence_gh_2422() {
             green_source = source(2).replace("assert_eq!(turn(), expected)", "assert_eq!(expected, turn())");
             passing_rust = &parameterized;
         }
-        if case.starts_with("node ") {
+        if node_case {
             std::fs::write(f.worker_path.join("package.json"), "{}\n").unwrap();
             let (red_node, green_node) = match case {
                 "node inactive regression" => (
@@ -1280,8 +1283,9 @@ async fn park_requires_red_first_evidence_gh_2422() {
             git(&f.worker_path, &["add", "package.json", node[2]]);
             git(&f.worker_path, &["commit", "-qm", "test(cas-br01): reproduce the node regression"]);
             std::fs::write(f.worker_path.join(node[2]), format!("{import}{green_node}")).unwrap();
+        } else {
+            std::fs::write(&gear_path, green_source).unwrap();
         }
-        std::fs::write(&gear_path, green_source).unwrap();
         git(&f.worker_path, &["commit", "-qam", "fix(cas-br01): correct the gear"]);
         git(&f.worker_path, &["push", "-q", "origin", LANE]);
         if let Some((revision, args)) = failure {
@@ -1326,10 +1330,13 @@ async fn park_requires_red_first_evidence_gh_2422() {
                 git(&f.worker_path, &["checkout", "-q", LANE]);
             }
         }
-        run(&f.worker_path, passing_rust).unwrap_or_else(|error| panic!("{case}: {error:#}\n{}", git(&f.worker_path, &["status", "--porcelain"])));
-        if case.starts_with("node ") && let Err(error) = run(&f.worker_path, &node) {
-            violations.push(format!("{case}: {error:#}"));
-            continue;
+        if node_case {
+            if let Err(error) = run(&f.worker_path, &node) {
+                violations.push(format!("{case}: {error:#}"));
+                continue;
+            }
+        } else {
+            run(&f.worker_path, passing_rust).unwrap_or_else(|error| panic!("{case}: {error:#}\n{}", git(&f.worker_path, &["status", "--porcelain"])));
         }
         let mut request = serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"});
         if case.starts_with("receipt ") {

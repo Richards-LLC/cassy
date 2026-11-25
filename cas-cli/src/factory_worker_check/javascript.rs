@@ -141,12 +141,13 @@ pub(super) fn names_runner(args: &[String]) -> bool {
 /// `validate_report` reads. Suite names join a test's own name with spaces,
 /// as `--test-name-pattern` matches them.
 const NODE_TEST_REPORTER: &str = r#"export default async function* (source) {
-  const names = [], below = [], files = new Map();
+  const names = [], below = [], inside = [], files = new Map();
   let success = true;
   for await (const { type, data } of source) {
     if (type === 'test:start') {
       names[data.nesting] = data.name;
       below[data.nesting] = [];
+      inside[data.nesting] = [];
     }
     if (type !== 'test:pass' && type !== 'test:fail') continue;
     const file = files.get(data.file) ?? { name: data.file, status: 'passed', assertionResults: [] };
@@ -159,12 +160,15 @@ const NODE_TEST_REPORTER: &str = r#"export default async function* (source) {
       for (let depth = 0; depth < data.nesting; depth++) below[depth]?.push(failureType ?? null);
     }
     if (data.details?.type === 'suite') continue;
-    file.assertionResults.push({
+    const row = {
       fullName: [...names.slice(0, data.nesting), data.name].join(' '),
       failureType,
       subtestFailures: failed ? (below[data.nesting] ?? []) : undefined,
       status: data.skip ? 'skipped' : data.todo ? 'todo' : failed ? 'failed' : 'passed',
-    });
+    };
+    for (const child of inside[data.nesting] ?? []) (child.parentTests ??= []).push(row.fullName);
+    for (let depth = 0; depth < data.nesting; depth++) inside[depth]?.push(row);
+    file.assertionResults.push(row);
   }
   yield JSON.stringify({ success, testResults: [...files.values()] });
 }
@@ -2688,6 +2692,9 @@ fn validate_report_with_inherited(
                     .and_then(Value::as_str)
                     .context("test fullName missing")?;
                 let id = Identity::exact(path.clone(), name);
+                let nested = runner == "node" && test.get("parentTests").and_then(Value::as_array).into_iter().flatten()
+                    .filter_map(Value::as_str)
+                    .any(|parent| tests.iter().any(|selected| selected.selects(&Identity::exact(path.clone(), parent))));
                 match test.get("status").and_then(Value::as_str) {
                     Some("passed") => {
                         if test
@@ -2705,7 +2712,7 @@ fn validate_report_with_inherited(
                                 id.name
                             );
                         }
-                        *results.entry(id).or_default() += 1;
+                        if !nested { *results.entry(id).or_default() += 1; }
                     }
                     Some("pending" | "skipped" | "todo" | "disabled")
                         if !tests.iter().any(|test| test.selects(&id)) => {}

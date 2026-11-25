@@ -6388,11 +6388,11 @@ impl CasCore {
                 });
             if let Some(ranges) = ranges.filter(|ranges| !ranges.is_empty())
                 && let Some(paths) = task_attribution::paths_from_ranges(repo, ranges.iter().map(|(base, tip)| (base.as_str(), tip.as_str())))
-                && let Ok((tests, _)) = receipt_scope::delivered_tests(&self.cas_root, &worker_path, head, target, &paths, Some(&ranges))
+                && let Ok((tests, widened)) = receipt_scope::delivered_tests(&self.cas_root, &worker_path, head, target, &paths, Some(&ranges))
             {
                 let passing = crate::factory_worker_check::PassingTests::new(&self.cas_root, &worker_path, head)
                     .with_target(target).with_synced(&task.deliverables.test_receipts);
-                if let Some(refusal) = receipt_scope::red_first_refusal(task, &passing, head, &ranges, &tests) {
+                if let Some(refusal) = receipt_scope::red_first_refusal(task, &passing, head, &ranges, &tests, &widened) {
                     return Ok(Self::tool_error(gate_preflight::park_reply(vec![refusal])));
                 }
             }

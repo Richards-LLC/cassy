@@ -174,9 +174,9 @@ pub(super) fn delivered_tests(
 
 pub(super) fn red_first_refusal(
     task: &Task, passing: &PassingTests<'_>, head: &str,
-    ranges: &[(String, String)], delivered: &[stability::Identity],
+    ranges: &[(String, String)], delivered: &[stability::Identity], widened: &[Scope],
 ) -> Option<String> {
-    if task.execution_note.as_deref() != Some("test-first") { return None; }
+    if task.execution_note.as_deref() != Some("test-first") || (delivered.is_empty() && !widened.is_empty()) { return None; }
     let start_base = task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str());
     if passing.has_red_first_evidence(&task.id, start_base, ranges, delivered) { return None; }
     let base = start_base.unwrap_or("the recorded task start base");
@@ -247,7 +247,7 @@ fn listed_park_refusals(
             elapsed_ms = started.elapsed().as_millis() as u64, "Close gate phase");
         let (tests, widened) = match requirements {
             Ok((tests, widened)) => {
-                refusals.extend(red_first_refusal(task, &passing, head, delivery_ranges.unwrap_or_default(), &tests));
+                refusals.extend(red_first_refusal(task, &passing, head, delivery_ranges.unwrap_or_default(), &tests, &widened));
                 (tests, widened)
             }
             Err(error) => {

@@ -130,7 +130,7 @@ struct CheckReceipt {
 enum RedFirstFailure {
     Rust { package: String, harness: Option<String>, names: BTreeSet<String> },
     JavaScript { runner: String, tests: BTreeSet<stability::Identity> },
-    Compile { package: String },
+    Compile { packages: BTreeSet<String> },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -313,9 +313,9 @@ fn rust_red_first_failure(test: Option<&TargetedTest>, status: Option<i32>, log:
     let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").ok()?;
     let log = ansi.replace_all(&log, "");
     if test.is_none() && status == Some(101) {
-        let package = regex::Regex::new(r"(?m)^error: could not compile `([^`]+)`").ok()?
-            .captures(&log)?[1].to_owned();
-        return Some(RedFirstFailure::Compile { package });
+        let packages = regex::Regex::new(r"(?m)^error: could not compile `([^`]+)`").ok()?
+            .captures_iter(&log).map(|row| row[1].to_owned()).collect::<BTreeSet<_>>();
+        return (!packages.is_empty()).then_some(RedFirstFailure::Compile { packages });
     }
     let test = test.filter(|_| status == Some(100))?;
     let summary = regex::Regex::new(r"(?m)^─+\r?\n([ \t]*Summary +)\[[^\]\r\n]*\] +[1-9][0-9]* tests? run: [^\r\n]+\r?$").ok()?;
@@ -1296,8 +1296,8 @@ pub(crate) fn has_red_first_evidence(&self, task: &str, start_base: Option<&str>
                         })
                 }
                 RedFirstFailure::JavaScript { runner, tests } => &proof.runner == runner && tests.iter().any(|failed| identity.selects(failed)),
-                RedFirstFailure::Compile { package: failed_package } => at_base
-                    && package.as_deref().is_some_and(|package| same_workspace_package(&repo, package, failed_package)),
+                RedFirstFailure::Compile { packages } => at_base && package.as_deref().is_some_and(|package|
+                    packages.iter().any(|failed| same_workspace_package(&repo, package, failed))),
             })
         });
         if matched && at_base { return true; }
@@ -2928,8 +2928,8 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
     discard_shared_fingerprints(&target_dir)?;
     let count_file = slots.join(format!("count-{lane_key}"));
     let red_task = if !crate_run && widened_proof.is_none() {
-        red_first_task(&cas_root, &repo).filter(|task| test.is_some() || task.deliverables.factory_branch_start
-            .as_ref().is_some_and(|start| start.base_sha == head))
+        red_first_task(&cas_root, &repo).filter(|task| test.is_some() || (args.iter().any(|arg| arg == "--tests")
+            && task.deliverables.factory_branch_start.as_ref().is_some_and(|start| start.base_sha == head)))
     } else { None };
     let selected_log = if test.is_some() || red_task.is_some() {
         // Each attempt keeps its own untouched Cargo output. Keep it beside

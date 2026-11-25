@@ -669,6 +669,10 @@ build_and_install() {
     tmp_install="$(mktemp "$(dirname "$CAS_INSTALL")/.cas.install.XXXXXX")"
     install -m 0755 "$built_bin" "$tmp_install"
     mv -f "$tmp_install" "$CAS_INSTALL"
+    if [ "$(uname -s)" = "Darwin" ]; then
+      "$CAS_INSTALL" --internal-sign-installed >/dev/null || \
+        warn "Local code signing was unavailable; the installed binary was kept."
+    fi
     NEW_INSTALLED_VERSION="$(binary_version "$CAS_INSTALL" || printf 'unknown')"
     NEW_INSTALLED_HASH="$(sha256_file "$CAS_INSTALL")"
     info "$NEW_INSTALLED_VERSION"

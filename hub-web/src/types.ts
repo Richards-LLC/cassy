@@ -84,6 +84,7 @@ export interface HubSession {
   mcp_loaded_at?: string;
   /** The Cassy binary installed on this supervisor's machine. */
   installed_version?: string;
+  mcp_reload_needed?: boolean;
 }
 
 export interface PaneInfo {

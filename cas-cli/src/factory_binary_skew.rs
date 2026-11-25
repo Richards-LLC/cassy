@@ -26,6 +26,12 @@ pub(crate) struct ServerVersion {
     pub older: bool,
 }
 
+impl ServerVersion {
+    pub(crate) fn is_installed_build(&self, version: &str, build: Option<&str>) -> bool {
+        self.version.as_deref() == Some(version) && self.build.as_deref() == build
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Snapshot {
     pub installed: String,
@@ -245,21 +251,15 @@ pub(crate) fn snapshot_with_installed(
 }
 
 pub(crate) fn installed_version() -> Option<String> {
-    #[cfg(test)]
-    if let Some(version) = INSTALLED_VERSION_FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-        return Some(version);
-    }
-    installed_version_of(std::ffi::OsStr::new("cas"))
+    installed_identity().map(|(version, _)| version)
 }
 
-/// The installed build hash, from `cas --version` ("cas 4.52.0 (f28538f
-/// 2026-11-24)"). Two builds of one version differ here (cas-724e).
-pub(crate) fn installed_build() -> Option<String> {
+pub(crate) fn installed_identity() -> Option<(String, Option<String>)> {
     #[cfg(test)]
-    if INSTALLED_VERSION_FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
-        return INSTALLED_BUILD_FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(version) = INSTALLED_VERSION_FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return Some((version, INSTALLED_BUILD_FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()).clone()));
     }
-    installed_identity_of(std::ffi::OsStr::new("cas")).and_then(|(_, build)| build)
+    installed_identity_of(std::ffi::OsStr::new("cas"))
 }
 
 /// Lib tests may not change process PATH; a fixture names the installed build here.

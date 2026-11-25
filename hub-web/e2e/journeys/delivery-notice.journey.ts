@@ -81,7 +81,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect.poll(receiptIds, { message: "attention commit sends its own persistence receipt" }).toEqual([901]);
     expect(hub.persistedReplies.some(reply => reply.notification_id === 901)).toBe(false);
     // The watchdog raises it again (a repeat and a live replay): still one.
-    const repeat = await hub.supervisorSays(SESSION, NOTICE_TEXT, { kind: "blocker", summary: NOTICE_SUMMARY, device_id: "*", notice: { source: "relay-watchdog", subject: SUBJECT, resolved: false } });
+    const repeat = hub.supervisorSays(SESSION, NOTICE_TEXT, { kind: "blocker", summary: NOTICE_SUMMARY, device_id: "*", notice: { source: "relay-watchdog", subject: SUBJECT, resolved: false } });
     // The page has handled the repeat before it is counted, rather than after
     // a fixed pause a loaded host can outrun (cas-c4b2).
     await hub.received(repeat);
@@ -303,11 +303,11 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
       return Object.values(stored?.days ?? {}).reduce((sum, actions) => sum + (actions["attention.delivery"] ?? 0), 0);
     });
     const beforeResolution = await deliveryCount();
-    const resolved = await hub.supervisorSays(SESSION, NOTICE_TEXT, { kind: "blocker", summary: NOTICE_SUMMARY, device_id: "*", notice: { source: "relay-watchdog", subject: SUBJECT, resolved: true } });
+    const resolved = hub.supervisorSays(SESSION, NOTICE_TEXT, { kind: "blocker", summary: NOTICE_SUMMARY, device_id: "*", notice: { source: "relay-watchdog", subject: SUBJECT, resolved: true } });
     await hub.received(resolved);
     await expect(attentionItems).toHaveCount(0);
     await expect.poll(deliveryCount, { message: "a self-resolved notice records attention.delivery once" }).toBe(beforeResolution + 1);
-    await hub.send(SESSION, { OperatorNoticeResolved: { notification_id: 901, subject: SUBJECT } });
+    hub.send(SESSION, { OperatorNoticeResolved: { notification_id: 901, subject: SUBJECT } });
     await expect(attentionItems).toHaveCount(0);
     // After a reload the resolved notice does not come back.
     await page.reload();
@@ -335,7 +335,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
   await journey.stage("An answer to an earlier session's question stays here", async () => {
     // The supervisor answers a question asked in yesterday's ended session:
     // it arrives in this thread, naming the session it answers.
-    await hub.supervisorSays(SESSION, "The bank feed reconciled overnight.", { reply_to: 3196200, reply_to_session: "Accounting-wise-lion-31" });
+    hub.supervisorSays(SESSION, "The bank feed reconciled overnight.", { reply_to: 3196200, reply_to_session: "Accounting-wise-lion-31" });
     const answer = log.getByTestId("conversation-turn").filter({ hasText: "The bank feed reconciled overnight." });
     await expect(answer.getByTestId("reply-quote")).toContainText("wise-lion-31");
     await expect(answer).toHaveAttribute("data-reply-to", "3196200");

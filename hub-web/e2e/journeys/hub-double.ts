@@ -449,19 +449,12 @@ export class HubDouble {
   }
 
   /** Resolve on the next matching wire observation, with no polling sleeps. */
-  waitFor(observed: () => boolean, timeout?: { ms: number; error: Error }): Promise<void> {
+  waitFor(observed: () => boolean): Promise<void> {
     if (observed()) return Promise.resolve();
-    return new Promise((resolve, reject) => {
+    return new Promise(resolve => {
       const check = () => {
-        if (!observed()) return;
-        this.protocolWaiters.delete(check);
-        clearTimeout(timer);
-        resolve();
+        if (observed()) { this.protocolWaiters.delete(check); resolve(); }
       };
-      const timer = timeout && setTimeout(() => {
-        this.protocolWaiters.delete(check);
-        reject(timeout.error);
-      }, timeout.ms);
       this.protocolWaiters.add(check);
     });
   }
@@ -811,26 +804,21 @@ export class HubDouble {
   }
 
   /** Push a hub message onto a session's open socket. */
-  async send(session: string, message: Record<string, unknown>): Promise<void> {
-    let ws = this.sockets.get(session);
-    if (!ws) {
-      const error = new Error(`hub double: no socket open for ${session}`);
-      await this.waitFor(() => this.sockets.has(session), { ms: 2_000, error });
-      ws = this.sockets.get(session);
-      if (!ws) throw error;
-    }
+  send(session: string, message: Record<string, unknown>): void {
+    const ws = this.sockets.get(session);
+    if (!ws) throw new Error(`hub double: no socket open for ${session}`);
     if (this.stalledSockets.has(ws)) return;
     sendSessionFrame(ws, message);
   }
 
   /** Acknowledge the latest send and answer it as the supervisor. */
-  async answerLatest(session: string, message: string, extra: Record<string, unknown> = {}): Promise<{ queued: number; reply: number }> {
+  answerLatest(session: string, message: string, extra: Record<string, unknown> = {}): { queued: number; reply: number } {
     const sent = this.sends.at(-1);
     if (!sent) throw new Error("hub double: nothing was sent");
     const queued = this.nextId++;
     const reply = this.nextId++;
-    await this.send(session, { MessageQueued: { client_ref: sent.client_ref, notification_id: queued, target: sent.target, stamped: true } });
-    await this.send(session, { OperatorReply: { notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", ...extra } });
+    this.send(session, { MessageQueued: { client_ref: sent.client_ref, notification_id: queued, target: sent.target, stamped: true } });
+    this.send(session, { OperatorReply: { notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", ...extra } });
     const now = this.machineNow(session);
     this.remember(session).messages.push({ notification_id: queued, target: sent.target, text: sent.text, state: "acknowledged", stamped: true, device_id: "journey-device", session, ...(sent.in_reply_to === undefined || sent.in_reply_to === null ? {} : { reply_to: sent.in_reply_to }), at: now });
     this.remember(session).replies.push({ notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", attachments: [], session, at: now, ...extra });
@@ -871,42 +859,42 @@ export class HubDouble {
   }
 
   /** Accept into the durable queue; this is not a supervisor handoff. */
-  async queueLatest(session: string): Promise<number> {
+  queueLatest(session: string): number {
     const sent = this.sends.at(-1);
     if (!sent) throw new Error("hub double: nothing was sent");
     const queued = this.nextId++;
-    await this.send(session, { MessageQueued: { client_ref: sent.client_ref, notification_id: queued, target: sent.target, stamped: true } });
+    this.send(session, { MessageQueued: { client_ref: sent.client_ref, notification_id: queued, target: sent.target, stamped: true } });
     this.remember(session).messages.push({ notification_id: queued, target: sent.target, text: sent.text, state: "acknowledged", stamped: true, device_id: "journey-device", session, ...(sent.in_reply_to === undefined || sent.in_reply_to === null ? {} : { reply_to: sent.in_reply_to }), at: this.machineNow(session) });
     return queued;
   }
 
   /** Model an actual supervisor transport receipt, independently of queue acceptance. */
-  async deliverQueued(session: string, notificationId: number): Promise<void> {
+  deliverQueued(session: string, notificationId: number): void {
     const message = this.remember(session).messages.find((row) => row.notification_id === notificationId);
     if (!message) throw new Error("hub double: queued message missing");
     message.state = "delivered";
-    await this.send(session, { OperatorMessage: message });
+    this.send(session, { OperatorMessage: message });
   }
 
   /** Queue the latest send and then prove its supervisor transport handoff. */
-  async deliverLatest(session: string): Promise<number> {
-    const id = await this.queueLatest(session);
-    await this.deliverQueued(session, id);
+  deliverLatest(session: string): number {
+    const id = this.queueLatest(session);
+    this.deliverQueued(session, id);
     return id;
   }
 
   /** Answer an already-acknowledged send as the supervisor. */
-  async answerQueued(session: string, queued: number, message: string, extra: Record<string, unknown> = {}): Promise<number> {
+  answerQueued(session: string, queued: number, message: string, extra: Record<string, unknown> = {}): number {
     const reply = this.nextId++;
-    await this.send(session, { OperatorReply: { notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", ...extra } });
+    this.send(session, { OperatorReply: { notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", ...extra } });
     this.remember(session).replies.push({ notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", attachments: [], session, at: this.machineNow(session), ...extra });
     return reply;
   }
 
   /** A supervisor message that is not a reply to anything (status, ask, blocker). */
-  async supervisorSays(session: string, message: string, extra: Record<string, unknown> = {}): Promise<number> {
+  supervisorSays(session: string, message: string, extra: Record<string, unknown> = {}): number {
     const id = this.nextId++;
-    await this.send(session, { OperatorReply: { notification_id: id, reply_to: null, message, summary: "", device_id: "journey-device", ...extra } });
+    this.send(session, { OperatorReply: { notification_id: id, reply_to: null, message, summary: "", device_id: "journey-device", ...extra } });
     this.remember(session).replies.push({ notification_id: id, reply_to: null, message, summary: "", device_id: "journey-device", attachments: [], session, at: this.machineNow(session), ...extra });
     return id;
   }

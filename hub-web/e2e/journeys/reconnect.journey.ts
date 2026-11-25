@@ -180,7 +180,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // cas-71f4: while it still says "Sending…", that bubble is the one
     // sending signal; no working line beside it.
     await expect(workingLine(page)).toHaveCount(0);
-    await hub.deliverLatest(PELICAN);
+    hub.deliverLatest(PELICAN);
     await expect(turn(page, "Are you there?")).toHaveAttribute("data-state", "delivered");
     await expect(turn(page, "Are you there?").getByTestId("conversation-delivered")).toBeVisible();
     // cas-3f40: a transport receipt proves handoff, not supervisor execution.
@@ -199,7 +199,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     const sent = hub.nextSend();
     await activate(page, page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }));
     expect((await sent).text).toBe("Are we back?");
-    await hub.answerLatest(PELICAN, "Back. Nothing was lost.");
+    hub.answerLatest(PELICAN, "Back. Nothing was lost.");
     await expect(page.getByRole("log").getByText("Back. Nothing was lost.")).toBeVisible();
     beforeOutage = await threadOrder();
     // cas-eb4b: a session's own thread has no "session … started" line

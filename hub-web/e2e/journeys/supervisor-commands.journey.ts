@@ -103,7 +103,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
           expect(status!.width).toBeLessThan(transcript!.width * 0.9);
         }
         await captureReload(page, "finish-menu-requested", viewport.width);
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "observed", detail: "Completed", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "observed", detail: "Completed", output: "", interactive: false } } });
         await expect(commandReceipts(page)).toHaveCount(0);
       });
       await journey.stage("Pick Finish from /fin autocomplete and settle its outcome", async () => {
@@ -119,11 +119,11 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(commandPalette(page)).toBeHidden();
         const statusReads = () => hub.frames.filter(frame => frame.kind === "SupervisorCommandStatus" && (frame.body as { client_ref: string }).client_ref === request.client_ref).length;
         // Replay the daemon's short timeout before the incident's 103-second completion.
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "unconfirmed", detail: "Outcome not observed yet", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "unconfirmed", detail: "Outcome not observed yet", output: "", interactive: false } } });
         await expect(commandReceipts(page)).toHaveAttribute("data-phase", "unconfirmed");
         const before = statusReads();
         await expect.poll(statusReads).toBeGreaterThan(before);
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "observed", detail: "Completed", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "observed", detail: "Completed", output: "", interactive: false } } });
         await expect(commandReceipts(page)).toHaveCount(0);
         expect(mutations()).toHaveLength(2);
         await captureReload(page, "finish-autocomplete-completed", viewport.width);
@@ -185,7 +185,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         expect(frames).toHaveLength(1);
         const request = frames[0]!.body as { client_ref: string; command: string };
         expect(request.command).toBe("mcp");
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
         // A finished command leaves a self-clearing toast, not a card (cas-95ea).
         await expect(toast(page, "Cassy reloaded: PID 2202")).toBeVisible();
         await expect(commandReceipts(page)).toHaveCount(0);
@@ -200,13 +200,13 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const request = hub.frames.filter(frame => frame.kind === "SupervisorCommand")[1]!.body as { client_ref: string; command: string };
         expect(request.command).toBe("finish");
         const receipt = commandReceipts(page).filter({ hasText: "/finish" });
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "queued", detail: "Waiting for an empty prompt", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "queued", detail: "Waiting for an empty prompt", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "queued");
         await receipt.getByRole("button", { name: "Dismiss command status", exact: true }).click();
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommandCancel").length).toBe(1);
         expect(hub.frames.find(frame => frame.kind === "SupervisorCommandCancel")!.body).toEqual({ client_ref: request.client_ref });
         await expect(receipt).toBeVisible();
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "cancelled", detail: "Cancelled before submission", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "cancelled", detail: "Cancelled before submission", output: "", interactive: false } } });
         await expect(receipt).toHaveCount(0);
         expect(hub.sends).toHaveLength(0);
       });
@@ -239,7 +239,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const request = mutations()[0].body as { client_ref: string; command: string };
         expect(request.command).toBe("mcp");
         const receipt = commandReceipts(page);
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "queued", detail: "Reload is queued until this turn ends.", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "queued", detail: "Reload is queued until this turn ends.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "queued");
         // cas-8c4f: a busy supervisor shows the wait instead of a refusal.
         await expect(receipt.locator(".reload-wait")).toBeVisible();
@@ -249,7 +249,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         machine.sessions[0]!.mcp_version = "9.99.2";
         machine.sessions[0]!.mcp_reload_needed = false;
         (machine.sessions[0] as { mcp_loaded_at?: string }).mcp_loaded_at = "2026-11-23T22:44:00Z";
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
         await expect(toast(page, "Cassy reloaded: PID 2202")).toBeVisible();
         await expect(receipt).toHaveCount(0);
         await captureReload(page, "reloaded-toast", viewport.width);
@@ -307,7 +307,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(input).toHaveValue("");
         const receipt = commandReceipts(page);
         await expect(receipt).toHaveAttribute("data-phase", "submitted");
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 3303, version 9.99.2 (previous PID 2202).", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 3303, version 9.99.2 (previous PID 2202).", output: "", interactive: false } } });
         await expect(toast(page, "PID 3303, version 9.99.2")).toBeVisible();
         await expect(receipt).toHaveCount(0);
         expect(mutations()).toHaveLength(2);
@@ -331,10 +331,10 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         expect(request.command).toBe("mcp");
         expect(request.confirmed).toBe(true);
         const receipt = commandReceipts(page);
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "submitted", detail: "Restarting the Codex supervisor on the installed build; workers keep running.", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "submitted", detail: "Restarting the Codex supervisor on the installed build; workers keep running.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "submitted");
         await expect(receipt.locator(".reload-wait")).toBeVisible();
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "unconfirmed", detail: "Cassy reconnected but runs 9.99.2 (c140f3f), not the installed 9.99.2 (d140f3f). Check which cas is first on PATH, then Reload Cassy again.", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "unconfirmed", detail: "Cassy reconnected but runs 9.99.2 (c140f3f), not the installed 9.99.2 (d140f3f). Check which cas is first on PATH, then Reload Cassy again.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "unconfirmed");
         await expect(receipt.locator(".reload-wait")).toHaveCount(0);
         await captureReload(page, "codex-mismatch", viewport.width);
@@ -427,7 +427,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await sendButton(page).click();
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(1);
         const request = hub.frames.find(frame => frame.kind === "SupervisorCommand")!.body as { client_ref: string };
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "refused", detail: "The supervisor is busy or its empty prompt is not confirmed. Wait until its turn ends.", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "refused", detail: "The supervisor is busy or its empty prompt is not confirmed. Wait until its turn ends.", output: "", interactive: false } } });
         const receipt = commandReceipts(page);
         await expect(receipt).toHaveAttribute("data-phase", "refused");
         await receipt.getByRole("button", { name: "Dismiss command status" }).click();
@@ -441,9 +441,9 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(2);
         const request = hub.frames.filter(frame => frame.kind === "SupervisorCommand")[1].body as { client_ref: string };
         const receipt = commandReceipts(page);
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "queued", detail: "Reload queued for the end of this turn.", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "queued", detail: "Reload queued for the end of this turn.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "queued");
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2.", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2.", output: "", interactive: false } } });
         await expect(toast(page, "Cassy reloaded: PID 2202")).toBeVisible();
         await expect(receipt).toHaveCount(0);
         expect(hub.sends).toHaveLength(0);
@@ -482,7 +482,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         })).toBe(1);
       });
       await journey.stage("Read the observed native result without resending the command", async () => {
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: ref, command: "usage", phase: "observed", detail: "Usage displayed by the supervisor's harness.", output: "Model: GPT-6.1-Sol\nContext window: 93% left\n<untrusted>", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: ref, command: "usage", phase: "observed", detail: "Usage displayed by the supervisor's harness.", output: "Model: GPT-6.1-Sol\nContext window: 93% left\n<untrusted>", interactive: false } } });
         const receipt = commandReceipts(page);
         await expect(receipt).toHaveAttribute("data-phase", "observed");
         await receipt.getByText("Harness output", { exact: true }).click();
@@ -510,7 +510,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const request = mutations()[1].body as { client_ref: string; command: string };
         expect(request.command).toBe("usage");
         expect(hub.sends).toHaveLength(4);
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "usage", phase: "observed", detail: "Usage displayed by the supervisor's harness.", output: "Usage", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "usage", phase: "observed", detail: "Usage displayed by the supervisor's harness.", output: "Usage", interactive: false } } });
         await expect(commandReceipts(page).last()).toHaveAttribute("data-phase", "observed");
       });
       await journey.stage("Cancel Finish by keyboard from a right-aligned confirmation (cas-c009)", async () => {
@@ -550,24 +550,24 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const request = mutations()[2].body as { client_ref: string; command: string; confirmed: boolean };
         expect(request).toMatchObject({ command: "finish", confirmed: true });
         const receipt = commandReceipts(page).filter({ hasText: "/finish" });
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "queued", detail: "Finish is queued until the supervisor's current turn ends and its prompt is empty. Nothing has been typed yet.", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "queued", detail: "Finish is queued until the supervisor's current turn ends and its prompt is empty. Nothing has been typed yet.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "queued");
         await expect(receipt).toContainText("Nothing has been typed yet");
         expect(mutations()).toHaveLength(3);
         await receipt.getByRole("button", { name: "Dismiss command status" }).click();
         await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommandCancel").length).toBe(1);
         const cancelFailure = "supervisor command failed: already submitted";
-        await hub.send(PELICAN, { Error: { client_ref: request.client_ref, message: cancelFailure } });
+        hub.send(PELICAN, { Error: { client_ref: request.client_ref, message: cancelFailure } });
         // The daemon's error payload must reach the row before counting polls.
         await expect(receipt.getByRole("paragraph")).toHaveText(cancelFailure);
         const statusReads = () => hub.frames.filter(frame => frame.kind === "SupervisorCommandStatus" && (frame.body as { client_ref: string }).client_ref === request.client_ref).length;
         const before = statusReads();
         await expect.poll(statusReads).toBeGreaterThan(before);
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "submitted", detail: "Command submitted; harness execution is not confirmed yet.", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "submitted", detail: "Command submitted; harness execution is not confirmed yet.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "submitted");
-        await hub.send(PELICAN, { OperatorReply: { notification_id: 88001, reply_to: null, message: "Handoff saved and background monitor stopped.", summary: "Finish reply", device_id: "journey-device", kind: "answer", session: PELICAN } });
+        hub.send(PELICAN, { OperatorReply: { notification_id: 88001, reply_to: null, message: "Handoff saved and background monitor stopped.", summary: "Finish reply", device_id: "journey-device", kind: "answer", session: PELICAN } });
         await expect(conversationLog(page)).toContainText("Handoff saved and background monitor stopped.");
-        await hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "observed", detail: "The harness completed the Finish request. Review its reply for the wrap-up result; this does not imply the session exited.", output: "", interactive: false } } });
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "finish", phase: "observed", detail: "The harness completed the Finish request. Review its reply for the wrap-up result; this does not imply the session exited.", output: "", interactive: false } } });
         await expect(toast(page, "The harness completed the Finish request.")).toBeVisible();
         await expect(receipt).toHaveCount(0);
         expect(mutations()).toHaveLength(3);
@@ -602,7 +602,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       await journey.stage("Remove the stopped session after Exit without claiming an unobserved command result", async () => {
         const request = mutations()[3].body as { client_ref: string };
         const receipt = commandReceipts(page).filter({ hasText: "/exit" });
-        await hub.send(PELICAN, { Error: { client_ref: request.client_ref, message: "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again." } });
+        hub.send(PELICAN, { Error: { client_ref: request.client_ref, message: "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again." } });
         await expect(receipt).toHaveAttribute("data-phase", "unconfirmed");
         const session = machine.sessions[0]!;
         const endedAt = journeyStamp();

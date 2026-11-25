@@ -93,7 +93,7 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
         for (const upload of uploads.values()) expect(message.text).toContain(upload.path);
         expect(attempts[0]).toBe(attempts[1]);
         sentText = message.text;
-        queued = await hub.deliverLatest(PELICAN);
+        queued = hub.deliverLatest(PELICAN);
         await expect(uploadStrip(page)).toBeHidden();
         await expect(messageStatus(page)).toBeHidden();
         await expect(field).toHaveValue("");
@@ -164,7 +164,7 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
         const sent = fileCard(page, "screenshot.png");
         await expect(sent.getByRole("status", { name: "Preview status", exact: true })).toBeVisible();
         await expect(sent.getByTestId("rich-media")).toBeHidden();
-        await hub.supervisorSays(PELICAN, "This screenshot is unavailable too.", { attachments: [{ artifact_id: "art-failed-preview", name: "Unavailable.png", mime: "image/png", size_bytes: 2048, sha256: "9f".repeat(32) }] });
+        hub.supervisorSays(PELICAN, "This screenshot is unavailable too.", { attachments: [{ artifact_id: "art-failed-preview", name: "Unavailable.png", mime: "image/png", size_bytes: 2048, sha256: "9f".repeat(32) }] });
         const received = fileCard(page, "Unavailable.png");
         await expect(received.getByRole("status", { name: "Preview status", exact: true })).toBeVisible();
         await expect(received.getByTestId("rich-media")).toBeHidden();
@@ -233,7 +233,7 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
             await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/upload-saving-${width}-${colorScheme}.png` });
             releaseSaving();
             expect((await next).text).toContain("art-slow-photo/slow-photo.png");
-            await hub.deliverLatest(PELICAN);
+            hub.deliverLatest(PELICAN);
             await expect(uploadStrip(page)).toBeHidden();
             await expect(page.getByRole("log").getByTestId("conversation-turn").filter({ hasText: "slow-photo.png" }).getByTestId("conversation-delivered")).toHaveText("Delivered");
             expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

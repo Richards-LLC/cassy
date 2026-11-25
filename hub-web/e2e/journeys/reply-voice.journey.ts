@@ -87,7 +87,7 @@ test("HUB-J6 reply by voice", async ({ page, journey }) => {
     const sent = hub.nextSend();
     await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
     expect((await sent).text).toBe("Hold the release until the Mac build is green👍🏽.");
-    await hub.answerLatest(PELICAN, "Holding. I will ping you when the Mac lane is green.");
+    hub.answerLatest(PELICAN, "Holding. I will ping you when the Mac lane is green.");
     await expect(page.getByRole("log").getByText("Holding. I will ping you when the Mac lane is green.")).toBeVisible();
   });
 });

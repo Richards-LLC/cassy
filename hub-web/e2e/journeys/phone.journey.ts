@@ -160,7 +160,7 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     const sent = hub.nextSend();
     await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).tap();
     expect((await sent).text).toBe("On my phone — go ahead with the cut.");
-    await hub.answerLatest(PELICAN, "Cutting now.");
+    hub.answerLatest(PELICAN, "Cutting now.");
     await expect(page.getByRole("log").getByText("Cutting now.")).toBeVisible();
   });
 
@@ -200,7 +200,8 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
   await journey.stage("Scroll back through a long thread", async () => {
     // "Jump to latest" takes its own row above the composer instead of
     // floating over a turn (cas-97ea).
-    for (let turn = 1; turn <= 14; turn += 1) await hub.supervisorSays(OTTER, `Build step ${turn} of 14 finished; moving on to the next one after checking its logs.`, { kind: "answer" });
+    await hub.socketOpen(OTTER);
+    for (let turn = 1; turn <= 14; turn += 1) hub.supervisorSays(OTTER, `Build step ${turn} of 14 finished; moving on to the next one after checking its logs.`, { kind: "answer" });
     const latest = page.getByRole("log").getByText("Build step 14 of 14 finished; moving on to the next one after checking its logs.");
     await expect(latest).toBeVisible();
     await thread(page).evaluate((element) => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll")); });
@@ -389,7 +390,7 @@ for (const { width, height } of SIDEWAYS) test.describe(`sideways with a notch $
       await conversationRow(page, "cas-src").click();
       await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
       await hub.socketOpen(PELICAN);
-      await hub.supervisorSays(PELICAN, "Fix the warning in-train, or ship allowlisted?", { kind: "ask", options: ["Fix in-train", "Ship allowlisted"] });
+      hub.supervisorSays(PELICAN, "Fix the warning in-train, or ship allowlisted?", { kind: "ask", options: ["Fix in-train", "Ship allowlisted"] });
       await expect(page.getByRole("region", { name: `Waiting on you: question from ${PELICAN}` })).toBeVisible();
       await page.getByRole("textbox", { name: "Your message" }).fill("Looking now");
       expect(await underTheBands(page, page.getByRole("main")), "the header, thread, Waiting-on-you strip, composer and Send clear both notches").toEqual([]);

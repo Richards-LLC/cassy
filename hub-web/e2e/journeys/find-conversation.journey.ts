@@ -316,7 +316,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(page.getByRole("button", { name: "‹ Conversations", exact: true })).toBeHidden();
     await conversationRow(page, "gabber-studio on ").click();
     await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
-    await hub.supervisorSays(PELICAN, "The staging deploy finished; nothing needs you yet.", { kind: "status" });
+    hub.supervisorSays(PELICAN, "The staging deploy finished; nothing needs you yet.", { kind: "status" });
     await expect(conversationRow(page, "cas-src on ").getByLabel("1 unread")).toBeVisible();
   });
 
@@ -548,7 +548,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const row = page.getByRole("button", { name: /Jump to cas-src/ });
     await expect(row).toBeFocused();
     // Any render while the row has focus must leave the palette alone.
-    await hub.supervisorSays(OTTER, "Still here.", { kind: "status" });
+    hub.supervisorSays(OTTER, "Still here.", { kind: "status" });
     await expect(conversationHeading(page).getByTitle(`${STUDIO.label} · ${OTTER}`, { exact: true })).toBeVisible();
     // The render the update causes has happened (cas-dff1: on the turn itself, not 300 ms).
     await expect(thread(page)).toContainText("Still here.");
@@ -606,7 +606,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect.poll(() => hub.hasSocket(OTTER)).toBe(true);
     await conversationRow(page, "cas-src on ").click();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
-    await hub.supervisorSays(OTTER, "The Mac tests are green.", { kind: "status" });
+    hub.supervisorSays(OTTER, "The Mac tests are green.", { kind: "status" });
     await expect(conversationRow(page, "gabber-studio on ").getByLabel("1 unread")).toBeVisible();
     await reopen();
     const current = paletteCurrent(page);

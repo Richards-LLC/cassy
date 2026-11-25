@@ -118,7 +118,7 @@ test("HUB-J23 recover unanswered history without hiding missing answers (cas-359
     await page.getByRole("textbox", { name: "Your message" }).fill("Read the missing history while you work");
     await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
     expect((await pending).text).toBe("Read the missing history while you work");
-    await hub.deliverLatest(PELICAN);
+    hub.deliverLatest(PELICAN);
     hub.pausedHistory.add(PELICAN);
     // Reconnect A requests the newest page while the cached thread stays readable.
     hub.drop(PELICAN);
@@ -127,12 +127,12 @@ test("HUB-J23 recover unanswered history without hiding missing answers (cas-359
     expect(newest.before).toBeUndefined();
     await page.getByRole("button", { name: "Load earlier", exact: true }).click();
     await expect.poll(() => hub.historyRequests.length).toBe(4);
-    await hub.send(PELICAN, { Output: { pane_id: "supervisor", data: [46] } });
+    hub.send(PELICAN, { Output: { pane_id: "supervisor", data: [46] } });
     await expect(page.getByRole("log").getByTestId("working")).toHaveCount(1);
     await page.clock.fastForward(15_000);
     await expectSettledHistoryFailure(page, failure);
     // A's late page hydrates, but B still owes the older answer (cas-bf2f).
-    await hub.send(PELICAN, { ConversationHistory: { request_id: newest.request_id, messages: [], replies: [reply(100)], has_earlier: true, next_before: 51 } });
+    hub.send(PELICAN, { ConversationHistory: { request_id: newest.request_id, messages: [], replies: [reply(100)], has_earlier: true, next_before: 51 } });
     await expect(failure).toBeVisible();
     await expect(recoveredTurn(page, 50)).toHaveCount(0);
     hub.pausedHistory.delete(PELICAN);

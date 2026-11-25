@@ -58,7 +58,7 @@ export async function phoneFind(page: Page, journey: Journey): Promise<void> {
   await journey.stage("A question arrives while reading another machine", async () => {
     await openConversation(page, "gabber-studio");
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000, message: "Phone find-conversation socket never opened before the supervisor question" }).toBe(true);
-    ask = await hub.supervisorSays(PELICAN, "Which lane should go first?", { kind: "ask", options: ["Linux first", "Mac first"] });
+    ask = hub.supervisorSays(PELICAN, "Which lane should go first?", { kind: "ask", options: ["Linux first", "Mac first"] });
     await showConversationList(page);
     await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).getByRole("img", { name: "Waiting for you", exact: true })).toBeVisible();
     await search.fill("cas-src");
@@ -106,9 +106,9 @@ export async function phoneReply(page: Page, journey: Journey): Promise<void> {
     const sent = hub.nextSend();
     await activate(page, page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }));
     expect(await sent).toMatchObject({ machine: "atlas", target: PELICAN, text: "Please verify the gate first." });
-    const queued = await hub.deliverLatest(PELICAN);
+    const queued = hub.deliverLatest(PELICAN);
     await expect(page.locator('.conversation-turn[data-state="delivered"]')).toBeVisible();
-    await hub.answerQueued(PELICAN, queued, "Verified. The gate is green.");
+    hub.answerQueued(PELICAN, queued, "Verified. The gate is green.");
     await expect(page.getByRole("log").getByText("Verified. The gate is green.")).toBeVisible();
     await expect(composer).toHaveValue("");
     await expect(page.locator('.conversation-turn[data-state="replied"]')).toHaveCount(1);
@@ -133,7 +133,7 @@ export async function phoneSwitch(page: Page, journey: Journey): Promise<void> {
     const sent = hub.nextSend();
     await activate(page, page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true }));
     expect(await sent).toMatchObject({ machine: "studio", target: OTTER, text: "Is the Mac build green?" });
-    await hub.answerLatest(OTTER, "The Mac build is green.");
+    hub.answerLatest(OTTER, "The Mac build is green.");
     await expect(page.getByRole("log").getByText("The Mac build is green.")).toBeVisible();
   });
   await journey.stage("Back to Atlas preserves its draft and reload preserves the phone route", async () => {
@@ -153,7 +153,7 @@ export async function phoneAsk(page: Page, journey: Journey): Promise<void> {
     await journey.open(); await openConversation(page, "cas-src");
     await page.getByRole("textbox", { name: "Your message" }).focus();
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000, message: "Phone answer-question socket never opened before the supervisor question" }).toBe(true);
-    ask = await hub.supervisorSays(PELICAN, "Fix the gate in this patch or send it back for review?", { kind: "ask", options: ["Fix the gate", "Send for review"] });
+    ask = hub.supervisorSays(PELICAN, "Fix the gate in this patch or send it back for review?", { kind: "ask", options: ["Fix the gate", "Send for review"] });
     await declaredChoice(page, "Fix the gate");
     await expect(page.getByRole("log")).toContainText("Fix the gate in this patch");
     await expect(page.getByRole("button", { name: "Send for review", exact: true }).filter({ visible: true })).toBeVisible();
@@ -165,7 +165,7 @@ export async function phoneAsk(page: Page, journey: Journey): Promise<void> {
     await expect(page.getByRole("log").locator('.obj.t-a[data-answered="true"]')).toContainText("Fix the gate");
     expect(hub.sends.filter(send => send.in_reply_to === ask)).toHaveLength(1);
     await expect(page.getByRole("button", { name: "Send for review", exact: true })).toHaveCount(0);
-    await hub.answerLatest(PELICAN, "Fixing the gate now.");
+    hub.answerLatest(PELICAN, "Fixing the gate now.");
     await expect(page.getByRole("log").getByText("Fixing the gate now.")).toBeVisible();
   });
   await journey.stage("Reload and keep the answered question quiet on the phone", async () => {
@@ -182,7 +182,7 @@ export async function phoneDark(page: Page, journey: Journey): Promise<void> {
   await journey.stage("Read a supervisor message, then use Back to reach Appearance on the phone", async () => {
     await journey.open(); await openConversation(page, "cas-src");
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000, message: "Phone dark-theme conversation socket never opened before the supervisor status message" }).toBe(true);
-    await hub.supervisorSays(PELICAN, "Status: the Linux lane is green; the Mac lane is still running.", { kind: "status" });
+    hub.supervisorSays(PELICAN, "Status: the Linux lane is green; the Mac lane is still running.", { kind: "status" });
     await expect(page.getByRole("log")).toContainText("Linux lane is green");
     await showConversationList(page);
     await activate(page, page.getByRole("button", { name: "Appearance & commands", exact: true }));

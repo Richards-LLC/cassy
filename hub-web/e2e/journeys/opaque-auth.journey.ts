@@ -58,7 +58,7 @@ test("HUB-J12 opaque authenticated requests recover without re-pairing (cas-b85a
     await page.getByRole("textbox", { name: "Your message" }).fill("After the browser block clears");
     await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
     expect((await accepted).text).toBe("After the browser block clears");
-    await hub.answerLatest(PELICAN, "The connection recovered.");
+    hub.answerLatest(PELICAN, "The connection recovered.");
     await expect.poll(async () => {
       await clock.advance(32); // drive the coalesced presentation with the protocol clock
       return page.getByRole("log").getByText("The connection recovered.", { exact: true }).isVisible();

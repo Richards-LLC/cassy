@@ -6394,8 +6394,6 @@ impl CasCore {
             let repo = &context.repo_root;
             let head = &input.commit_sha;
             let target = &input.target_branch;
-            let passing = crate::factory_worker_check::PassingTests::new(&self.cas_root, &worker_path, head)
-                .with_target(target).with_synced(&task.deliverables.test_receipts);
             let ranges = task_commit_identity_in_repo(repo, task, Some(head.clone())).ok()
                 .and_then(|identity| {
                     let history = agent_store.get_lease_history(&task.id, None).unwrap_or_default();
@@ -6404,8 +6402,10 @@ impl CasCore {
                 });
             if let Some(ranges) = ranges.filter(|ranges| !ranges.is_empty())
                 && let Some(paths) = task_attribution::paths_from_ranges(repo, ranges.iter().map(|(base, tip)| (base.as_str(), tip.as_str())))
-                && let Ok((tests, widened)) = receipt_scope::delivered_tests(&passing, &worker_path, head, target, &paths, Some(&ranges))
+                && let Ok((tests, widened)) = receipt_scope::delivered_tests(&self.cas_root, &worker_path, head, target, &paths, Some(&ranges))
             {
+                let passing = crate::factory_worker_check::PassingTests::new(&self.cas_root, &worker_path, head)
+                    .with_target(target).with_synced(&task.deliverables.test_receipts);
                 if let Some(refusal) = receipt_scope::red_first_refusal(task, &passing, head, &ranges, &tests, &widened) {
                     return Ok(Self::tool_error(gate_preflight::park_reply(vec![refusal])));
                 }

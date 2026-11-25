@@ -54,7 +54,6 @@ pub(super) fn test_file(path: &str) -> bool {
     let stem = Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
     [".test", ".spec", ".journey", ".integration"].iter().any(|suffix| stem.ends_with(suffix))
         || path.split('/').any(|part| matches!(part, "__tests__" | "tests" | "test" | "e2e"))
-        || node_test_file(path)
 }
 
 pub(crate) const NODE_RUNNER: &str = "node";
@@ -2943,7 +2942,6 @@ pub(super) mod tests {
             let args = ["node", "--test", "--whole-file", path].map(String::from);
             assert_eq!((node_test_file(path), test_match(path, Some(NODE_RUNNER)), invocation(&args).is_some()),
                 (accepts, accepts, accepts), "{path}");
-            if accepts { assert!(test_file(path), "{path}"); }
         }
     }
 

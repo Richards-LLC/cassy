@@ -291,9 +291,9 @@ pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, head: &str, tests: &[
         }
     }
     let mut commands: Vec<String> = known.into_iter().map(|((runner, config), files)| {
-        let runner = if runner == super::javascript::NODE_RUNNER { "node --test" } else { runner };
+        let runner = super::javascript::runner_words(runner).collect::<Vec<_>>().join(" ");
         let files = files.into_iter().collect::<Vec<_>>().join(" ");
-        command(runner, &match config {
+        command(&runner, &match config {
             Some(config) => format!("--config {config} {files}"),
             None => files,
         })

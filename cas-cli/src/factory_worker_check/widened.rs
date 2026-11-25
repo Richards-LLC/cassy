@@ -183,7 +183,8 @@ fn file_proves(passing: &PassingTests<'_>, runner: &str, spec: &str) -> bool {
     })
 }
 
-fn outstanding_consumers(passing: &PassingTests<'_>, helper: &str) -> Option<Vec<(&'static str, String)>> {
+fn outstanding_consumers(passing: &PassingTests<'_>, helper: &str, deployed: &std::cell::OnceCell<BTreeSet<String>>)
+    -> Option<Vec<(&'static str, String)>> {
     let consumers = javascript::related_specs(passing.repo, helper);
     if consumers.is_empty() { return None; }
     let packages = owners(passing.repo, helper);
@@ -194,7 +195,7 @@ fn outstanding_consumers(passing: &PassingTests<'_>, helper: &str) -> Option<Vec
                 || (runner != "playwright" && matches!(&proof.scope, Scope::Related(path) if path == helper)))
         }) { specs.clear(); }
         specs.retain(|spec| {
-            (runner != "playwright" || !passing.deployed_journeys().contains(spec))
+            (runner != "playwright" || !deployed.get_or_init(|| deployed_journey_specs(passing.cas_root, passing.repo, passing.head)).contains(spec))
                 && !file_proves(passing, runner, spec)
         });
         specs.into_iter().map(move |spec| (runner, spec))
@@ -209,9 +210,10 @@ pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &B
     // since it (cas-3080), so a documentation-only descendant keeps it.
     let proofs = || passing.records().iter().filter_map(|(_, _, test)| test.widened.as_ref());
     let recorded = |wanted: &Scope| proofs().any(|proof| &proof.scope == wanted);
+    let deployed = std::cell::OnceCell::new();
     scopes.iter().filter(|scope| {
         if let Scope::Related(helper) = scope
-            && let Some(consumers) = outstanding_consumers(passing, helper)
+            && let Some(consumers) = outstanding_consumers(passing, helper, &deployed)
         {
             return !consumers.is_empty();
         }
@@ -235,9 +237,10 @@ pub(crate) fn commands(passing: &PassingTests<'_>, paths: &[String], scopes: &[S
     covering: &BTreeMap<Scope, Covering>) -> Vec<String> {
     let (cas_root, repo) = (passing.cas_root, passing.repo);
     let command = |argv: Vec<String>| worker_check_command_line(cas_root, &argv);
+    let deployed = std::cell::OnceCell::new();
     let planned = scopes.iter().filter_map(|scope| {
         match scope {
-            Scope::Related(helper) => outstanding_consumers(passing, helper).map(|specs| (scope, specs)),
+            Scope::Related(helper) => outstanding_consumers(passing, helper, &deployed).map(|specs| (scope, specs)),
             _ => None,
         }
     }).collect::<BTreeMap<_, _>>();
@@ -268,9 +271,6 @@ pub(crate) fn commands(passing: &PassingTests<'_>, paths: &[String], scopes: &[S
         let path = paths.iter().filter(|path| javascript::javascript(path))
             .find(|path| &self::scope(repo, path) == scope).map(String::as_str)
             .or_else(|| if let Scope::File(path) = scope { Some(path.as_str()) } else { None });
-        if matches!(scope, Scope::Package(directory) if !repo.join(directory).join("package.json").is_file()) {
-            return Vec::new();
-        }
         let runners = |path| {
             javascript::runner_hint(repo, path)
                 .map(|runner| vec![runner]).unwrap_or_else(|| vec!["jest", "vitest", "playwright"])

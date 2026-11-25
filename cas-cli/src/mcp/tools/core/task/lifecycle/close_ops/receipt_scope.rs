@@ -147,7 +147,7 @@ pub(super) fn park_refusals(
 }
 
 pub(super) fn delivered_tests(
-    passing: &PassingTests<'_>,
+    cas_root: &Path,
     repo: &Path,
     head: &str,
     target: &str,
@@ -158,7 +158,7 @@ pub(super) fn delivered_tests(
     // GH #2362, #2380: a registered journey against a deployed host follows
     // its declared lane, so neither it nor a helper only such journeys
     // import owes a worker run here; a locally served journey stays owed.
-    let journeys = passing.deployed_journeys();
+    let journeys = widen::deployed_journey_specs(cas_root, repo, head);
     tests.retain(|test| !journeys.contains(&test.path));
     widened.retain(|scope| match scope {
         Scope::File(spec) => !journeys.contains(spec),
@@ -243,7 +243,7 @@ fn listed_park_refusals(
         .with_synced(&task.deliverables.test_receipts);
     if proof_repo.join(".git").exists() {
         let started = std::time::Instant::now();
-        let requirements = delivered_tests(&passing, proof_repo, head, target, changed_paths, delivery_ranges);
+        let requirements = delivered_tests(cas_root, proof_repo, head, target, changed_paths, delivery_ranges);
         tracing::info!(task_id = %task.id, gate = "G-61", phase = "changed_test_discovery", head,
             elapsed_ms = started.elapsed().as_millis() as u64, "Close gate phase");
         let (tests, widened) = match requirements {

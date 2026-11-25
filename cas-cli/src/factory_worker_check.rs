@@ -1350,7 +1350,6 @@ pub(crate) struct PassingTests<'a> {
     target: Option<&'a str>,
     synced: &'a [cas_types::PortableTestReceipt],
     records: std::sync::OnceLock<(Vec<(String, Option<String>, TestReceipt)>, Vec<Voided>)>,
-    deployed_journeys: std::sync::OnceLock<BTreeSet<String>>,
 }
 
 /// An earlier receipt the carry refused at this head: its tested head, the
@@ -1367,7 +1366,6 @@ impl<'a> PassingTests<'a> {
             target: None,
             synced: &[],
             records: std::sync::OnceLock::new(),
-            deployed_journeys: std::sync::OnceLock::new(),
         }
     }
 
@@ -1409,10 +1407,6 @@ impl<'a> PassingTests<'a> {
 
     fn records(&self) -> &[(String, Option<String>, TestReceipt)] {
         &self.classified().0
-    }
-
-    pub(crate) fn deployed_journeys(&self) -> &BTreeSet<String> {
-        self.deployed_journeys.get_or_init(|| widened::deployed_journey_specs(self.cas_root, self.repo, self.head))
     }
 
     /// Earlier receipts this head could not carry, with the reason (GH #2288).

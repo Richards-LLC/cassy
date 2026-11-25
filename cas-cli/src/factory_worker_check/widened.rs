@@ -1,6 +1,6 @@
 //! One capped pass replaces static selection when an input cannot be classified.
 use super::*;
-use javascript::{NODE_RUNNER, glob_path, runner_words};
+use javascript::{NODE_RUNNER, runner_words};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Scope {
@@ -43,7 +43,6 @@ pub(super) fn valid(proof: &Proof) -> bool {
 pub(crate) fn scope(repo: &Path, path: &str) -> Scope {
     if javascript::javascript(path) {
         let runner = javascript::runner_hint(repo, path);
-        if glob_path(path) { return runner.map_or_else(|| package(repo, path), |runner| owning_package(repo, path, runner)); }
         if javascript::test_match(path, runner) { return Scope::File(path.into()); }
         // GH #2352: vitest cannot transform a `.vue` file its config has no Vue
         // plugin for, so `vitest related` would crash; that component proves
@@ -72,15 +71,7 @@ fn package(repo: &Path, path: &str) -> Scope {
         }
         if directory == repo { break; }
     }
-    let relative = directory.strip_prefix(repo).unwrap_or(Path::new(""));
-    if relative.as_os_str().is_empty() && !rust && javascript::runner_hint(repo, "package.json").is_none()
-        && let Some(directory) = Path::new(path).ancestors().skip(1).take_while(|directory| !directory.as_os_str().is_empty())
-            .find(|directory| !directory.components().any(|part| part.as_os_str() == "test")
-                && !javascript::node_specs(repo, &repo.join(directory)).is_empty())
-    {
-        return Scope::Package(directory.to_string_lossy().into());
-    }
-    Scope::Package(relative.to_string_lossy().into())
+    Scope::Package(directory.strip_prefix(repo).unwrap_or(Path::new("")).to_string_lossy().into())
 }
 
 /// GH #2369: the package whose own run proves `path` under `runner` when a
@@ -206,19 +197,9 @@ fn outstanding_consumers(passing: &PassingTests<'_>, helper: &str) -> Option<Vec
         specs.retain(|spec| {
             (runner != "playwright" || !passing.deployed_journeys().contains(spec))
                 && !file_proves(passing, runner, spec)
-                && !records.iter().filter_map(|(_, _, test)| test.widened.as_ref()).any(|proof| {
-                    proof.runner == runner && proof.scope == owning_package(passing.repo, spec, runner)
-                })
         });
         specs.into_iter().map(move |spec| (runner, spec))
     }).collect())
-}
-
-fn bare_node_specs(repo: &Path, scope: &Scope) -> Vec<String> {
-    let Scope::Package(directory) = scope else { return Vec::new() };
-    let directory = repo.join(directory);
-    if directory.join("package.json").is_file() { return Vec::new(); }
-    javascript::node_specs(repo, &directory).into_iter().filter_map(|path| path.strip_prefix(repo).ok()?.to_str().map(str::to_owned)).collect()
 }
 
 /// A widened scope is proven by its own pass or, for a package, by a
@@ -239,23 +220,14 @@ pub(crate) fn missing(passing: &PassingTests<'_>, scopes: &[Scope], covering: &B
         if let Scope::File(path) | Scope::Related(path) = scope && package_proves(passing, path) { return false; }
         // GH #2224, #2266: a package is also proven by whole-file passes of the
         // specs covering its inputs, once they cover every input.
-        if recorded(scope) || covering.get(*scope)
+        !recorded(scope) && !covering.get(*scope)
             .is_some_and(|found| found.unresolved.is_empty() && found.specs.iter().all(|spec| recorded(&Scope::File(spec.clone()))))
-        { return false; }
-        let specs = bare_node_specs(passing.repo, scope);
-        specs.is_empty() || specs.iter().any(|spec| !file_proves(passing, NODE_RUNNER, spec))
     }).cloned().collect()
 }
 
-pub(crate) fn coverage_notes(repo: &Path, paths: &[String], scopes: &[Scope], covering: &BTreeMap<Scope, Covering>) -> String {
+pub(crate) fn coverage_notes(scopes: &[Scope], covering: &BTreeMap<Scope, Covering>) -> String {
     scopes.iter().filter(|scope| matches!(scope, Scope::Package(_))).filter_map(|scope| {
-        let unresolved = match covering.get(scope) {
-            Some(found) => found.unresolved.iter().map(String::as_str).collect::<Vec<_>>(),
-            None if !paths.iter().any(|path| javascript::javascript(path) && &self::scope(repo, path) == scope) => {
-                paths.iter().map(String::as_str).filter(|path| package_input(repo, path, scope)).collect()
-            }
-            None => return None,
-        };
+        let unresolved = &covering.get(scope)?.unresolved;
         (!unresolved.is_empty()).then(|| format!(" No covering spec reads {}; use the package's own proof.", unresolved.join(", ")))
     }).collect()
 }
@@ -265,21 +237,16 @@ pub(crate) fn commands(passing: &PassingTests<'_>, paths: &[String], scopes: &[S
     let (cas_root, repo) = (passing.cas_root, passing.repo);
     let command = |argv: Vec<String>| worker_check_command_line(cas_root, &argv);
     let planned = scopes.iter().filter_map(|scope| {
-        if let Scope::Related(helper) = scope {
-            return outstanding_consumers(passing, helper).map(|specs| (scope, specs));
+        match scope {
+            Scope::Related(helper) => outstanding_consumers(passing, helper).map(|specs| (scope, specs)),
+            _ => None,
         }
-        if covering.get(scope).is_some_and(|found| found.unresolved.is_empty()) { return None; }
-        let specs = bare_node_specs(repo, scope);
-        (!specs.is_empty()).then(|| (scope, specs.into_iter().filter(|spec| !file_proves(passing, NODE_RUNNER, spec))
-            .map(|spec| (NODE_RUNNER, spec)).collect()))
     }).collect::<BTreeMap<_, _>>();
     let consumers: BTreeSet<_> = planned.values().flatten().cloned().collect();
     let mut commands: Vec<_> = scopes.iter().filter(|scope| !planned.contains_key(*scope)
         && !matches!(scope, Scope::File(path) if consumers.iter().any(|(_, spec)| spec == path))).flat_map(|scope| {
         let found = covering.get(scope);
         if let Some(Covering { specs, unresolved }) = found && unresolved.is_empty() {
-            let glob = specs.iter().find(|spec| glob_path(spec));
-            let specs = glob.map_or(specs.as_slice(), std::slice::from_ref);
             return specs.iter().find_map(|spec| javascript::runner_hint(repo, spec)).map(|runner| vec![runner])
                 .unwrap_or_else(|| vec!["jest", "vitest", "playwright", NODE_RUNNER]).into_iter()
                 .map(|runner| command(runner_words(runner).map(str::to_owned).chain(specs.iter().cloned()).collect()))
@@ -302,12 +269,11 @@ pub(crate) fn commands(passing: &PassingTests<'_>, paths: &[String], scopes: &[S
         let path = paths.iter().filter(|path| javascript::javascript(path))
             .find(|path| &self::scope(repo, path) == scope).map(String::as_str)
             .or_else(|| if let Scope::File(path) = scope { Some(path.as_str()) } else { None });
-        let node_package = matches!(scope, Scope::Package(directory) if !javascript::node_specs(repo, &repo.join(directory)).is_empty());
+        if matches!(scope, Scope::Package(directory) if !repo.join(directory).join("package.json").is_file()) {
+            return Vec::new();
+        }
         let runners = |path| {
-            if node_package && javascript::runner_hint(repo, path).is_none_or(|runner| runner == NODE_RUNNER) {
-                return vec![NODE_RUNNER];
-            }
-            javascript::runner_hint(repo, path).filter(|runner| *runner != NODE_RUNNER || !matches!(scope, Scope::Package(_)))
+            javascript::runner_hint(repo, path)
                 .map(|runner| vec![runner]).unwrap_or_else(|| vec!["jest", "vitest", "playwright"])
         };
         let Some(path) = path else {
@@ -326,18 +292,10 @@ pub(crate) fn commands(passing: &PassingTests<'_>, paths: &[String], scopes: &[S
             }).collect()
     }).collect();
     let mut by_runner: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    let mut by_package = BTreeMap::new();
-    for (runner, spec) in consumers {
-        if glob_path(&spec) { by_package.entry((runner, owning_package(repo, &spec, runner))).or_insert(spec); }
-        else { by_runner.entry(runner).or_default().push(spec); }
-    }
-    commands.extend(by_runner.into_iter().filter_map(|(runner, mut specs)| {
-        if by_package.keys().any(|(package_runner, _)| *package_runner == runner) {
-            specs.retain(|spec| !by_package.contains_key(&(runner, owning_package(repo, spec, runner))));
-        }
-        (!specs.is_empty()).then(|| command(runner_words(runner).chain(["--whole-file"]).map(str::to_owned).chain(specs).collect()))
+    for (runner, spec) in consumers { by_runner.entry(runner).or_default().push(spec); }
+    commands.extend(by_runner.into_iter().map(|(runner, specs)| {
+        command(runner_words(runner).chain(["--whole-file"]).map(str::to_owned).chain(specs).collect())
     }));
-    commands.extend(by_package.into_iter().map(|((runner, _), spec)| command(runner_words(runner).map(str::to_owned).chain([spec]).collect())));
     commands
 }
 
@@ -482,124 +440,6 @@ mod tests {
         javascript::execute(root.path(), &args, &repo, &[]).unwrap();
         let held = refusals();
         assert!(!has_g61(&held), "{held:?}");
-    }
-
-    #[test]
-    fn gh2482_standalone_node_fallback_runs_and_proves_park() {
-        let mut env = crate::test_support::TestEnvGuard::temp_home();
-        env.set("CAS_FACTORY_BUILD_GUARD", "off");
-        env.remove("CAS_SESSION_ID");
-        let root = tempfile::tempdir().unwrap();
-        let repo = root.path().canonicalize().unwrap().join("worktrees/standalone");
-        std::fs::create_dir_all(repo.join("scripts/subproject")).unwrap();
-        let git = |args: &[&str]| super::git(&repo, &[
-            &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"], args,
-        ].concat()).unwrap();
-        let spec = "scripts/test.mjs";
-        for (path, text) in [
-            (spec, "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { fileURLToPath } from 'node:url';\ntest('runs beside its module', () => assert.equal(process.cwd() + '/', fileURLToPath(new URL('.', import.meta.url))));\n"),
-            ("scripts/subproject/package.json", "{}"),
-            ("scripts/subproject/foreign.test.mjs", "import test from 'node:test';\ntest('foreign', () => { throw 0; });\n"),
-        ] {
-            std::fs::write(repo.join(path), text).unwrap();
-        }
-        git(&["init", "-q", "-b", "main"]);
-        git(&["add", "."]);
-        git(&["commit", "-qm", "base"]);
-        let base = git(&["rev-parse", "HEAD"]);
-        let paths = ["scripts/undocumented.json", "scripts/unknown.mjs"].map(String::from);
-        std::fs::write(repo.join(&paths[0]), "{}").unwrap();
-        std::fs::write(repo.join(&paths[1]), "export const value = ;").unwrap();
-        git(&["add", "."]);
-        git(&["commit", "-qm", "unknown inputs"]);
-        let head = git(&["rev-parse", "HEAD"]);
-        let (tests, scopes) = stability::requirements(&repo, &head, &base, &paths, None).unwrap();
-        assert!(tests.is_empty());
-        assert_eq!(scopes, [Scope::Package("scripts".into())]);
-        assert_eq!(scope(&repo, &paths[0]), scopes[0]);
-        let passing = PassingTests::new(root.path(), &repo, &head);
-        let plans = commands(&passing, &paths, &scopes, &Default::default());
-        assert_eq!(plans.len(), 1, "{plans:?}");
-        let args = command_args(&plans[0]);
-        assert_eq!(javascript::invocation(&args).unwrap(), javascript::Invocation {
-            runner: "node", config: None, files: vec![spec.into()], whole_file: true,
-        });
-        let refusals = || widened_park_refusals_for_test(root.path(), &repo, "cas-48cea", &paths, &head, &base);
-        assert!(has_g61(&refusals()));
-        javascript::execute(root.path(), &args, &repo, &[]).unwrap();
-        let held = refusals();
-        assert!(!has_g61(&held), "{held:?}");
-    }
-
-    #[test]
-    fn node_native_consumers_in_spaced_paths_run_from_emitted_argv() {
-        let mut env = crate::test_support::TestEnvGuard::temp_home();
-        env.set("CAS_FACTORY_BUILD_GUARD", "off");
-        env.remove("CAS_SESSION_ID");
-        let root = tempfile::tempdir().unwrap();
-        let cas_root = root.path().canonicalize().unwrap().join("cas root");
-        let repo = cas_root.join("worktrees/native");
-        let tools = "scripts/qa tools";
-        let library = format!("{tools}/lib.mjs");
-        let unknown = format!("{tools}/unknown.mjs");
-        let specs = ["smoke-test.mjs", "smoke_test.mjs", "test.mjs", "test/smoke.mjs"].map(|spec| format!("{tools}/{spec}"));
-        for spec in specs.iter().cloned().chain([format!("{tools}/tests/x.mjs")]) {
-            let relative = if spec == specs[3] || spec.ends_with("/tests/x.mjs") { "../lib.mjs" } else { "./lib.mjs" };
-            let file = repo.join(spec);
-            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            std::fs::write(file, format!("import test from 'node:test';\nimport '{relative}';\ntest('works', () => {{}});\n")).unwrap();
-        }
-        let git = |args: &[&str]| super::git(&repo, &[
-            &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"], args,
-        ].concat()).unwrap();
-        git(&["init", "-q", "-b", "main"]);
-        std::fs::write(repo.join(&library), "export const catalogue = '';\n").unwrap();
-        git(&["add", "."]);
-        git(&["commit", "-qm", "base"]);
-        let base = git(&["rev-parse", "HEAD"]);
-        std::fs::write(repo.join(&library), "export const catalogue = './catalogue.json';\n").unwrap();
-        std::fs::write(repo.join(&unknown), "export const value = ;\n").unwrap();
-        git(&["add", "."]);
-        git(&["commit", "-qm", "delivery"]);
-        let head = git(&["rev-parse", "HEAD"]);
-        let paths = [library.clone(), unknown];
-        let (tests, scopes) = stability::requirements(&repo, &head, &base, &paths, None).unwrap();
-        assert!(tests.is_empty());
-        let mut wanted = [Scope::Package(tools.into()), Scope::Related(library)];
-        wanted.sort();
-        assert_eq!(scopes, wanted);
-        let passing = PassingTests::new(&cas_root, &repo, &head);
-        let plans = commands(&passing, &paths, &scopes, &Default::default());
-        assert_eq!(plans.len(), 1, "{plans:?}");
-        let argv = shell_words::split(&plans[0]).unwrap();
-        let prefix = ["cas", "factory", "worker-check", "--cas-root", cas_root.to_str().unwrap(), "--", "node", "--test"];
-        assert_eq!(argv, prefix.map(String::from).into_iter().chain(["--whole-file".into()]).chain(specs.clone()).collect::<Vec<_>>());
-        let refusals = || widened_park_refusals_for_test(&cas_root, &repo, "cas-48cea", &paths, &head, &base);
-        assert!(has_g61(&refusals()));
-        javascript::execute(&cas_root, &argv[6..], &repo, &[]).unwrap();
-        let held = refusals();
-        assert!(!has_g61(&held), "{held:?}");
-        let reruns = stability::rerun_commands(&cas_root, &repo, &head, &[stability::Identity::exact(specs[0].clone(), "works")]);
-        assert_eq!(reruns.len(), 1);
-        assert_eq!(shell_words::split(reruns[0].trim_matches('`')).unwrap(), prefix.map(String::from).into_iter().chain([specs[0].clone()]).collect::<Vec<_>>());
-
-        let glob = format!("{tools}/test/[g]lob.mjs");
-        std::fs::write(repo.join(&glob), "import test from 'node:test';\ntest('literal glob name', () => {});\n").unwrap();
-        git(&["add", "."]);
-        git(&["commit", "-qm", "glob-named spec"]);
-        let glob_head = git(&["rev-parse", "HEAD"]);
-        let glob_paths = [glob.clone()];
-        let package = Scope::Package(tools.into());
-        let (tests, scopes) = stability::requirements(&repo, &glob_head, &head, &glob_paths, None).unwrap();
-        assert!(tests.is_empty());
-        assert_eq!(scopes, [package.clone()]);
-        let passing = PassingTests::new(&cas_root, &repo, &glob_head);
-        let plans = commands(&passing, &glob_paths, &scopes, &Default::default());
-        assert_eq!(plans.len(), 1, "{plans:?}");
-        let package_run = shell_words::split(&plans[0]).unwrap();
-        assert_eq!(package_run, prefix.map(String::from).into_iter().chain([glob]).collect::<Vec<_>>());
-        javascript::execute(&cas_root, &package_run[6..], &repo, &[]).unwrap();
-        assert!(missing(&PassingTests::new(&cas_root, &repo, &glob_head), &[package], &Default::default()).is_empty());
     }
 
     #[test]

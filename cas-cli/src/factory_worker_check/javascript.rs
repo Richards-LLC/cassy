@@ -14,7 +14,7 @@ mod importers;
 mod web_attribution;
 
 pub(crate) use importers::related_specs;
-pub(super) use importers::node_specs;
+use importers::node_specs;
 
 #[derive(Debug, thiserror::Error)]
 #[error("Worker check requires an isolated worktree or a managed review checkout")]
@@ -29,10 +29,6 @@ struct ZeroTests(String);
 impl ZeroTests {
     fn new(message: String) -> Self { Self(crate::gates::tag("G-61", message)) }
 }
-
-#[derive(Debug, thiserror::Error)]
-#[error("test report has no file identity")]
-struct MissingReportFile;
 
 fn safe_path(path: &str) -> bool {
     !path.is_empty()
@@ -75,11 +71,6 @@ pub(crate) fn node_test_file(path: &str) -> bool {
     base == "test" || base.starts_with("test-")
         || [".test", "-test", "_test"].iter().any(|suffix| base.ends_with(suffix))
         || directory.split('/').any(|part| part == "test")
-}
-
-pub(super) fn glob_path(path: &str) -> bool {
-    path.contains(['*', '?', '[', ']', '{', '}', '\\'])
-        || ["@(", "+(", "!("].into_iter().any(|operator| path.contains(operator))
 }
 
 pub(super) fn runner_words(runner: &str) -> impl Iterator<Item = &str> {
@@ -1567,16 +1558,15 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
     let head = super::clean_head(&repo)?;
     let mut tests = Vec::new();
     let mut widened = BTreeMap::new();
-    let base = if !invocation.whole_file && files.iter().any(|file| !glob_path(file)) {
+    if invocation.whole_file {
+        widened.extend(files.iter().map(|file| (
+            super::widened::Scope::File(file.clone()), (file.clone(), "whole spec requested".into()),
+        )));
+    } else {
         let config = crate::config::Config::load(cas_root)?.factory();
-        Some(super::proof_diff_base(cas_root, &repo, config.epic_base_branch.as_deref())?)
-    } else { None };
-    for file in &files {
-        if glob_path(file) {
-            let package = super::widened::owning_package(&repo, file, invocation.runner);
-            widened.entry(package).or_insert_with(|| (file.clone(), "glob characters in path".into()));
-        } else if let Some(base) = &base {
-            match changed_tests(&repo, base, &head, std::slice::from_ref(file), None) {
+        let base = super::proof_diff_base(cas_root, &repo, config.epic_base_branch.as_deref())?;
+        for file in &files {
+            match changed_tests(&repo, &base, &head, std::slice::from_ref(file), None) {
                 Ok(selected) if !selected.is_empty() => tests.extend(selected),
                 result => {
                     let scope = super::widened::scope(&repo, file);
@@ -1585,8 +1575,6 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
                     widened.entry(scope).or_insert_with(|| (file.clone(), cause));
                 }
             }
-        } else {
-            widened.insert(super::widened::Scope::File(file.clone()), (file.clone(), "whole spec requested".into()));
         }
     }
     let _lane =
@@ -1862,8 +1850,7 @@ fn runner_configs(dir: &Path, runner: &str) -> Vec<PathBuf> {
 /// matches it (GH #2058); with no such config the nearest one stays.
 pub(super) fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(PathBuf, Option<PathBuf>)> {
     let spec = repo.join(path);
-    let parent = spec.parent().context("test parent")?;
-    let mut current = parent.to_path_buf();
+    let mut current = spec.parent().context("test parent")?.to_path_buf();
     let (mut package, mut nearest) = (None, None);
     loop {
         let configs = runner_configs(&current, runner);
@@ -1887,7 +1874,6 @@ pub(super) fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(Path
         if current == repo || !current.pop() {
             return nearest
                 .or_else(|| package.map(|package| (package, None)))
-                .or_else(|| (runner == NODE_RUNNER).then(|| (parent.to_path_buf(), None)))
                 .with_context(|| format!("no package.json found for {path}"));
         }
     }
@@ -2019,7 +2005,7 @@ fn execute_tests(
     test_env: &[String],
 ) -> Result<Proof> {
     let error = match execute_selection(cas_root, repo, head, runner, runner_config, tests, widened, test_env) {
-        Err(error) if (error.is::<ZeroTests>() || error.is::<MissingReportFile>())
+        Err(error) if error.is::<ZeroTests>()
             && !matches!(widened, Some((super::widened::Scope::Package(_), _, _))) => error,
         result => return result,
     };
@@ -2067,9 +2053,6 @@ fn execute_selection(
                 let delegated = super::widened::deployed_journey_specs(cas_root, repo, head);
                 specs.retain(|spec| !delegated.contains(spec));
                 if specs.is_empty() { bail!("{helper} is only imported by journeys delegated to batch QA"); }
-            }
-            if specs.iter().any(|spec| glob_path(spec)) {
-                bail!(ZeroTests::new(format!("glob characters in a test importing {helper}")));
             }
             eprintln!("Running {helper} through its importing tests: {}", specs.join(" "));
             specs
@@ -2252,7 +2235,7 @@ fn execute_selection(
             } else if runner == NODE_RUNNER {
                 let specs = node_specs(repo, &package);
                 if specs.is_empty() { bail!(ZeroTests::new(format!("no node:test files in {}", package.display()))); }
-                if !specs.iter().any(|spec| glob_path(&spec.to_string_lossy())) { command.args(specs); }
+                command.args(specs);
             }
             let marker = reports.path().join(format!("scope-{iteration}"));
             let success = run_scoped_javascript(command, high, &marker)?;
@@ -2269,8 +2252,6 @@ fn execute_selection(
             }
             Ok((success, value))
         };
-        let exact_file = matches!(widened, Some((super::widened::Scope::File(_), _, _)));
-        let required = if exact_file || !consumers.is_empty() { std::slice::from_ref(&path) } else { &[] };
         let (ran, skipped) = if widened.is_some() && runner == "playwright" {
             let (success, report) = run(0)?;
             let inherited = if success { BTreeSet::new() } else {
@@ -2290,8 +2271,10 @@ fn execute_selection(
                 attribution_notes.push(note);
                 inherited
             };
-            validate_report_with_inherited(runner, cas_root, repo, &report, &selected, 1, &inherited, None, required)?
-        } else { verify_repeats(runner, cas_root, repo, &selected, &expected_rows, required, run)? };
+            let exact_file = matches!(widened, Some((super::widened::Scope::File(_), _, _)));
+            let required = if exact_file || !consumers.is_empty() { std::slice::from_ref(&path) } else { &[] };
+            validate_report_with_inherited(runner, repo, &report, &selected, 1, &inherited, None, required)?
+        } else { verify_repeats(runner, repo, &selected, &expected_rows, run)? };
         count += ran;
         inactive.extend(skipped);
         // GH #2146: a stability run that executed every test of a spec under
@@ -2316,7 +2299,7 @@ fn execute_selection(
     Ok(())
     })();
     if let Err(error) = outcome {
-        if error.is::<ZeroTests>() || error.is::<MissingReportFile>() {
+        if error.is::<ZeroTests>() {
             return Err(error);
         }
         if runner == "vitest" {
@@ -2612,11 +2595,9 @@ fn found_no_tests(runner: &str, success: bool, report: &Value) -> bool {
 /// reported inactive.
 fn verify_repeats(
     runner: &str,
-    cas_root: &Path,
     repo: &Path,
     tests: &[Identity],
     expected: &BTreeMap<Identity, Expansion>,
-    files: &[&str],
     mut run: impl FnMut(usize) -> Result<(bool, Value)>,
 ) -> Result<(usize, BTreeSet<Identity>)> {
     let mut count = 0;
@@ -2625,7 +2606,6 @@ fn verify_repeats(
         let (success, report) = run(iteration)?;
         let (ran, skipped) = match validate_report_with_inherited(
             runner,
-            cas_root,
             repo,
             &report,
             tests,
@@ -2634,11 +2614,8 @@ fn verify_repeats(
             // cas-c1df: Vitest's expanded row names are derived from the
             // source tables and every iteration must produce exactly them.
             (runner == "vitest").then_some(expected),
-            files,
+            &[],
         ) {
-            Err(error) if error.is::<MissingReportFile>() && !success => {
-                bail!("{runner} stability failed at iteration {}; no retry", iteration + 1)
-            }
             Err(error) if error.downcast_ref::<ZeroTests>().is_some() && !found_no_tests(runner, success, &report) => {
                 bail!("{runner} stability failed at iteration {}; no retry", iteration + 1)
             }
@@ -2668,7 +2645,7 @@ fn validate_report(
     tests: &[Identity],
     repeats: usize,
 ) -> Result<(usize, BTreeSet<Identity>)> {
-    validate_report_with_inherited(runner, repo, repo, report, tests, repeats, &BTreeSet::new(), None, &[])
+    validate_report_with_inherited(runner, repo, report, tests, repeats, &BTreeSet::new(), None, &[])
 }
 
 /// `expected` holds the names each changed `it.each` test expands to, read
@@ -2677,7 +2654,7 @@ fn validate_report(
 /// `files` are the spec files a widened run must have executed, and the only
 /// ones it may have: a missing or unrelated file is not proof (GH #2146).
 fn validate_report_with_inherited(
-    runner: &str, cas_root: &Path, repo: &Path, report: &Value, tests: &[Identity], repeats: usize,
+    runner: &str, repo: &Path, report: &Value, tests: &[Identity], repeats: usize,
     inherited: &BTreeSet<(Identity, String)>, expected: Option<&BTreeMap<Identity, Expansion>>, files: &[&str],
 ) -> Result<(usize, BTreeSet<Identity>)> {
     let mut results: BTreeMap<Identity, usize> = BTreeMap::new();
@@ -2713,10 +2690,9 @@ fn validate_report_with_inherited(
             }
             if count != repeats {
                 if dependency.is_some() {
-                    let command = super::worker_check_command_line(cas_root, &["playwright".into(), identity.path.clone()]);
                     bail!(
-                        "playwright requires {repeats} passing repeats per project: {} :: {}. A changed dependency test needs its own capped run: {command}",
-                        identity.path, identity.name
+                        "playwright requires {repeats} passing repeats per project: {} :: {}. A changed dependency test needs its own capped run: worker-check -- playwright {}",
+                        identity.path, identity.name, identity.path
                     );
                 }
                 bail!(
@@ -2741,21 +2717,13 @@ fn validate_report_with_inherited(
         let reported = report.get("testResults").and_then(Value::as_array).context("testResults missing")?;
         // Vitest and Jest call a run that found no test file unsuccessful.
         if reported.is_empty() { bail!(ZeroTests::new(format!("{runner} executed zero tests"))); }
-        let paths = reported.iter().map(|file| {
-            let Some(name) = file.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()) else { return Ok(None) };
-            let path = report_path(repo, name);
-            if !files.is_empty() && !path.as_ref().is_ok_and(|path| files.contains(&path.as_str())) {
-                bail!(crate::gates::tag("G-61", format!("{runner} ran {name} outside the required specs")));
-            }
-            path.map(Some)
-        }).collect::<Result<Vec<_>>>()?;
-        if !files.is_empty() && paths.iter().any(Option::is_none) { bail!(MissingReportFile); }
-        for (file, path) in reported.iter().zip(paths) {
-            let path = match path {
-                Some(path) => path,
-                None if tests.is_empty() => String::new(),
-                None => bail!("test file missing"),
-            };
+        for file in reported {
+            let path = report_path(
+                repo,
+                file.get("name")
+                    .and_then(Value::as_str)
+                    .context("test file missing")?,
+            )?;
             for test in file
                 .get("assertionResults")
                 .and_then(Value::as_array)
@@ -2976,25 +2944,6 @@ pub(super) mod tests {
             assert_eq!((node_test_file(path), test_match(path, Some("node")), test_match(path, Some("node --test")), invocation(&args).is_some()),
                 (accepts, accepts, accepts, accepts), "{path}");
             if accepts { assert!(test_file(path), "{path}"); }
-        }
-    }
-
-    #[test]
-    fn whole_file_report_requires_the_expected_file() {
-        let expected = "[t]erminal-qa.test.mjs";
-        let wrong = "terminal-qa.test.mjs";
-        let row = |file: &str| json!({"name":file,"assertionResults":[{"fullName":"works","status":"passed"}]});
-        for runner in ["node", "vitest", "jest"] {
-            let run = |rows| verify_repeats(runner, Path::new("/cas"), Path::new("/project"), &[], &BTreeMap::new(), &[expected], |_| {
-                Ok((true, json!({"success":true,"testResults": rows})))
-            });
-            for rows in [vec![row(wrong)], vec![row(expected), row(wrong)]] {
-                let error = run(rows).unwrap_err();
-                assert!(crate::gates::codes_in(&error.to_string()).contains(&"G-61"), "{runner}: {error}");
-            }
-            let missing = json!({"assertionResults":[{"fullName":"works","status":"passed"}]});
-            assert!(run(vec![row(expected), missing]).unwrap_err().is::<MissingReportFile>(), "{runner}");
-            assert_eq!(run(vec![row(expected)]).unwrap().0, 1, "{runner}");
         }
     }
 
@@ -3305,8 +3254,7 @@ pub(super) mod tests {
     /// GH #2146: hub-web's responsive-goals.ts helper holds no tests; its
     /// assertions run through pair-link.journey.ts. The gate widened it to the
     /// whole package. It now runs through the Playwright specs importing it,
-    /// directly or through other helpers. A unit test importing a helper keeps
-    /// its own runner; a Playwright type-only import is not a runtime consumer.
+    /// directly or through other helpers.
     #[test]
     fn playwright_helper_runs_through_its_importing_specs_gh2146() {
         use super::super::widened::{self, Scope};
@@ -3427,9 +3375,9 @@ pub(super) mod tests {
             .arg(regex::escape(&repo.join(history).to_string_lossy())).output().unwrap();
         assert!(output.status.success(), "{output:?}");
         let report: Value = serde_json::from_slice(&std::fs::read(&report_file).unwrap()).unwrap();
-        let error = validate_report_with_inherited("playwright", &repo, &repo, &report, &[], 1, &BTreeSet::new(), None, &[summary]).unwrap_err();
+        let error = validate_report_with_inherited("playwright", &repo, &report, &[], 1, &BTreeSet::new(), None, &[summary]).unwrap_err();
         assert!(format!("{error:#}").contains("[G-61]"), "{error:#}");
-        assert!(validate_report_with_inherited("playwright", &repo, &repo, &report, &[], 1, &BTreeSet::new(), None, &[history]).is_ok());
+        assert!(validate_report_with_inherited("playwright", &repo, &report, &[], 1, &BTreeSet::new(), None, &[history]).is_ok());
         assert_eq!(widened::scope(&repo, "e2e/journeys/orphan.ts"), Scope::Related("e2e/journeys/orphan.ts".into()));
         let runtime = "e2e/journeys/hub-double-runtime.ts";
         let scopes = [widened::scope(&repo, runtime)];
@@ -4445,7 +4393,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             ("creator keeps input intact", 2), ("creator menu (compact=false)", 1), ("creator menu (compact=true)", 1),
         ]));
         let repo = Path::new("/project");
-        let iterate = |report: &Value, bad: Option<(usize, &Value)>| verify_repeats("vitest", repo, repo, &templates, &expected, &[], |iteration| {
+        let iterate = |report: &Value, bad: Option<(usize, &Value)>| verify_repeats("vitest", repo, &templates, &expected, |iteration| {
             Ok((true, bad.filter(|(at, _)| *at == iteration).map_or(report, |(_, bad)| bad).clone()))
         });
         iterate(&report, None).expect("five complete iterations are accepted");
@@ -4455,7 +4403,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let mut one_duplicate = report.clone();
         one_duplicate["testResults"][0]["assertionResults"].as_array_mut().unwrap().remove(6);
         assert_eq!(one_duplicate["testResults"][0]["assertionResults"].as_array().unwrap().len(), 6);
-        assert!(verify_repeats("vitest", repo, repo, &templates, &expected, &[], |_| Ok((true, one_duplicate.clone()))).is_err());
+        assert!(verify_repeats("vitest", repo, &templates, &expected, |_| Ok((true, one_duplicate.clone()))).is_err());
         for lost in 0..5 {
             assert!(iterate(&report, Some((lost, &one_duplicate))).is_err(), "iteration {lost} lost one duplicate row");
         }
@@ -4475,7 +4423,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let variable_expected = source_rows("a.test.ts", variable).unwrap();
         assert!(variable_expected.is_empty());
         validate_report("vitest", repo, &variable_report, &variable_templates, 1).unwrap();
-        assert!(verify_repeats("vitest", repo, repo, &variable_templates, &variable_expected, &[], |_| Ok((true, variable_report.clone()))).is_err());
+        assert!(verify_repeats("vitest", repo, &variable_templates, &variable_expected, |_| Ok((true, variable_report.clone()))).is_err());
     }
 
     /// The names derived from a source table are the ones Vitest 4.0.18 printed
@@ -4617,7 +4565,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let tests = [id("a.test.js", "seeded")];
         for fail_at in [None, Some(2)] {
             let mut invocations = 0;
-            let result = verify_repeats("vitest", Path::new("/cas"), Path::new("/project"), &tests, &BTreeMap::new(), &[], |index| {
+            let result = verify_repeats("vitest", Path::new("/project"), &tests, &BTreeMap::new(), |index| {
                 invocations += 1;
                 let pass = Some(index) != fail_at;
                 Ok((

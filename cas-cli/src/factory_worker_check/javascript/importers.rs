@@ -5,7 +5,6 @@ use std::sync::LazyLock;
 
 const EXTENSIONS: [&str; 8] = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
 
-/// Named consumers in the source's package, grouped by their actual runner.
 pub(crate) fn related_specs(repo: &Path, path: &str) -> BTreeMap<&'static str, Vec<String>> {
     let target = normalize(&repo.join(path));
     let mut package = target.clone();
@@ -35,7 +34,7 @@ fn cached_graph(repo: &Path, package: &Path) -> std::rc::Rc<Graph> {
     graph
 }
 
-pub(in crate::factory_worker_check) fn node_specs(repo: &Path, directory: &Path) -> Vec<PathBuf> {
+pub(super) fn node_specs(repo: &Path, directory: &Path) -> Vec<PathBuf> {
     let graph = cached_graph(repo, directory);
     let mut specs = graph.reached(graph.node.iter().cloned().collect());
     specs.extend(graph.node.iter().cloned());

@@ -240,10 +240,6 @@ pub(crate) fn requirements(repo: &Path, head: &str, target: &str, paths: &[Strin
     // source it was built from keeps its own.
     for path in paths.iter().filter(|path| (path.ends_with(".rs") || super::javascript::javascript(path))
         && !super::append_only_or_generated(path)) {
-        if super::javascript::javascript(path) && super::javascript::glob_path(path) {
-            widened.insert(super::widened::scope(repo, path));
-            continue;
-        }
         match required_with_discovery(repo, head, target, std::slice::from_ref(path), ranges, &mut discovery) {
             Ok(selected) => tests.extend(selected),
             Err(error) => {
@@ -258,7 +254,7 @@ pub(crate) fn requirements(repo: &Path, head: &str, target: &str, paths: &[Strin
     // importing it, though those specs have no changed line.
     for data in paths.iter().filter(|path| path.ends_with(".json")) {
         for spec in super::javascript::catalogue_specs(repo, head, data)? {
-            widened.insert(if super::javascript::glob_path(&spec) { super::widened::scope(repo, &spec) } else { super::widened::Scope::File(spec) });
+            widened.insert(super::widened::Scope::File(spec));
         }
     }
     Ok((tests.into_iter().collect(), widened.into_iter().collect()))
@@ -267,7 +263,8 @@ pub(crate) fn requirements(repo: &Path, head: &str, target: &str, paths: &[Strin
 /// The command that proves these changed tests, one per runner (cas-1468).
 /// A file whose runner is unknown gets each valid form as its own command.
 pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, head: &str, tests: &[Identity]) -> Vec<String> {
-    let command = |args: &[String]| format!("`{}`", super::worker_check_command_line(cas_root, args));
+    let command = |runner: &str, files: &str| format!(
+        "`cas factory worker-check --cas-root {} -- {runner} {files}`", cas_root.display());
     // Files group by runner and by the config that lists them: Jest (GH #2058),
     // or a Playwright config other than the default (GH #2195).
     let mut known: BTreeMap<(&str, Option<String>), BTreeSet<&str>> = BTreeMap::new();
@@ -294,28 +291,28 @@ pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, head: &str, tests: &[
         }
     }
     let mut commands: Vec<String> = known.into_iter().map(|((runner, config), files)| {
-        let args = super::javascript::runner_words(runner).map(str::to_owned)
-            .chain(config.into_iter().flat_map(|config| ["--config".into(), config]))
-            .chain(files.into_iter().map(str::to_owned)).collect::<Vec<_>>();
-        command(&args)
+        let runner = if runner == super::javascript::NODE_RUNNER { "node --test" } else { runner };
+        let files = files.into_iter().collect::<Vec<_>>().join(" ");
+        command(runner, &match config {
+            Some(config) => format!("--config {config} {files}"),
+            None => files,
+        })
     }).collect();
     commands.extend(unknown.into_iter().map(|file| format!(
         "no runner config, dependency or local executable identifies {file}; run the one it uses: {}",
-        ["jest", "vitest", "playwright"].map(|runner| command(&[runner.into(), file.into()])).join(" or "),
+        ["jest", "vitest", "playwright"].map(|runner| command(runner, file)).join(" or "),
     )));
     commands.extend(named.into_iter().map(|((package, harness), names)| {
+        let target = harness.map_or("--lib".to_owned(), |harness| format!("--test {harness}"));
         let filter = names.into_iter().map(|name| format!("test(={name})")).collect::<Vec<_>>().join(" | ");
-        let args = ["nextest", "run", "-p", &package].map(str::to_owned).into_iter()
-            .chain(if let Some(harness) = harness { vec!["--test".into(), harness] } else { vec!["--lib".into()] })
-            .chain(["-E".into(), filter]).collect::<Vec<_>>();
-        let cargo = super::shell_command(&std::iter::once("cargo").chain(args.iter().map(String::as_str)).collect::<Vec<_>>());
         // cas-e751: outside the worker hook the capped runner needs --cas-root.
-        format!("`{cargo}` (the worker hook caps it; elsewhere {})", command(&args))
+        format!("`cargo nextest run -p {package} {target} -E '{filter}'` (the worker hook caps it; elsewhere {})",
+            command(&format!("nextest run -p {package} {target} -E"), &format!("'{filter}'")))
     }));
     if rust {
         // cas-e751: outside the worker hook the capped runner needs --cas-root.
-        let capped = super::worker_check_command_line(cas_root, &[]);
-        commands.push(format!("`cargo nextest run -p <crate> --lib -E 'test(<name>)'` (the worker hook caps it; elsewhere `{capped} nextest run -p <crate> --lib -E 'test(<name>)'`)"));
+        commands.push(format!("`cargo nextest run -p <crate> --lib -E 'test(<name>)'` (the worker hook caps it; elsewhere {})",
+            command("nextest run -p <crate> --lib -E", "'test(<name>)'")));
     }
     commands
 }

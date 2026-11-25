@@ -304,7 +304,7 @@ fn listed_park_refusals(
         let covering = widen::covering(proof_repo, head, &present, &widened);
         let missing = widen::missing(&passing, &widened, &covering);
         if !missing.is_empty() {
-            let notes = widen::coverage_notes(proof_repo, &present, &missing, &covering);
+            let notes = widen::coverage_notes(&missing, &covering);
             // Classification is uncertain, but the broader capped receipt is
             // proven missing. Park reads proof; it never starts a test process.
             refusals.push(crate::gates::tag("G-61", format!(

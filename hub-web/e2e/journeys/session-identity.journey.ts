@@ -4,6 +4,7 @@ import { journeyDay, journeyNow, journeyStamp } from "./clock";
 import { SCOPES, type Machine } from "./hub-double";
 import { showConversationList } from "./responsive-goals";
 import type { Locator, Page } from "@playwright/test";
+import { HEARTBEAT_INTERVAL_MS } from "../../src/connection-state";
 
 const conversationList = (page: Page) => page.getByRole("navigation", { name: "Choose a supervisor" });
 // A row is named "<project> on <machine>, …"; the row's own controls are not.
@@ -247,6 +248,7 @@ test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journ
   const firstMinute = Math.floor(journeyNow() / 60_000) * 60_000 - 240_000;
   for (const sibling of machine.sessions) sibling.last_activity_at = new Date(firstMinute).toISOString();
   const hub = await journey.hub({ machines: [machine], paired: ["atlas"] });
+  const refreshCatalog = () => Promise.all([hub.announceCatalog("atlas"), page.clock.fastForward(HEARTBEAT_INTERVAL_MS)]);
   await journey.open();
   await showConversationList(page);
   const rows = projectRows(page, "gabber-studio");
@@ -265,7 +267,7 @@ test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journ
     const minute = firstMinute + index * 120_000;
     for (const sibling of machine.sessions) sibling.last_activity_at = new Date(minute + 1_000).toISOString();
     machine.sessions[1]!.last_activity = `supervisor → ready-${width}`;
-    await hub.announceCatalog("atlas");
+    await refreshCatalog();
     await expect(row("calm-puma-34")).toHaveAccessibleName(new RegExp(`ready-${width}`));
     await journey.stage(`Alternating activity holds the badge at ${width}px`, async () => {
       const before = await rects();
@@ -284,7 +286,7 @@ test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journ
         const sibling = machine.sessions[frame % 2]!;
         sibling.last_activity_at = new Date(minute + 10_000 + frame * 400).toISOString();
         sibling.last_activity = `supervisor → frame-${width}-${frame}`;
-        await hub.announceCatalog("atlas");
+        await refreshCatalog();
         await expect(row(sibling.supervisor!)).toHaveAccessibleName(new RegExp(`frame-${width}-${frame}`));
       }
       const changes = await page.evaluate(() => {
@@ -305,7 +307,7 @@ test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journ
     const before = await rects();
     if (capture) await page.screenshot({ path: `${capture}/initial-${width}.png` });
     next.last_activity_at = new Date(minute + 60_000).toISOString();
-    await hub.announceCatalog("atlas");
+    await refreshCatalog();
     await expect(nextRow).toHaveAttribute("data-most-recent", "true");
     if (capture) await page.screenshot({ path: `${capture}/moved-${width}.png` });
     await journey.stage(`Recency moves, every row stays in place at ${width}px`, async () => {

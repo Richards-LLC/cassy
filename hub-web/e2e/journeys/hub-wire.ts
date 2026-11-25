@@ -11,6 +11,6 @@ export const hubWireValidator = addFormats(new Ajv2020({
 export function assertHubWire(schema: keyof typeof schemas, payload: unknown): void {
   const id = `urn:cassy:hub:${schema}`;
   const validate = hubWireValidator.getSchema(id);
-  if (!validate) throw new Error(`Unknown hub wire schema: ${id}`);
-  if (!validate(payload)) throw new Error(`${id}: ${hubWireValidator.errorsText(validate.errors)}`);
+  if (!validate) throw Object.assign(new Error(`Unknown hub wire schema: ${id}`), { schemaId: id });
+  if (!validate(payload)) throw Object.assign(new Error(`${id}: ${hubWireValidator.errorsText(validate.errors)}`), { schemaId: id });
 }

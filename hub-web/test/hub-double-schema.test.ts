@@ -132,7 +132,9 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   multiplex.send({ channel: "pty:running", subscribe: true });
   const scripted = { device_id: "journey-device", client_ref: "scripted", command: "finish", phase: "observed", detail: "", output: "", interactive: false };
   double.send("running", { SupervisorCommandReceipt: { receipt: scripted } });
-  expect(() => double.send("running", { SupervisorCommandReceipt: { receipt: { ...scripted, client_ref: null } } })).toThrow("urn:cassy:hub:SupervisorCommandReceipt");
+  expect(() => double.send("running", { SupervisorCommandReceipt: { receipt: { ...scripted, client_ref: null } } })).toThrow(
+    expect.objectContaining({ schemaId: "urn:cassy:hub:SupervisorCommandReceipt" }),
+  );
   expect(multiplex.frames).toHaveLength(3);
   expect(multiplex.frames.slice(1).map(frame => frame.channel)).toEqual(["pty:running", "pty:running"]);
   check("DaemonWelcome", multiplex.frames[1]?.message);

@@ -75,7 +75,7 @@ model = "gpt-6.1-sol"
 default_effort = "high"
 allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
 status = "active"
-reason = "Deprecated upstream; no lane routes to it. Stays active so the stock default and explicit gpt-6.1-sol spawns keep working."
+reason = "Deprecated upstream; stays active for verifier fallback, the stock default, and explicit gpt-6.1-sol spawns."
 required_capability = "codex-account"
 
 [recipes.codex_sol_6]
@@ -212,6 +212,10 @@ fallbacks = ["codex_luna_6", "claude_opus_5_5_low"]
 [lanes.standard]
 candidates = ["codex_sol_6_2"]
 fallbacks = ["codex_sol_6_2_high", "claude_sonnet_5_5_high"]
+
+[lanes.verifier]
+candidates = ["claude_sonnet_5_5_high"]
+fallbacks = ["codex_sol_6_1"]
 
 [lanes.taste]
 candidates = ["claude_fable_5_2_high"]

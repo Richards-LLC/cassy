@@ -141,54 +141,47 @@ fn launch_account(cli: cas_mux::SupervisorCli, root: &Path) -> Result<Option<Str
     ))
 }
 
-fn verifier_route() -> Result<cas_factory::RoutingDecision, cas_factory::RoutingError> {
-    cas_factory::resolve_lane("standard", &cas_factory::CapabilitySnapshot::default())
-}
-
-/// The verifier command, plus a notice when it fell back to Claude.
+/// The verifier command, plus a notice when it used the fallback route.
 fn command(root: &Path, output: &Path) -> Result<(Command, Option<String>), String> {
-    let route = verifier_route().map_err(|e| e.to_string())?;
-    let mut cli = route.spec.cli;
-    let mut model = route.spec.model.ok_or("verifier route has no model")?;
-    let mut effort = route.spec.effort.ok_or("verifier route has no effort")?;
-    // A daemon may have no provider account selector, even when the host has
-    // authenticated named accounts. Choose the account spawn_workers would
-    // (cas-c386), then use the checked launch environment supervisors use,
-    // rather than inheriting the daemon's default home. With no eligible
-    // Codex home, the same verifier runs on an eligible Claude account
-    // (cas-bdde); only when neither has one is the supervisor asked.
-    let mut notice = None;
-    let account = match launch_account(cli, root) {
-        Ok(account) => account,
-        Err(codex) if cli == cas_mux::SupervisorCli::Codex => {
-            match launch_account(cas_mux::SupervisorCli::Claude, root) {
-                Ok(Some(account)) => {
-                    let recipe = cas_factory::routing::registry()
-                        .map_err(|e| e.to_string())?
-                        .recipes
-                        .get("claude_opus_5_5")
-                        .ok_or("verifier Claude recipe missing")?;
-                    cli = cas_mux::SupervisorCli::Claude;
-                    model = recipe.model.clone();
-                    effort = recipe.default_effort;
-                    notice = Some(format!(
-                        "Automatic verifier started on Claude account {account} ({model}, {}): {codex}.",
-                        effort.as_str()
-                    ));
-                    Some(account)
-                }
-                Ok(None) => {
-                    return Err(format!(
-                        "{codex}; Claude accounts could not be read"
-                    ));
-                }
-                Err(claude) => {
-                    return Err(format!("{codex}; {claude}"));
-                }
-            }
-        }
-        Err(_) => None,
+    use cas_factory::{
+        CapabilityAvailability, CapabilityEvidence, CapabilitySnapshot, recipe_route_identity,
+        registry, resolve_lane_from_registry,
     };
+    let registry = registry().map_err(|e| e.to_string())?;
+    let mut snapshot = CapabilitySnapshot::default();
+    let mut route =
+        resolve_lane_from_registry("verifier", &snapshot, registry).map_err(|e| e.to_string())?;
+    let (account, unavailable) = match launch_account(route.spec.cli, root) {
+        Ok(account) => (account, None),
+        Err(primary) => {
+            let Some(fallback_id) = registry.lanes[&route.lane].fallbacks.first() else {
+                return Err(primary);
+            };
+            let fallback = &registry.recipes[fallback_id];
+            let account = launch_account(fallback.harness, root)
+                .map_err(|error| format!("{primary}; {error}"))?
+                .ok_or_else(|| format!("{primary}; {:?} accounts could not be read", fallback.harness))?;
+            let now = CapabilitySnapshot::now_ms();
+            snapshot.record(
+                recipe_route_identity(&registry.recipes[&route.recipe_id], "default"),
+                CapabilityEvidence::new(CapabilityAvailability::Unavailable, now)
+                    .with_reason(&primary),
+            );
+            snapshot.record(
+                recipe_route_identity(fallback, &account),
+                CapabilityEvidence::new(CapabilityAvailability::Available, now),
+            );
+            route = resolve_lane_from_registry(&route.lane, &snapshot, registry)
+                .map_err(|e| e.to_string())?;
+            (Some(account), Some(primary))
+        }
+    };
+    let cli = route.spec.cli;
+    let model = route.spec.model.ok_or("verifier route has no model")?;
+    let effort = route.spec.effort.ok_or("verifier route has no effort")?;
+    let notice = unavailable.zip(account.as_deref()).map(|(reason, account)| {
+        format!("Automatic verifier started on {cli:?} account {account} ({model}, {effort}): {reason}.")
+    });
     let environment =
         crate::hub::launch_env::resolve_for_project(cli, account.as_deref(), Some(root))
             .map_err(|e| e.to_string())?;
@@ -942,15 +935,6 @@ pub(super) async fn approved(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn automatic_verifier_uses_pinned_codex_route() {
-        let spec = verifier_route().unwrap().spec;
-        assert_eq!(
-            (spec.model.as_deref(), spec.effort),
-            (Some("gpt-6.1-sol"), Some(cas_mux::Effort::High))
-        );
-    }
 
     /// A no-code close bypasses candidate preparation. Its real launcher must
     /// resolve peer proof before a verifier command can be prepared.
@@ -1782,6 +1766,7 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         env.set("CAS_TEST_HUB_PATH", &bin);
         env.remove("CODEX_HOME");
+        env.remove("CLAUDE_CONFIG_DIR");
         // cas-c386: the default home is logged out and the logged-in account
         // has no usage yet, so no account is recommended on capacity alone.
         std::fs::create_dir_all(env.home().join(".codex")).unwrap();
@@ -1797,6 +1782,17 @@ if [ "$1" = login ]; then
     [ -f "$CODEX_HOME/auth.json" ] || exit 1
     echo 'Logged in using ChatGPT'
     exit 0
+fi
+if [ "$1" = --version ]; then
+    echo '9.9.9 (Claude Code)'
+    exit 0
+fi
+if [ "$1" = auth ]; then
+    echo '{"loggedIn":true}'
+    exit 0
+fi
+if [ "$1" = exec ]; then
+    [ -f "$CODEX_HOME/auth.json" ] || { echo '401 Unauthorized: Missing bearer' >&2; exit 1; }
 fi
 if [ "$CAS_TEST_VERIFIER_STATUS" = late_error ] || [ "$CAS_TEST_VERIFIER_STATUS" = harness_failed ] || [ "$CAS_TEST_VERIFIER_STATUS" = malformed ] || [ "$CAS_TEST_VERIFIER_STATUS" = target_move ] || [ "$CAS_TEST_VERIFIER_STATUS" = no_code ]; then
     while [ ! -f "$CAS_TEST_VERIFIER_GATE" ]; do sleep 0.05; done
@@ -1815,21 +1811,13 @@ if [ "$CAS_TEST_VERIFIER_STATUS" = harness_failed ]; then
     echo '401 Unauthorized: Missing bearer or basic authentication in header' >&2
     exit 1
 fi
-[ -f "$CODEX_HOME/auth.json" ] || { echo '401 Unauthorized: Missing bearer' >&2; exit 1; }
 [ "$CAS_INTERNAL_LLM" = 1 ] && [ -z "$CAS_AGENT_ROLE$CAS_AGENT_ID$CAS_SESSION_ID" ] || exit 2
 cat "$CAS_TEST_VERIFIER_RESPONSE"
 "#,
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // cas-bdde: a logged-in Claude CLI, written before any child runs.
-        let claude = bin.join("claude");
-        std::fs::write(
-            &claude,
-            "#!/bin/sh\n[ \"$1\" = --version ] && { echo '9.9.9 (Claude Code)'; exit 0; }\necho '{\"loggedIn\":true}'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::copy(&script, bin.join("claude")).unwrap();
         // cas-40040: the read-only sandbox preflight probes `bwrap` on PATH.
         // This test proves dispatch recording, not the host's namespace
         // policy, so the isolated PATH answers the probe as a capable host.
@@ -1857,6 +1845,25 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             eprintln!("{}", String::from_utf8_lossy(&result.stderr));
             return;
         }
+        let claude_home = env.home().join(".claude-review");
+        std::fs::create_dir_all(&claude_home).unwrap();
+        let reset = (chrono::Utc::now() + chrono::Duration::hours(3)).to_rfc3339();
+        std::fs::write(
+            claude_home.join(".cas-claude-usage.json"),
+            serde_json::json!({"identity": null, "observed_at": chrono::Utc::now(), "windows": [
+                {"name": "5h", "used_percent": 10.0, "reset_at": reset, "spend_dollars": null},
+                {"name": "weekly", "used_percent": 20.0, "reset_at": reset, "spend_dollars": null},
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let output = env.home().join("verdict.json");
+        let (primary, notice) = command(env.home(), &output).unwrap();
+        let primary_args: Vec<_> = primary.get_args().take(5).map(|arg| arg.to_str().unwrap()).collect();
+        assert_eq!(primary_args, ["-p", "--model", "claude-sonnet-5-5", "--effort", "high"]);
+        assert!(primary.get_envs().any(|(key, value)| key == "CLAUDE_CONFIG_DIR"
+            && value.is_some_and(|dir| std::fs::canonicalize(dir).ok() == std::fs::canonicalize(&claude_home).ok())));
+        assert!(notice.is_none());
         for status in [
             "harness_failed",
             "approved",
@@ -2371,6 +2378,14 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             eprintln!("NO_CODE_CLOSE case={case} status={status} dispatch={} verifier={:?} verdict={}",
                 dispatch.id, verdict.agent_id, verdict.id);
         }
+        std::fs::remove_dir_all(&claude_home).unwrap();
+        let (fallback, notice) = command(env.home(), &output).unwrap();
+        let fallback_args: Vec<_> = fallback.get_args().map(|arg| arg.to_str().unwrap()).collect();
+        assert!(fallback_args.windows(2).any(|args| args == ["--model", "gpt-6.1-sol"]));
+        assert!(fallback_args.windows(2).any(|args| args == ["-c", "model_reasoning_effort=\"high\""]));
+        assert!(fallback.get_envs().any(|(key, value)| key == "CODEX_HOME"
+            && value.is_some_and(|dir| std::fs::canonicalize(dir).ok() == std::fs::canonicalize(&account).ok())));
+        assert!(notice.is_some());
         // With no eligible home left, the refusal names each home's state
         // instead of blaming only the logged-out default home.
         std::fs::write(
@@ -2384,33 +2399,9 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             .to_string(),
         )
         .unwrap();
-        let refused = command(env.home(), &env.home().join("verdict.json")).unwrap_err();
+        let refused = command(env.home(), &output).unwrap_err();
         for needle in [".codex-review", "100%", " ET", "not logged in"] {
             assert!(refused.contains(needle), "{needle}: {refused}");
         }
-        // cas-bdde: with every Codex home ineligible, an eligible Claude home
-        // runs the same verifier, and the notice names harness and account.
-        let claude_home = env.home().join(".claude-review");
-        std::fs::create_dir_all(&claude_home).unwrap();
-        let reset = (chrono::Utc::now() + chrono::Duration::hours(3)).to_rfc3339();
-        std::fs::write(
-            claude_home.join(".cas-claude-usage.json"),
-            serde_json::json!({"identity": null, "observed_at": chrono::Utc::now(), "windows": [
-                {"name": "5h", "used_percent": 10.0, "reset_at": reset, "spend_dollars": null},
-                {"name": "weekly", "used_percent": 20.0, "reset_at": reset, "spend_dollars": null},
-            ]})
-            .to_string(),
-        )
-        .unwrap();
-        let (fallback, notice) = command(env.home(), &env.home().join("verdict.json")).unwrap();
-        assert!(fallback.get_args().any(|arg| arg == "-p"), "{fallback:?}");
-        assert!(
-            // HOME is the short socket alias (cas-3f0a); compare the directories.
-            fallback.get_envs().any(|(key, value)| key == "CLAUDE_CONFIG_DIR"
-                && value.is_some_and(|dir| std::fs::canonicalize(dir).ok() == std::fs::canonicalize(&claude_home).ok())),
-            "{fallback:?}"
-        );
-        let notice = notice.expect("fallback notice");
-        assert!(notice.contains("Claude") && notice.contains("review"), "{notice}");
     }
 }

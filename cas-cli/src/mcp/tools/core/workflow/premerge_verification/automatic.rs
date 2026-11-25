@@ -143,11 +143,14 @@ fn launch_account(cli: cas_mux::SupervisorCli, root: &Path) -> Result<Option<Str
 
 /// The verifier command, plus a notice when it fell back to Claude.
 fn command(root: &Path, output: &Path) -> Result<(Command, Option<String>), String> {
-    let route = cas_factory::resolve_lane("standard", &cas_factory::CapabilitySnapshot::default())
-        .map_err(|e| e.to_string())?;
-    let mut cli = route.spec.cli;
-    let mut model = route.spec.model.ok_or("verifier route has no model")?;
-    let mut effort = route.spec.effort.ok_or("verifier route has no effort")?;
+    let recipe = cas_factory::registry()
+        .map_err(|e| e.to_string())?
+        .recipes
+        .get("codex_sol_6_1")
+        .ok_or("verifier Codex recipe missing")?;
+    let mut cli = recipe.harness;
+    let mut model = recipe.model.clone();
+    let mut effort = recipe.default_effort;
     // A daemon may have no provider account selector, even when the host has
     // authenticated named accounts. Choose the account spawn_workers would
     // (cas-c386), then use the checked launch environment supervisors use,

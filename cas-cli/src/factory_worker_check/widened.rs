@@ -34,7 +34,8 @@ pub(super) fn valid(proof: &Proof) -> bool {
             && javascript::package_manifest(manifest) && proof.configs.is_empty()
             && matches!(proof.reason.as_str(), "npm run check" | "npm run test");
     }
-    matches!(proof.runner.as_str(), "nextest" | "vitest" | "jest" | "playwright" | "node")
+    !proof.reason.trim().is_empty()
+        && matches!(proof.runner.as_str(), "nextest" | "vitest" | "jest" | "playwright" | "node")
         && (proof.configs.is_empty() || proof.runner == "playwright")
         && proof.configs.iter().all(|(spec, config)| !spec.is_empty() && relative(spec) && !config.is_empty() && relative(config))
         && match &proof.scope {
@@ -153,33 +154,27 @@ pub(crate) struct Covering {
 /// The test files covering each widened package's changed inputs that no
 /// runner takes as a target (a JSON catalogue, a SQL migration, a fixture),
 /// with the inputs nothing covers. A package no spec covers at all is absent.
-pub(crate) fn covering(repo: &Path, head: &str, paths: &[String], scopes: &[Scope]) -> BTreeMap<Scope, Covering> {
-    scopes.iter().filter_map(|scope| {
-        let Scope::Package(directory) = scope else { return None };
+pub(crate) fn resolve_packages(repo: &Path, head: &str, paths: &[String], scopes: &mut [Scope]) -> BTreeMap<Scope, Covering> {
+    scopes.iter_mut().filter_map(|scope| {
+        let Scope::Package(directory) = &*scope else { return None };
         let inputs: Vec<&str> = paths.iter().map(String::as_str)
             .filter(|path| &package(repo, path) == scope).collect();
-        let resolved = javascript::covering_specs(repo, head, directory, &inputs).ok()?;
-        let specs: BTreeSet<String> = resolved.values().flatten().cloned().collect();
-        let unresolved = resolved.iter().filter(|(_, specs)| specs.is_empty()).map(|(input, _)| input.clone()).collect();
-        (!specs.is_empty()).then(|| (scope.clone(), Covering { specs: specs.into_iter().collect(), unresolved }))
-    }).collect()
-}
-
-pub(crate) fn declared_checks(repo: &Path, head: &str, scopes: &mut [Scope], covering: &BTreeMap<Scope, Covering>) {
-    for scope in scopes {
-        let Scope::Package(directory) = &*scope else { continue };
         let pathspec = if directory.is_empty() { "." } else { directory.as_str() };
-        let manifest = Path::new(directory).join("package.json").to_string_lossy().into_owned();
-        if covering.contains_key(scope) || javascript::declared_script(repo, head, &manifest).is_none() {
-            continue;
+        let listed = git(repo, &["--literal-pathspecs", "ls-tree", "-r", "--name-only", head, "--", pathspec]).ok()?;
+        let resolved = javascript::covering_specs(repo, head, directory, &inputs, &listed).ok()?;
+        let specs: BTreeSet<String> = resolved.values().flatten().cloned().collect();
+        if specs.is_empty() {
+            let manifest = Path::new(directory).join("package.json").to_string_lossy().into_owned();
+            if !listed.lines().any(|path| javascript::test_file(path) && package(repo, path) == *scope)
+                && javascript::declared_script(repo, head, &manifest).is_some()
+            {
+                *scope = Scope::DeclaredCheck(manifest);
+            }
+            return None;
         }
-        if git(repo, &["--literal-pathspecs", "ls-tree", "-r", "--name-only", head, "--", pathspec])
-            .is_ok_and(|files| !files.lines().any(|path| javascript::javascript(path)
-                && javascript::test_match(path, Some("jest")) && package(repo, path) == *scope))
-        {
-            *scope = Scope::DeclaredCheck(manifest);
-        }
-    }
+        let unresolved = resolved.iter().filter(|(_, specs)| specs.is_empty()).map(|(input, _)| input.clone()).collect();
+        Some((scope.clone(), Covering { specs: specs.into_iter().collect(), unresolved }))
+    }).collect()
 }
 
 /// A widened scope is proven by its own pass or, for a package, by a

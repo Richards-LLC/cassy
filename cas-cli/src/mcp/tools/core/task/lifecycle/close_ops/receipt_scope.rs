@@ -212,8 +212,10 @@ pub(super) fn delivered_tests(
     paths: &[String],
     ranges: Option<&[(String, String)]>,
 ) -> anyhow::Result<(Vec<stability::Identity>, Vec<Scope>)> {
-    let checks = worker_checks(cas_root, repo, head)?;
-    selected_tests(repo, head, target, paths, ranges, &checks, &mut BTreeSet::new())
+    javascript::with_listing_cache(|| {
+        let checks = worker_checks(cas_root, repo, head)?;
+        selected_tests(repo, head, target, paths, ranges, &checks, &mut BTreeSet::new())
+    })
 }
 
 fn selected_tests(
@@ -242,6 +244,39 @@ fn selected_tests(
         _ => vec![scope],
     }).collect();
     Ok((tests, widened))
+}
+
+fn present_paths(repo: &Path, head: &str, paths: &[String]) -> Vec<String> {
+    paths.iter().filter(|path| std::process::Command::new("git")
+        .args(["cat-file", "-e", &format!("{head}:{path}")]).current_dir(repo)
+        .output().is_ok_and(|output| output.status.success())).cloned().collect()
+}
+
+fn package_coverage(
+    repo: &Path, head: &str, paths: &[String], scopes: &mut [Scope], checks: &WorkerChecks,
+    deferred: &mut BTreeSet<DeferredSpec>,
+) -> BTreeMap<Scope, widen::Covering> {
+    let mut covering = widen::resolve_packages(repo, head, paths, scopes);
+    for cover in covering.values_mut() {
+        cover.specs.retain(|spec| !defer(&checks.explicit, deferred, spec));
+    }
+    covering
+}
+
+pub(super) fn recover_deferrals(
+    cas_root: &Path, repo: &Path, head: &str, target: &str, paths: &[String],
+    ranges: Option<&[(String, String)]>,
+) -> anyhow::Result<Vec<DeferredSpec>> {
+    javascript::with_listing_cache(|| {
+        let checks = worker_checks(cas_root, repo, head)?;
+        if checks.explicit.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut deferred = BTreeSet::new();
+        let (_, mut scopes) = selected_tests(repo, head, target, paths, ranges, &checks, &mut deferred)?;
+        package_coverage(repo, head, &present_paths(repo, head, paths), &mut scopes, &checks, &mut deferred);
+        Ok(deferred.into_iter().collect())
+    })
 }
 
 pub(super) fn red_first_refusal(
@@ -335,9 +370,7 @@ fn listed_park_refusals(
             }
         };
         // GH #2355: a deleted file owes nothing and is no package input.
-        let present: Vec<String> = changed_paths.iter().filter(|path| std::process::Command::new("git")
-            .args(["cat-file", "-e", &format!("{head}:{path}")]).current_dir(proof_repo)
-            .output().is_ok_and(|output| output.status.success())).cloned().collect();
+        let present = present_paths(proof_repo, head, changed_paths);
         let mut missing = stability::missing(&passing, &tests);
         // GH #2369: a selection that could not run a test ran its package.
         missing.retain(|test| !widen::package_proves(&passing, &test.path));
@@ -377,11 +410,7 @@ fn listed_park_refusals(
                 stability::rerun_commands(cas_root, proof_repo, head, &missing).join("; "),
             )));
         }
-        let mut covering = widen::covering(proof_repo, head, &present, &widened);
-        for cover in covering.values_mut() {
-            cover.specs.retain(|spec| !defer(&checks.explicit, deferred, spec));
-        }
-        widen::declared_checks(proof_repo, head, &mut widened, &covering);
+        let covering = package_coverage(proof_repo, head, &present, &mut widened, &checks, deferred);
         let missing = widen::missing(&passing, &widened, &covering);
         if !missing.is_empty() {
             // Classification is uncertain, but the broader capped receipt is
@@ -1881,11 +1910,11 @@ raise SystemExit(1 if failed else 0)
         let paths = ["apps/backend/prisma/migrations/2_init/migration.sql", "apps/backend/src/__scenarios__/scenarios.json",
             "apps/backend/test/fixtures/patterns.ts"].map(String::from).to_vec();
         let task = Task::new("cas-5afc".into(), "covering spec proof".into());
-        let (_, scopes) = stability::requirements(&repo, &head, "main", &paths, None).unwrap();
+        let (_, mut scopes) = stability::requirements(&repo, &head, "main", &paths, None).unwrap();
         let package = widened::Scope::Package("apps/backend".into());
         // GH #2221: the changed catalogue also owes its importing spec a whole-file run.
         assert_eq!(scopes, [widened::Scope::File(specs[0].into()), package.clone()]);
-        let covering = widened::covering(&repo, &head, &paths, &scopes);
+        let covering = widened::resolve_packages(&repo, &head, &paths, &mut scopes);
         let found = covering.get(&package).unwrap();
         assert_eq!(found.specs, specs.map(String::from));
         assert!(found.unresolved.is_empty(), "every changed input is read by a covering spec");
@@ -1918,8 +1947,8 @@ raise SystemExit(1 if failed else 0)
         git(&["add", "."]); git(&["commit", "-qm", "seed data no spec reads"]);
         let mixed = git(&["rev-parse", "HEAD"]);
         let paths: Vec<String> = paths.into_iter().chain([unread.to_string()]).collect();
-        let (_, scopes) = stability::requirements(&repo, &mixed, "main", &paths, None).unwrap();
-        let covering = widened::covering(&repo, &mixed, &paths, &scopes);
+        let (_, mut scopes) = stability::requirements(&repo, &mixed, "main", &paths, None).unwrap();
+        let covering = widened::resolve_packages(&repo, &mixed, &paths, &mut scopes);
         let found = covering.get(&package).unwrap();
         assert_eq!((found.specs.as_slice(), found.unresolved.as_slice()), (&specs.map(String::from)[..], &[unread.to_string()][..]));
         for spec in specs { pass(&mixed, spec); }

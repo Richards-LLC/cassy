@@ -108,6 +108,13 @@ pub(crate) fn predicted(core: &CasCore, task: &Task) -> String {
     }
 }
 
+pub(super) fn has_delivery_deferrals(store: &dyn crate::store::TaskStore, task: &str, head: &str) -> bool {
+    store.get_execution_state(task).ok().flatten().is_some_and(|state| {
+        let impact = &state["qa_impact"];
+        impact["head_sha"].as_str() == Some(head) && impact["g61_deferred_journeys"].is_array()
+    })
+}
+
 impl CasCore {
     /// Cache the committed delivery using close's task attribution. A lane's
     /// later work and the caller's working-tree metadata are never selected.

@@ -10197,10 +10197,11 @@ impl CasCore {
                     let receipt_tip = if tip_is_pushed && gate_refusals.is_empty() {
                         park_anchor.as_deref()
                     } else { anchor.as_deref() };
-                    let mut g61_deferred = None;
-                    if (task.status != TaskStatus::AwaitingMerge
+                    let assess_receipts = task.status != TaskStatus::AwaitingMerge
                         || !tip_is_pushed
-                        || park_anchor != task.deliverables.factory_branch_anchor)
+                        || park_anchor != task.deliverables.factory_branch_anchor;
+                    let mut g61_deferred = None;
+                    if assess_receipts
                         && let Some(tip) = receipt_tip
                         && let Some(window) = commit_receipt_window.as_ref()
                         && let Some(paths) =
@@ -10235,6 +10236,23 @@ impl CasCore {
                             ));
                         }
                         gate_refusals.extend(receipt_refusals);
+                    } else if !assess_receipts && gate_refusals.is_empty()
+                        && let Some(tip) = receipt_tip
+                        && let Some(window) = commit_receipt_window.as_ref()
+                        && !super::qa_impact::has_delivery_deferrals(task_store.as_ref(), &task.id, tip)
+                        && let Some(paths) = task_attribution::paths(&close_project_root, &resolved_parent_branch, window, Some(tip))
+                    {
+                        match receipt_scope::recover_deferrals(
+                            &self.cas_root,
+                            worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
+                            tip, &resolved_parent_branch, &paths,
+                            task_attribution::range_bounds(
+                                &close_project_root, &resolved_parent_branch, window, Some(tip),
+                            ).as_deref(),
+                        ) {
+                            Ok(rows) => g61_deferred = Some(rows),
+                            Err(error) => gate_refusals.push(crate::gates::tag("G-61", format!("DEFERRED_DISCOVERY_FAILED: {error:#}"))),
+                        }
                     }
                     // Every park must make cited proof portable before a peer
                     // verifier can be asked to review the delivery (cas-dae1).

@@ -136,6 +136,18 @@ fn executable(path: &Path, body: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+fn playwright_listing(fixture: &Fixture, specs: &[&str]) {
+    let specs: Vec<_> = specs.iter().map(|file| serde_json::json!({"file": file})).collect();
+    let report = serde_json::json!({"config": {"rootDir": fixture.worker_path}, "suites": [{"specs": specs}]});
+    executable(&fixture.worker_path.join("node_modules/.bin/playwright"), &format!("#!/bin/sh\ncat <<'REPORT'\n{report}\nREPORT\n"));
+}
+
+fn init_batch_ledger(cas_dir: &Path, task: &str) -> anyhow::Result<()> {
+    let cli = crate::cli::try_parse_from_with_wordmark(["cas", "qa", "ledger", "init", "--task", task, "--covers", ID])?;
+    let Some(crate::cli::Commands::Qa(command)) = &cli.command else { unreachable!() };
+    crate::cli::qa::execute(command, &cli, Some(cas_dir))
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn g61_gabber_declared_check_and_release_only_journeys() {
@@ -169,6 +181,12 @@ async fn g61_gabber_declared_check_and_release_only_journeys() {
                 proof["runner"] == "package-check" && proof["scope"]["DeclaredCheck"] == manifest
             })
         }));
+        let mut impact = store.get_execution_state(ID).unwrap().unwrap()["qa_impact"].clone();
+        impact.as_object_mut().unwrap().remove("g61_deferred_journeys");
+        store.patch_execution_state(ID, &serde_json::json!({"qa_impact": impact})).unwrap();
+        call(&package.worker, close.clone()).await;
+        env.set_current_dir(&package.worker_path);
+        init_batch_ledger(&package.cas_dir, ID).unwrap();
         None
     };
 
@@ -201,6 +219,7 @@ async fn g61_gabber_declared_check_and_release_only_journeys() {
             (data, r#"{"hello":"Hi"}"#.into()),
             (spec, test("")),
         ], &[changed], &[]);
+        playwright_listing(&delivery, &[spec]);
         let parked = call(&delivery.worker, close.clone()).await;
         let store = open_task_store(&delivery.cas_dir).unwrap();
         if store.get(ID).unwrap().status != cas_types::TaskStatus::AwaitingMerge {
@@ -227,6 +246,7 @@ async fn g61_gabber_declared_check_and_release_only_journeys() {
         (raw, spec.into()),
         (unlisted, spec.into()),
     ], &[(locale, r#"{"hello":"Hi","bye":"Bye"}"#.into())], &[]);
+    playwright_listing(&data, &[raw, unlisted]);
     let held = call(&data.worker, close.clone()).await;
     assert!(crate::gates::codes_in(&held).contains(&"G-61"));
     assert_eq!(open_task_store(&data.cas_dir).unwrap().get(ID).unwrap().status, TaskStatus::InProgress);
@@ -247,15 +267,13 @@ async fn g61_gabber_declared_check_and_release_only_journeys() {
         let qa = Task::new("cas-g61qa".into(), "Batch QA fixture".into());
         store.add(&qa).unwrap();
         env.set_current_dir(&data.worker_path);
-        let cli = crate::cli::try_parse_from_with_wordmark(["cas", "qa", "ledger", "init", "--task", &qa.id, "--covers", ID]).unwrap();
-        let Some(crate::cli::Commands::Qa(command)) = &cli.command else { unreachable!() };
         let mut incomplete = state["qa_impact"].clone();
         incomplete.as_object_mut().unwrap().remove("g61_deferred_journeys");
         store.patch_execution_state(ID, &serde_json::json!({"qa_impact": incomplete})).unwrap();
-        let error = crate::cli::qa::execute(command, &cli, Some(&data.cas_dir)).unwrap_err();
+        let error = init_batch_ledger(&data.cas_dir, &qa.id).unwrap_err();
         assert_eq!(error.to_string().split(':').next(), Some("G61_DEFERRED_STATE_MISSING"));
         let reparking = call(&data.worker, close.clone()).await;
-        if let Err(error) = crate::cli::qa::execute(command, &cli, Some(&data.cas_dir)) {
+        if let Err(error) = init_batch_ledger(&data.cas_dir, &qa.id) {
             failures.push(("same-head re-park", format!("{error}: {reparking}")));
         } else {
             let config = crate::config::Config::load(&data.cas_dir).unwrap();
@@ -278,6 +296,7 @@ async fn g61_gabber_declared_check_and_release_only_journeys() {
     ], &[
         (registry, format!("spec_checks:\n- {{spec: {unit}, worker_check: paid}}\n")),
     ], &[]);
+    playwright_listing(&invalid, &[unit]);
     let held = call(&invalid.worker, close).await;
     if !crate::gates::codes_in(&held).contains(&"G-61") || !held.contains("non_playwright_spec_check") {
         failures.push((unit, held));
@@ -405,7 +424,7 @@ async fn g61_gate_family_ends_runnable_or_accepted_cas_fcb1() {
                         continue;
                     }
                     widened::record(cas, repo, head, widened::Proof { runner: "vitest".into(),
-                        scope: widened::Scope::File(spec.into()), reason: String::new(), configs: Default::default() }, 1).unwrap();
+                        scope: widened::Scope::File(spec.into()), reason: "widened:no static changed-test selection".into(), configs: Default::default() }, 1).unwrap();
                 }
                 "#2369" | "named" => {
                     executable(&repo.join("apps/web/node_modules/.bin/vitest"), VITEST);
@@ -420,7 +439,7 @@ async fn g61_gate_family_ends_runnable_or_accepted_cas_fcb1() {
                 "#2355" => {
                     assert!(!prescribed.is_empty(), "{issue}: {held}");
                     widened::record(cas, repo, head, widened::Proof { runner: "playwright".into(),
-                        scope: widened::Scope::Package(String::new()), reason: String::new(), configs: Default::default() }, 1).unwrap();
+                        scope: widened::Scope::Package(String::new()), reason: "widened:no static changed-test selection".into(), configs: Default::default() }, 1).unwrap();
                 }
                 "#2362" => {}
                 "local journey" => {

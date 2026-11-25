@@ -356,8 +356,7 @@ pub(crate) fn catalogue_specs(repo: &Path, head: &str, data: &str) -> Result<Vec
 /// catalogue), a module import without its extension (a fixture), or a
 /// directory holding it inside the package (Prisma migrations). An input read
 /// any other way has no covering spec here and maps to an empty list.
-pub(super) fn covering_specs(repo: &Path, head: &str, package: &str, inputs: &[&str]) -> Result<BTreeMap<String, Vec<String>>> {
-    let listed = super::git(repo, &["ls-tree", "-r", "--name-only", head, "--", if package.is_empty() { "." } else { package }])?;
+pub(super) fn covering_specs(repo: &Path, head: &str, package: &str, inputs: &[&str], listed: &str) -> Result<BTreeMap<String, Vec<String>>> {
     let mut covering: BTreeMap<String, Vec<String>> = inputs.iter().map(|input| ((*input).to_owned(), Vec::new())).collect();
     for spec in listed.lines().filter(|path| javascript(path) && test_match(path, runner_hint(repo, path))) {
         let source = String::from_utf8_lossy(&show(repo, head, spec)?.unwrap_or_default()).into_owned();
@@ -1947,9 +1946,18 @@ pub(crate) fn runner_hint(repo: &Path, path: &str) -> Option<&'static str> {
 }
 
 pub(crate) fn committed_playwright(repo: &Path, head: &str, path: &str, require_spec: bool) -> bool {
-    javascript(path) && !path.ends_with(".vue") && (!require_spec || test_match(path, None))
-        && show(repo, head, path).ok().flatten().is_some_and(|source|
-            runner_hint_for_source(repo, path, &String::from_utf8_lossy(&source)) == Some("playwright"))
+    if !javascript(path) || path.ends_with(".vue") || (require_spec && !test_match(path, None)) {
+        return false;
+    }
+    let Some(source) = show(repo, head, path).ok().flatten() else { return false };
+    let source = String::from_utf8_lossy(&source);
+    if ["node:test", "vitest", "jest", "@jest/globals"].iter().any(|runner|
+        source.contains(&format!("'{runner}'")) || source.contains(&format!("\"{runner}\""))) {
+        return false;
+    }
+    let spec = repo.join(path);
+    spec.ancestors().skip(1).take_while(|dir| dir.starts_with(repo)).any(|dir|
+        runner_configs(dir, "playwright").iter().any(|config| playwright_config_selects(repo, dir, config, &spec)))
 }
 
 fn runner_hint_for_source(repo: &Path, path: &str, source: &str) -> Option<&'static str> {
@@ -3315,7 +3323,7 @@ mod tests {
             Some(("playwright", vec![partial.into(), history.into(), summary.into(), pair.into()])));
         let command = widened::commands(Path::new("/cas"), &repo, &[helper.into()], &scopes, &Default::default());
         assert_eq!(command, [format!("cas factory worker-check --cas-root /cas -- playwright {helper}")]);
-        assert!(widened::valid(&widened::Proof { runner: "playwright".into(), scope: scopes[0].clone(), reason: String::new(), configs: Default::default() }));
+        assert!(widened::valid(&widened::Proof { runner: "playwright".into(), scope: scopes[0].clone(), reason: "widened:no static changed-test selection".into(), configs: Default::default() }));
 
         // Park's receipt matcher (receipt_scope.rs reads it): a helper is covered
         // only when every importing spec ran at the tip under the config that

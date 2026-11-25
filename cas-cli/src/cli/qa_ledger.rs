@@ -174,7 +174,11 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
             } else {
                 let mut members = Vec::new();
                 for id in covers {
-                    let covered = store.get(id)?;
+                    let covered = match store.get(id) {
+                        Ok(covered) => covered,
+                        Err(crate::store::StoreError::TaskNotFound(_)) => continue,
+                        Err(error) => return Err(error.into()),
+                    };
                     if crate::qa_batch::is_report_member(&covered) {
                         continue;
                     }

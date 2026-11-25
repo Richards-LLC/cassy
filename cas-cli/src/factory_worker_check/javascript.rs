@@ -4527,6 +4527,44 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         assert!(validate_report("playwright", repo, &report, &changed, 5).is_err());
     }
 
+    const PRICING_SPEC: &str = "pricing/anonymous-pricing.spec.ts";
+    const AUTH_SETUP: &str = "setup/auth.setup.ts";
+
+    fn related_playwright_report() -> Value {
+        let spec = |file: &str, title: &str, project: &str| json!({
+            "file": file, "title": title, "tests": [{"projectId": project,
+                "expectedStatus": "passed", "results": [{"status": "passed", "retry": 0}]}]
+        });
+        json!({"config": {"rootDir": "/project", "projects": [
+            {"id": "anonymous", "name": "anonymous", "repeatEach": 1, "dependencies": ["authenticate"]},
+            {"id": "auth", "name": "authenticate", "repeatEach": 1, "dependencies": []},
+            {"id": "extra", "name": "extra", "repeatEach": 1, "dependencies": []}
+        ]}, "errors": [], "suites": [
+            {"title": PRICING_SPEC, "specs": [
+                spec(PRICING_SPEC, "shows public pricing", "anonymous"),
+                spec(PRICING_SPEC, "lists included features", "anonymous"),
+                spec(PRICING_SPEC, "opens the sign-up page", "anonymous")]},
+            {"title": AUTH_SETUP, "specs": [spec(AUTH_SETUP, "seed a session", "auth")]}
+        ]})
+    }
+
+    #[test]
+    fn related_playwright_admits_declared_setup_without_counting_it_gh2503() {
+        let report = related_playwright_report();
+        let admitted = validate_report_with_inherited("playwright", Path::new("/project"), &report,
+            &[], 1, &BTreeSet::new(), None, &[PRICING_SPEC]).unwrap();
+        assert_eq!(admitted.0, 3);
+    }
+
+    #[test]
+    fn related_playwright_refuses_undeclared_setup_project_gh2503() {
+        let mut report = related_playwright_report();
+        report["suites"][1]["specs"][0]["tests"][0]["projectId"] = json!("extra");
+        let error = validate_report_with_inherited("playwright", Path::new("/project"), &report,
+            &[], 1, &BTreeSet::new(), None, &[PRICING_SPEC]).unwrap_err();
+        assert!(error.to_string().contains("[G-61]"));
+    }
+
     #[test]
     fn deletion_beside_legacy_callbacks_only_classifies_surviving_edits_cas_31eb() {
         let repo = tempfile::tempdir().unwrap();

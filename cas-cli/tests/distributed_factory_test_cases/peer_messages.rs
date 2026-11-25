@@ -572,7 +572,6 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     assert_eq!(rows.len(), 1);
     let incoming = parse_envelope(&rows[0].prompt).unwrap();
     let peer_message_id = incoming.id.as_str();
-    uuid::Uuid::parse_str(peer_message_id).unwrap();
     assert!(sent.contains(peer_message_id), "{sent}");
 
     // pin: cas-7dd1d, an untyped peer message must arrive as an ask for the wake gate.

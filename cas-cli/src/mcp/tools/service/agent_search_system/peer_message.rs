@@ -177,7 +177,7 @@ impl CasService {
                 .filter(|row| row.origin == Some(cas_store::QueueOrigin::Daemon))
                 .and_then(|row| peer_mailbox::parse_envelope(&row.prompt));
             let Some(envelope) = peer_row else {
-                if qualified || explicit_account_peer {
+                if qualified {
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
                         format!(

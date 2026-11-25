@@ -3021,8 +3021,10 @@ and records each spec's config. Park accepts the helper once every importing
 spec has a passing capped run at the tip, through that run or through the spec's
 own `playwright --config <config> <spec>`, or through that spec's ordinary
 five-pass stability run when it executed every test the config lists in the spec
-(Playwright's `--list`; a partial selection proves nothing about the rest); an
-omitted consumer, an unrelated spec or a run that executed another spec is no proof. A spec counts only when it loads
+(Playwright's `--list`; a partial selection proves nothing about the rest). A
+related run must execute its required spec. It may also execute passing setup
+tests from that spec's projects' configured dependencies, but those tests do
+not count toward the receipt. Any other spec is no proof. A spec counts only when it loads
 `@playwright/test` at runtime and imports no other runner; `import type` does
 not. A helper no spec imports, or a unit test also imports, keeps its previous
 proof (GH #2146). A helper that only `node:test` files import, such as a CI

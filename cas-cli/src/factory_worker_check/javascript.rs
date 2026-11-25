@@ -2042,6 +2042,32 @@ fn execute_tests(
     execute_selection(cas_root, repo, head, runner, runner_config, &[], Some((&package, file, cause.as_str())), test_env)
 }
 
+const PLAYWRIGHT_DEPENDENCY_REPORTER: &str = r#"module.exports = class {
+  onBegin(config) {
+    require('node:fs').writeFileSync(process.env.CAS_PLAYWRIGHT_DEPENDENCIES,
+      JSON.stringify(config.projects.map(project => [project.name, project.dependencies ?? []])));
+  }
+};
+"#;
+
+fn attach_playwright_dependencies(report: &mut Value, data: &[u8]) -> Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    let dependencies: Vec<(String, Vec<String>)> = serde_json::from_slice(data)?;
+    let projects = report.pointer_mut("/config/projects").and_then(Value::as_array_mut)
+        .context("Playwright projects missing from JSON report")?;
+    if projects.len() != dependencies.len() || projects.iter().zip(&dependencies)
+        .any(|(project, (name, _))| project["name"].as_str() != Some(name.as_str()))
+    {
+        bail!(crate::gates::tag("G-61", "Playwright project dependencies do not match the run report"));
+    }
+    for (project, (_, names)) in projects.iter_mut().zip(dependencies) {
+        project["dependencies"] = serde_json::to_value(names)?;
+    }
+    Ok(())
+}
+
 fn execute_selection(
     cas_root: &Path,
     repo: &Path,
@@ -2097,6 +2123,13 @@ fn execute_selection(
         tempfile::Builder::new().prefix(&format!("playwright-{}-", head.get(..12).unwrap_or(head))).tempdir_in(parent)?
     } else {
         tempfile::tempdir()?
+    };
+    let dependency_reporter = if runner == "playwright" && !consumers.is_empty() {
+        let path = reports.path().join("project-dependencies.cjs");
+        std::fs::write(&path, PLAYWRIGHT_DEPENDENCY_REPORTER)?;
+        Some(format!("--reporter=json,{}", path.display()))
+    } else {
+        None
     };
     let outcome = (|| -> Result<()> {
     for (path, selected) in by_file {
@@ -2169,6 +2202,8 @@ fn execute_selection(
         let selected: Vec<_> = selected.into_iter().cloned().collect();
         let run = |iteration| -> Result<(bool, Value)> {
             let report = reports.path().join(format!("report-{iteration}.json"));
+            let dependencies = dependency_reporter.as_ref()
+                .map(|_| tempfile::NamedTempFile::new_in(reports.path())).transpose()?;
             let mut command = Command::new(&executable);
             command.current_dir(&cwd).env("CI", "1").envs(environment.iter().copied());
             let file = repo.join(path);
@@ -2219,11 +2254,14 @@ fn execute_selection(
                             if widened.is_some() { "0" } else { "1" },
                             "--workers",
                             "1",
-                            "--reporter=json",
+                            dependency_reporter.as_deref().unwrap_or("--reporter=json"),
                             "--output",
                         ])
                         .arg(reports.path().join("playwright-output"))
                         .env("PLAYWRIGHT_JSON_OUTPUT_FILE", &report);
+                    if let Some(dependencies) = &dependencies {
+                        command.env("CAS_PLAYWRIGHT_DEPENDENCIES", dependencies.path());
+                    }
                 }
                 "node" => {
                     let reporter = reports.path().join("node-test-reporter.mjs");
@@ -2254,10 +2292,13 @@ fn execute_selection(
             }
             let marker = reports.path().join(format!("scope-{iteration}"));
             let success = run_scoped_javascript(command, high, &marker)?;
-            let value: Value =
+            let mut value: Value =
                 serde_json::from_slice(&std::fs::read(&report).with_context(|| {
                     format!("{runner} did not produce a stability report for {path}")
                 })?)?;
+            if let Some(dependencies) = dependencies {
+                attach_playwright_dependencies(&mut value, &std::fs::read(dependencies.path())?)?;
+            }
             if !success && let Some(task) = &red_task {
                 let tests = failed_javascript_tests(runner, repo, &value);
                 if !tests.is_empty() {
@@ -2662,11 +2703,32 @@ fn validate_report(
     validate_report_with_inherited(runner, repo, report, tests, repeats, &BTreeSet::new(), None, &[])
 }
 
+fn configured_playwright_dependencies<'report, 'selected>(
+    report: &'report Value,
+    selected: impl Iterator<Item = &'selected str>,
+) -> BTreeMap<&'report str, u64> {
+    let configured = report.pointer("/config/projects").and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let mut pending: Vec<_> = selected.filter_map(|id| configured.iter()
+        .find(|project| project["id"].as_str() == Some(id))).collect();
+    let mut dependencies = BTreeMap::new();
+    while let Some(project) = pending.pop() {
+        for name in project["dependencies"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            let mut matching = configured.iter().filter(|project| project["name"].as_str() == Some(name));
+            if let Some(dependency) = matching.next() && matching.next().is_none()
+                && let (Some(id), Some(each)) = (dependency["id"].as_str(), dependency["repeatEach"].as_u64())
+                && dependencies.insert(id, each).is_none()
+            {
+                pending.push(dependency);
+            }
+        }
+    }
+    dependencies
+}
+
 /// `expected` holds the names each changed `it.each` test expands to, read
 /// from its source table. With it, every template must have an entry and the
 /// rows the templates selected must be exactly those names and multiplicities.
-/// `files` are the spec files a widened run must have executed, and the only
-/// ones it may have: a missing or unrelated file is not proof (GH #2146).
 fn validate_report_with_inherited(
     runner: &str, repo: &Path, report: &Value, tests: &[Identity], repeats: usize,
     inherited: &BTreeSet<(Identity, String)>, expected: Option<&BTreeMap<Identity, Expansion>>, files: &[&str],
@@ -2691,9 +2753,19 @@ fn validate_report_with_inherited(
             .flat_map(|(each, project)| ["id", "name"].into_iter()
                 .filter_map(move |key| Some((project.get(key)?.as_str()?, each))))
             .collect();
+        let configured_dependencies = configured_playwright_dependencies(report, projects.keys()
+            .filter(|(identity, _)| files.contains(&identity.path.as_str()))
+            .map(|(_, project)| project.as_str()));
         for ((identity, project), count) in projects {
-            let dependency = declared.get(project.as_str()).copied()
-                .filter(|each| *each != repeats as u64);
+            let dependency = if files.is_empty() {
+                declared.get(project.as_str()).copied().filter(|each| *each != repeats as u64)
+            } else if files.contains(&identity.path.as_str()) {
+                None
+            } else {
+                Some(*configured_dependencies.get(project.as_str()).with_context(|| {
+                    crate::gates::tag("G-61", format!("{runner} ran {} outside the required specs", identity.path))
+                })?)
+            };
             if let Some(each) = dependency && !tests.iter().any(|test| test.selects(&identity)) {
                 // Every scheduled run of an unchanged dependency passed.
                 if count as u64 != each {
@@ -2847,9 +2919,6 @@ fn validate_report_with_inherited(
         if !results.keys().any(|ran| ran.path == *file) {
             bail!(crate::gates::tag("G-61", format!("{runner} executed no test of the required spec {file}")));
         }
-    }
-    if let Some(ran) = results.keys().find(|ran| !files.is_empty() && !files.contains(&ran.path.as_str())) {
-        bail!(crate::gates::tag("G-61", format!("{runner} ran {} outside the required specs", ran.path)));
     }
     // Jest/Vitest count executed rows, not distinct names (GH #2166, #2246).
     Ok((if runner == "playwright" { results.len() } else { results.values().sum() }, inactive))
@@ -4535,17 +4604,19 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             "file": file, "title": title, "tests": [{"projectId": project,
                 "expectedStatus": "passed", "results": [{"status": "passed", "retry": 0}]}]
         });
-        json!({"config": {"rootDir": "/project", "projects": [
-            {"id": "anonymous", "name": "anonymous", "repeatEach": 1, "dependencies": ["authenticate"]},
-            {"id": "auth", "name": "authenticate", "repeatEach": 1, "dependencies": []},
-            {"id": "extra", "name": "extra", "repeatEach": 1, "dependencies": []}
+        let mut report = json!({"config": {"rootDir": "/project", "projects": [
+            {"id": "anonymous", "name": "anonymous", "repeatEach": 1},
+            {"id": "auth", "name": "authenticate", "repeatEach": 1},
+            {"id": "extra", "name": "extra", "repeatEach": 1}
         ]}, "errors": [], "suites": [
             {"title": PRICING_SPEC, "specs": [
                 spec(PRICING_SPEC, "shows public pricing", "anonymous"),
                 spec(PRICING_SPEC, "lists included features", "anonymous"),
                 spec(PRICING_SPEC, "opens the sign-up page", "anonymous")]},
             {"title": AUTH_SETUP, "specs": [spec(AUTH_SETUP, "seed a session", "auth")]}
-        ]})
+        ]});
+        attach_playwright_dependencies(&mut report, br#"[["anonymous",["authenticate"]],["authenticate",[]],["extra",[]]]"#).unwrap();
+        report
     }
 
     #[test]
@@ -4560,9 +4631,12 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
     fn related_playwright_refuses_undeclared_setup_project_gh2503() {
         let mut report = related_playwright_report();
         report["suites"][1]["specs"][0]["tests"][0]["projectId"] = json!("extra");
-        let error = validate_report_with_inherited("playwright", Path::new("/project"), &report,
-            &[], 1, &BTreeSet::new(), None, &[PRICING_SPEC]).unwrap_err();
-        assert!(error.to_string().contains("[G-61]"));
+        for repeat_each in [1, 2] {
+            report["config"]["projects"][2]["repeatEach"] = json!(repeat_each);
+            let error = validate_report_with_inherited("playwright", Path::new("/project"), &report,
+                &[], 1, &BTreeSet::new(), None, &[PRICING_SPEC]).unwrap_err();
+            assert!(crate::gates::codes_in(&error.to_string()).contains(&"G-61"));
+        }
     }
 
     #[test]

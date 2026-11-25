@@ -1220,7 +1220,7 @@ export class HubDouble {
       const callerDeviceId = active?.device_id ?? "journey-device";
       if (method === "POST") {
         const force = (route.request().postDataJSON() as { force?: boolean } | null)?.force === true;
-        if (force && !this.scopesFor(machineId).includes("hub-admin")) {
+        if (force && !(active?.scopes ?? this.scopesFor(machineId)).includes("hub-admin")) {
           this.leaseTakes.push({ machine: machineId, session, force, status: 401 });
           this.observed();
           return route.fulfill({ status: 401, json: { error: "unauthorized" } });

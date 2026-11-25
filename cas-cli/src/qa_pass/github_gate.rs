@@ -236,7 +236,12 @@ fn github_merges_in_depth(command: &str, depth: usize, opaque_graphql: &mut bool
             });
             continue;
         }
-        let Some(invocation) = invocation else { continue; };
+        let Some(invocation) = invocation.and_then(|words| {
+            words.iter().enumerate().find_map(|(index, word)| {
+                (program_name(word) == "curl" || is_gh(word) && words.get(index + 1) == Some(&"api"))
+                    .then_some(&words[index..])
+            })
+        }) else { continue; };
         let (ids, unresolved) = graphql_merge_ids(invocation, opaque_graphql);
         let mut push = |selector| merges.push(GithubMerge {
             transport: MergeTransport::Api, selector, repo: None, match_head: None,
@@ -292,10 +297,33 @@ fn strip_command_prefixes<'a, 'b>(mut words: &'a [&'b str]) -> &'a [&'b str] {
 fn shell_script(words: &[&str]) -> Option<String> {
     let (program, args) = words.split_first()?;
     match program_name(program) {
-        "sh" | "bash" | "zsh" | "dash" | "ksh" => args.iter().enumerate()
-            .take_while(|(_, flag)| flag.starts_with('-') && **flag != "--")
-            .find(|(_, flag)| !flag.starts_with("--") && flag.contains('c'))
-            .and_then(|(index, _)| args.get(index + 1)).map(|script| (*script).to_owned()),
+        "sh" | "bash" | "zsh" | "dash" | "ksh" => {
+            let mut args = args.iter().copied();
+            while let Some(flag) = args.next().filter(|flag| flag.starts_with('-') && *flag != "--") {
+                if matches!(flag, "-o" | "-O") {
+                    args.next();
+                } else if !flag.starts_with("--") && flag.contains('c') {
+                    return args.next().map(str::to_owned);
+                }
+            }
+            None
+        }
+        "ssh" if args.len() > 1 => Some(args[1..].join(" ")),
+        "python3" => {
+            let script = args.windows(2).find(|args| args[0] == "-c")?[1];
+            static STRING: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+                regex::Regex::new(r#"#[^\r\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'"#)
+                    .expect("valid script string pattern")
+            });
+            Some(STRING.find_iter(script).filter_map(|literal| {
+                let literal = literal.as_str();
+                if literal.starts_with('"') {
+                    serde_json::from_str::<String>(literal).ok()
+                } else {
+                    literal.strip_prefix('\'')?.strip_suffix('\'').map(|command| command.replace("\\'", "'"))
+                }
+            }).collect::<Vec<_>>().join("\n"))
+        }
         "eval" => Some(args.join(" ")),
         _ => None,
     }
@@ -615,12 +643,11 @@ fn resolve_nodes(cwd: &Path, ids: &[String], host: Option<&str>) -> Vec<Result<P
 }
 
 fn graphql_merge_ids(tokens: &[&str], opaque_graphql: &mut bool) -> (Vec<String>, bool) {
-    let input = match gh_graphql_input(tokens) {
-        Some(input) => input,
-        None if tokens.first().is_some_and(|program| program_name(program) == "curl") => None,
-        None => return (Vec::new(), false),
-    };
-    if input.is_some_and(|path| path != "-") {
+    let input = gh_graphql_input(tokens);
+    if input.is_none() && program_name(tokens[0]) != "curl" {
+        return (Vec::new(), false);
+    }
+    if input.flatten().is_some_and(|path| path != "-") {
         *opaque_graphql = true;
         return (Vec::new(), false);
     }
@@ -633,16 +660,18 @@ fn graphql_merge_ids(tokens: &[&str], opaque_graphql: &mut bool) -> (Vec<String>
             }?;
             field.split_once('=')
         }).collect();
-    let body: Option<serde_json::Value> = tokens.iter().enumerate().find_map(|(index, token)| {
-        let value = match *token {
-            "<<<" | "-d" | "--data" | "--data-raw" | "--data-binary" | "--json" =>
+    let raw_body = if input == Some(None) { None } else {
+        tokens.iter().enumerate().find_map(|(index, token)| match *token {
+            "<<<" | "-d" | "--data" | "--data-raw" | "--data-binary" | "--data-ascii" | "--json" =>
                 tokens.get(index + 1).copied(),
-            _ => ["<<<", "--data=", "--data-raw=", "--data-binary=", "--json=", "-d"].into_iter()
-                .find_map(|prefix| token.strip_prefix(prefix)),
-        }?;
-        serde_json::from_str(value).ok()
-    });
-    if input == Some("-") && body.is_none() {
+            _ => ["<<<", "--data=", "--data-raw=", "--data-binary=", "--data-ascii=", "--json=", "-d"]
+                .into_iter().find_map(|prefix| token.strip_prefix(prefix)),
+        })
+    };
+    let body = raw_body.and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
+    if input == Some(Some("-")) && body.is_none()
+        || raw_body.is_some_and(|value| value.starts_with('@') || body.is_none() && value.contains('$'))
+    {
         *opaque_graphql = true;
         return (Vec::new(), false);
     }
@@ -657,30 +686,32 @@ fn graphql_merge_ids(tokens: &[&str], opaque_graphql: &mut bool) -> (Vec<String>
     });
     let tokens = TOKEN.find_iter(query).map(|token| token.as_str())
         .filter(|token| !token.starts_with('#')).collect::<Vec<_>>();
+    if query.starts_with('@') || query.contains('$') && (
+        !matches!(tokens.first(), Some(&("{" | "query" | "mutation" | "subscription" | "fragment")))
+        || tokens.windows(2).any(|pair| matches!(pair, ["$", "(" | "{"]))
+    ) {
+        *opaque_graphql = true;
+        return (Vec::new(), false);
+    }
     let mut ids = Vec::new();
     let mut unresolved = false;
     let mut depth = 0usize;
-    let mut header_arguments = 0usize;
+    let mut arguments_depth = 0usize;
     for (index, &token) in tokens.iter().enumerate() {
-        if depth == 0 {
-            match token {
-                "(" => header_arguments += 1,
-                ")" => header_arguments = header_arguments.saturating_sub(1),
-                "{" if header_arguments == 0 => depth = 1,
-                _ => {}
-            }
-            continue;
-        }
         match token {
-            "{" => depth += 1,
-            "}" => depth -= 1,
+            "(" => arguments_depth += 1,
+            ")" => arguments_depth = arguments_depth.saturating_sub(1),
+            "{" if arguments_depth == 0 => depth += 1,
+            "}" if arguments_depth == 0 => depth = depth.saturating_sub(1),
             _ => {}
         }
-        if ![concat!("mergePull", "Request"), concat!("enablePull", "RequestAutoMerge"), concat!("enqueuePull", "Request")].contains(&token)
+        if depth == 0 || arguments_depth != 0
+            || ![concat!("mergePull", "Request"), concat!("enablePull", "RequestAutoMerge"), concat!("enqueuePull", "Request")].contains(&token)
+            || tokens.get(index + 1) == Some(&":") || matches!(tokens[index - 1], "@" | ".")
         {
             continue;
         }
-        let ["(", arguments @ ..] = &tokens[index + 1..] else { continue; };
+        let arguments = graphql_group(&tokens[index + 1..], "(", ")").unwrap_or_default();
         let input = match arguments {
             ["input", ":", value @ ..] => value,
             _ => &[],

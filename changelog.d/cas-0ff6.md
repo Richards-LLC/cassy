@@ -17,9 +17,9 @@
   on release apply as well, and the next close or merge requests a new review;
   a temporary download failure retries the same dispatch. A revocation Cloud reports is recorded
   locally, so that new review leaves the artifact out. The approval is checked
-  again at the final write of close, `task update status=closed` and release
-  apply and at merge admission, so a report edited, republished or revoked
-  while one of them runs is refused; a release preview changes nothing. The
+  again just before the final write of close, `task update status=closed` and
+  release apply, and at merge admission; that recheck refuses when it finds the
+  report edited, republished or revoked. A release preview changes nothing. The
   review is required whenever the project has verification on, including on
   an OpenCode lane. An
   unreadable inventory, dispatch or verdict refuses with G-68. `supervisor_override` and the shipped-timeout

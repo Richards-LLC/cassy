@@ -1045,8 +1045,6 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
-        let stored_task = matches!(req.status.as_deref().map(str::parse::<TaskStatus>), Some(Ok(TaskStatus::Closed)))
-            .then(|| task.clone());
         let review_dispatch_update = req.review_dispatch_id.as_deref()
             .map(|value| self.normalize_review_dispatch_id(Some(value))).transpose()?;
         self.ensure_review_assignee(
@@ -1811,6 +1809,8 @@ impl CasCore {
                 data: None,
             });
         }
+        let stored_task = matches!(req.status.as_deref().map(str::parse::<TaskStatus>), Some(Ok(TaskStatus::Closed)))
+            .then(|| task.clone());
         // A recorded receipt must never silently acquire a different epic or
         // target, including a declined delivery whose active proof was cleared.
         // Give the supported supervisor repair before the generic scope guard

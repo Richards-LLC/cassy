@@ -5,7 +5,7 @@ import type { Machine } from "./hub-double";
 export const ATLAS: Machine = {
   id: "atlas",
   label: "Atlas · Linux",
-  sessions: [{ name: "patient-pelican-9", supervisor: "patient-pelican-9", project_dir: "/projects/cas-src", workers: ["young-otter-14"], liveness: "live" }],
+  sessions: [{ name: "patient-pelican-9", supervisor: "patient-pelican-9", project_dir: "/projects/cas-src", workers: ["young-otter-14"], liveness: "live", ws_port: 48100, machine_online: true }],
 };
 
 export const STUDIO: Machine = {

@@ -141,19 +141,28 @@ pub(super) fn names_runner(args: &[String]) -> bool {
 /// `validate_report` reads. Suite names join a test's own name with spaces,
 /// as `--test-name-pattern` matches them.
 const NODE_TEST_REPORTER: &str = r#"export default async function* (source) {
-  const names = [], files = new Map();
+  const names = [], below = [], files = new Map();
   let success = true;
   for await (const { type, data } of source) {
-    if (type === 'test:start') names[data.nesting] = data.name;
+    if (type === 'test:start') {
+      names[data.nesting] = data.name;
+      below[data.nesting] = [];
+    }
     if (type !== 'test:pass' && type !== 'test:fail') continue;
     const file = files.get(data.file) ?? { name: data.file, status: 'passed', assertionResults: [] };
     files.set(data.file, file);
     const failed = type === 'test:fail' && !data.skip && !data.todo;
-    if (failed) { success = false; file.status = 'failed'; }
+    const failureType = failed ? data.details?.error?.failureType : undefined;
+    if (failed) {
+      success = false;
+      file.status = 'failed';
+      for (let depth = 0; depth < data.nesting; depth++) below[depth]?.push(failureType ?? null);
+    }
     if (data.details?.type === 'suite') continue;
     file.assertionResults.push({
       fullName: [...names.slice(0, data.nesting), data.name].join(' '),
-      failureType: failed ? data.details?.error?.failureType : undefined,
+      failureType,
+      subtestFailures: failed ? (below[data.nesting] ?? []) : undefined,
       status: data.skip ? 'skipped' : data.todo ? 'todo' : failed ? 'failed' : 'passed',
     });
   }
@@ -2098,12 +2107,6 @@ fn execute_selection(
             format!("^(?:{pattern})$")
         };
         let selected: Vec<_> = selected.into_iter().cloned().collect();
-        let red_selection = red_task.as_ref().map(|_| {
-            if matches!(widened, Some((super::widened::Scope::File(_), _, _))) {
-                parsed_tests(path, &source, &[(1, source.lines().count())], true).unwrap_or_default()
-                    .into_iter().map(|(identity, ..)| identity).collect()
-            } else { selected.clone() }
-        });
         let run = |iteration| -> Result<(bool, Value)> {
             let report = reports.path().join(format!("report-{iteration}.json"));
             let mut command = Command::new(&executable);
@@ -2195,8 +2198,8 @@ fn execute_selection(
                 serde_json::from_slice(&std::fs::read(&report).with_context(|| {
                     format!("{runner} did not produce a stability report for {path}")
                 })?)?;
-            if !success && let (Some(task), Some(selection)) = (&red_task, &red_selection) {
-                let tests = failed_javascript_tests(runner, repo, &value, selection);
+            if !success && let Some(task) = &red_task {
+                let tests = failed_javascript_tests(runner, repo, &value);
                 if !tests.is_empty() {
                     super::record_red_first_failure(cas_root, repo, head, &task.id,
                         super::RedFirstFailure::JavaScript { runner: runner.into(), tests }, format!("{runner} {path}"))?;
@@ -2420,10 +2423,12 @@ fn validate_declared_discovery(
     Ok(())
 }
 
-fn failed_javascript_tests(runner: &str, repo: &Path, report: &Value, selected: &[Identity]) -> BTreeSet<Identity> {
+fn failed_javascript_tests(runner: &str, repo: &Path, report: &Value) -> BTreeSet<Identity> {
     fn rows(value: &Value) -> impl Iterator<Item = &Value> { value.as_array().into_iter().flatten() }
+    fn node_direct(failure: &Value) -> bool {
+        matches!(failure.as_str(), Some("testCodeFailure" | "testTimeoutFailure" | "uncaughtException" | "unhandledRejection"))
+    }
     let mut failed = BTreeSet::new();
-    if selected.is_empty() { return failed; }
     if runner == "playwright" {
         if report["errors"].as_array().is_none_or(|errors| !errors.is_empty()) { return failed; }
         let root = playwright_report_root(repo, report);
@@ -2445,14 +2450,14 @@ fn failed_javascript_tests(runner: &str, repo: &Path, report: &Value, selected: 
                 if test["status"] == "failed"
                     && let Some(name) = test["fullName"].as_str()
                     && (runner != "node" || (name != raw && name != path
-                        && test["failureType"].as_str().is_some_and(|failure| !matches!(failure, "hookFailed" | "cancelledByParent" | "testAborted"))))
+                        && (node_direct(&test["failureType"]) || (test["failureType"] == "subtestsFailed"
+                            && rows(&test["subtestFailures"]).any(node_direct)))))
                 {
                     failed.insert(Identity::exact(path.clone(), name));
                 }
             }
         }
     }
-    failed.retain(|identity| selected.iter().any(|test| test.selects(identity)));
     failed
 }
 
@@ -2883,10 +2888,7 @@ mod tests {
         let report = serde_json::from_str(include_str!("javascript/playwright-timed-out.txt")).unwrap();
         let timeout = id("hub-web/e2e/journeys/launch-session.journey.ts",
             "HUB-J13 read a project's quality trend from the palette");
-        let other = id(&timeout.path, "another spec");
-        assert_eq!(failed_javascript_tests("playwright", Path::new("/project"), &report,
-            &[timeout.clone(), other.clone()]), BTreeSet::from([timeout]));
-        assert!(failed_javascript_tests("playwright", Path::new("/project"), &report, &[other]).is_empty());
+        assert_eq!(failed_javascript_tests("playwright", Path::new("/project"), &report), BTreeSet::from([timeout]));
     }
 
     /// cas-a4c3: park demanded five capped passes for hub-web's `node:test`

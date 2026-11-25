@@ -20,6 +20,7 @@ use std::path::Path;
 use cas_types::{Task, TaskRisk};
 
 use super::{SourceModule, changed_source_modules, proof_target_matches_module};
+use crate::factory_worker_check::{PassingTests, stability, widened::{self as widen, Scope}};
 
 /// The modules a delivery's test receipts cover beyond its declared targets.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -145,6 +146,54 @@ pub(super) fn park_refusals(
         listed_park_refusals(cas_root, proof_repo, task, changed_paths, head, target, delivery_ranges))
 }
 
+pub(super) fn delivered_tests(
+    cas_root: &Path,
+    repo: &Path,
+    head: &str,
+    target: &str,
+    paths: &[String],
+    ranges: Option<&[(String, String)]>,
+) -> anyhow::Result<(Vec<stability::Identity>, Vec<Scope>)> {
+    let (mut tests, widened) = stability::requirements(repo, head, target, paths, ranges)?;
+    // GH #2362, #2380: a registered journey against a deployed host follows
+    // its declared lane, so neither it nor a helper only such journeys
+    // import owes a worker run here; a locally served journey stays owed.
+    let journeys = widen::deployed_journey_specs(cas_root, repo, head);
+    tests.retain(|test| !journeys.contains(&test.path));
+    let widened = widened.into_iter().flat_map(|scope| match &scope {
+        Scope::File(spec) if journeys.contains(spec) => Vec::new(),
+        Scope::Related(helper) => match crate::factory_worker_check::javascript::related_tests(repo, helper) {
+            Some(("playwright", specs)) if specs.iter().any(|spec| journeys.contains(spec)) =>
+                specs.into_iter().filter(|spec| !journeys.contains(spec)).map(Scope::File).collect(),
+            _ => vec![scope],
+        },
+        _ => vec![scope],
+    }).collect();
+    Ok((tests, widened))
+}
+
+pub(super) fn red_first_refusal(
+    task: &Task, passing: &PassingTests<'_>, head: &str,
+    ranges: &[(String, String)], delivered: &[stability::Identity],
+) -> Option<String> {
+    if task.execution_note.as_deref() != Some("test-first") { return None; }
+    let start_base = task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str());
+    if passing.has_red_first_evidence(&task.id, start_base, ranges, delivered) { return None; }
+    let base = start_base.unwrap_or("the recorded task start base");
+    let short = &head[..head.len().min(12)];
+    // gate[G-170 park as-of]: Test-first delivery requires a capped failing run before the fix
+    Some(crate::gates::tag("G-170", format!(
+        "RED-FIRST EVIDENCE REQUIRED: Task {} declares execution_note=test-first. \
+         In its assigned checkout, record the delivered regression failing at {base} or at a committed red checkpoint \
+         in this delivery before {short}. Run `cargo nextest run -p <crate> --lib -E 'test(<name>)'` \
+         (or `--test <harness>` instead of `--lib`) or a capped JS test, for example \
+         `cas factory worker-check --cas-root <cas-root> -- node --test <file>`. \
+         A capped compile failure at {base} also qualifies: run `cargo check -p <crate> --tests`. \
+         Return to the fixed tip and record passing proof for the same regression before retrying park.",
+        task.id,
+    )))
+}
+
 fn listed_park_refusals(
     cas_root: &Path,
     proof_repo: &Path,
@@ -189,55 +238,25 @@ fn listed_park_refusals(
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
     // A receipt minted on the machine that can build a platform-gated test
     // travels on the task row (cas-289b), so park reads it too.
-    let passing = crate::factory_worker_check::PassingTests::new(cas_root, proof_repo, head).with_target(target)
+    let passing = PassingTests::new(cas_root, proof_repo, head).with_target(target)
         .with_synced(&task.deliverables.test_receipts);
     if proof_repo.join(".git").exists() {
-        use crate::factory_worker_check::stability;
         let started = std::time::Instant::now();
-        let requirements = stability::requirements(proof_repo, head, target, changed_paths, delivery_ranges);
+        let requirements = delivered_tests(cas_root, proof_repo, head, target, changed_paths, delivery_ranges);
         tracing::info!(task_id = %task.id, gate = "G-61", phase = "changed_test_discovery", head,
             elapsed_ms = started.elapsed().as_millis() as u64, "Close gate phase");
-        let (mut tests, widened) = match requirements {
-            Ok(requirements) => requirements,
+        let (tests, widened) = match requirements {
+            Ok((tests, widened)) => {
+                refusals.extend(red_first_refusal(task, &passing, head, delivery_ranges.unwrap_or_default(), &tests));
+                (tests, widened)
+            }
             Err(error) => {
                 // A declared Rust test absent from every Cargo target is
                 // proven missing, rather than an uncertain classification.
                 refusals.push(crate::gates::tag("G-61", format!("CHANGED_TEST_DISCOVERY_FAILED: {error:#}")));
-                (Vec::new(), Vec::new())
+                Default::default()
             }
         };
-        // GH #2362, #2380: a registered journey against a deployed host follows
-        // its declared lane, so neither it nor a helper only such journeys
-        // import owes a worker run here; a locally served journey stays owed.
-        use crate::factory_worker_check::widened::{self as widen, Scope};
-        let journeys = widen::deployed_journey_specs(cas_root, proof_repo, head);
-        tests.retain(|test| !journeys.contains(&test.path));
-        if task.execution_note.as_deref() == Some("test-first") {
-            let start_base = task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str());
-            if !passing.has_red_first_evidence(&task.id, start_base, delivery_ranges.unwrap_or_default(), &tests) {
-                // gate[G-170 park as-of]: Test-first delivery requires a capped failing run before the fix
-                let base = start_base.unwrap_or("the recorded task start base");
-                refusals.push(crate::gates::tag("G-170", format!(
-                    "RED-FIRST EVIDENCE REQUIRED: Task {} declares execution_note=test-first. \
-                     In its assigned checkout, record the delivered regression failing at {base} or at a committed red checkpoint \
-                     in this delivery before {short}. Run `cargo nextest run -p <crate> --lib -E 'test(<name>)'` \
-                     (or `--test <harness>` instead of `--lib`) or a capped JS test, for example \
-                     `cas factory worker-check --cas-root <cas-root> -- node --test <file>`. \
-                     A capped compile failure at {base} also qualifies: run `cargo check -p <crate> --tests`. \
-                     Return to the fixed tip and record passing proof for the same regression before retrying park.",
-                    task.id,
-                )));
-            }
-        }
-        let widened: Vec<Scope> = widened.into_iter().flat_map(|scope| match &scope {
-            Scope::File(spec) if journeys.contains(spec) => Vec::new(),
-            Scope::Related(helper) => match crate::factory_worker_check::javascript::related_tests(proof_repo, helper) {
-                Some(("playwright", specs)) if specs.iter().any(|spec| journeys.contains(spec)) =>
-                    specs.into_iter().filter(|spec| !journeys.contains(spec)).map(Scope::File).collect(),
-                _ => vec![scope],
-            },
-            _ => vec![scope],
-        }).collect();
         // GH #2355: a deleted file owes nothing and is no package input.
         let present: Vec<String> = changed_paths.iter().filter(|path| std::process::Command::new("git")
             .args(["cat-file", "-e", &format!("{head}:{path}")]).current_dir(proof_repo)

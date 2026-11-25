@@ -130,7 +130,7 @@ struct CheckReceipt {
 enum RedFirstFailure {
     Rust { package: String, harness: Option<String>, names: BTreeSet<String> },
     JavaScript { runner: String, tests: BTreeSet<stability::Identity> },
-    Compile,
+    Compile { package: String },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -313,8 +313,9 @@ fn rust_red_first_failure(test: Option<&TargetedTest>, status: Option<i32>, log:
     let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").ok()?;
     let log = ansi.replace_all(&log, "");
     if test.is_none() && status == Some(101) {
-        return regex::Regex::new(r"(?m)^error: could not compile `[^`]+`").ok()?
-            .is_match(&log).then_some(RedFirstFailure::Compile);
+        let package = regex::Regex::new(r"(?m)^error: could not compile `([^`]+)`").ok()?
+            .captures(&log)?[1].to_owned();
+        return Some(RedFirstFailure::Compile { package });
     }
     let test = test.filter(|_| status == Some(100))?;
     let summary = regex::Regex::new(r"(?m)^─+\r?\n([ \t]*Summary +)\[[^\]\r\n]*\] +[1-9][0-9]* tests? run: [^\r\n]+\r?$").ok()?;
@@ -325,7 +326,7 @@ fn rust_red_first_failure(test: Option<&TargetedTest>, status: Option<i32>, log:
     }
     let (package, _) = package_selector(&test.package)?;
     let binary = test.harness.as_ref().map_or_else(|| package.to_string(), |harness| format!("{package}::{harness}"));
-    let names = regex::Regex::new(r"(?m)^([ \t]*(?:FAIL|TIMEOUT|SIG[A-Z]+|ABORT|LEAK-FAIL)[ \t]+)\[[^\]\r\n]*\][ \t]+(?:\([ \t]*[0-9]+/[ \t]*[0-9]+\)[ \t]+)?(\S+)[ \t]+(\S+)[ \t]*\r?$").ok()?
+    let names = regex::Regex::new(r"(?m)^([ \t]*(?:FAIL|TIMEOUT|SIG[A-Z]+|ABORT)[ \t]+)\[[^\]\r\n]*\][ \t]+(?:\([ \t]*[0-9]+/[ \t]*[0-9]+\)[ \t]+)?(\S+)[ \t]+(\S+)[ \t]*\r?$").ok()?
         .captures_iter(&log).filter(|row| row[1].len() == status_width && row[2] == binary && stability::rust::filter_matches(&test.filter, &row[3]))
         .map(|row| row[3].to_string()).collect::<BTreeSet<_>>();
     (!names.is_empty()).then(|| RedFirstFailure::Rust { package: test.package.clone(), harness: test.harness.clone(), names })
@@ -1274,9 +1275,6 @@ pub(crate) fn has_red_first_evidence(&self, task: &str, start_base: Option<&str>
         if record.repo != checkout || record.task != task || record.head == self.head || !valid_git_oid(&record.head)
             || record.evidence.is_empty() || entry.path() != record.path(self.cas_root) { continue; }
         let at_base = start_base == Some(record.head.as_str()) && receipt_head_is_ancestor(&repo, &record.head, self.head);
-        if matches!(record.failure, RedFirstFailure::Compile) && at_base {
-            return true;
-        }
         let matched = self.records().iter().any(|(_, package, test)| {
             let Some(proof) = test.stability.as_ref().filter(|proof| stability::valid(proof)) else { return false; };
             if let RedFirstFailure::Rust { package: failed_package, harness, .. } = &record.failure
@@ -1298,7 +1296,8 @@ pub(crate) fn has_red_first_evidence(&self, task: &str, start_base: Option<&str>
                         })
                 }
                 RedFirstFailure::JavaScript { runner, tests } => &proof.runner == runner && tests.iter().any(|failed| identity.selects(failed)),
-                RedFirstFailure::Compile => false,
+                RedFirstFailure::Compile { package: failed_package } => at_base
+                    && package.as_deref().is_some_and(|package| same_workspace_package(&repo, package, failed_package)),
             })
         });
         if matched && at_base { return true; }

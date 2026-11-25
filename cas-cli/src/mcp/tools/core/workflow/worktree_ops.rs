@@ -4525,7 +4525,11 @@ impl CasCore {
                 if let Some(hold) = error.downcast_ref::<McpError>()
                     .filter(|hold| crate::mcp::tools::core::task::repeat_review::is_repair_hold(hold))
                 {
-                    return Err(hold.clone());
+                    let message = hold.message.strip_suffix("\n\n[G-170]").unwrap_or(&hold.message);
+                    return Err(McpError {
+                        message: crate::gates::tag("G-170", message).into(),
+                        ..hold.clone()
+                    });
                 }
                 Ok(format!("\nCassy could not return task {} to its worker ({error}); run task action=request_changes id={}.", task.id, task.id))
             }

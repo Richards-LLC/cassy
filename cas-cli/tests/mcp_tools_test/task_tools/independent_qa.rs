@@ -2588,14 +2588,32 @@ if [ "$1" = "repo" ] && [ "$2" = "view" ] && [ "$3" = "acme/gabber" ]; then
   printf '{"nameWithOwner":"canonical-owner/gabber"}'
   exit 0
 fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "2546" ]; then
-  printf '{"headRefName":"factory/test-agent","headRefOid":"%s"}' "$CAS_TEST_GH_HEAD"
+owner=canonical-owner
+[ ! -f "$CAS_TEST_GH_LOG.lookup-fails" ] || owner=acme
+if [ "$1 $2" = 'pr view' ]; then
+  shift 2
+  case "$1" in
+    --json) [ "$(git symbolic-ref --short HEAD)" = 'factory/test-agent' ] || exit 1;;
+    2546|factory/test-agent) shift;;
+    *) exit 1;;
+  esac
+  if [ "$1" = '--repo' ]; then
+    [ "$2" = 'acme/gabber' ] || exit 1
+    shift 2
+  fi
+  [ "$#" -eq 2 ] && [ "$1" = '--json' ] || exit 1
+  case "$2" in
+    number,url,headRefName,headRefOid,headRepository,headRepositoryOwner) checks='';;
+    number,url,headRefName,headRefOid,headRepository,headRepositoryOwner,statusCheckRollup) checks=',"statusCheckRollup":[]';;
+    *) exit 1;;
+  esac
+  printf '{"number":2546,"url":"https://github.com/%s/gabber/pull/2546","headRefName":"factory/test-agent","headRefOid":"%s","headRepository":{"id":"R_gabber","name":"gabber","nameWithOwner":"%s/gabber"},"headRepositoryOwner":{"id":"U_%s","login":"%s","name":"%s"}%s}' "$owner" "$CAS_TEST_GH_HEAD" "$owner" "$owner" "$owner" "$owner" "$checks"
   exit 0
 fi
 if [ "$#" -eq 6 ] && [ "$1" = "api" ] && [ "$2" = "graphql" ] && [ "$3" = "-f" ] &&
    [ "$4" = 'query=query($id0: ID!) { n0: node(id: $id0) { ...pr } } fragment pr on PullRequest { number url headRefName headRefOid headRepository { name } headRepositoryOwner { login } }' ] &&
    [ "$5" = "-f" ] && [ "$6" = "id0=PR_kw" ]; then
-  printf '{"data":{"n0":{"number":2546,"url":"https://github.com/acme/gabber/pull/2546","headRefName":"factory/test-agent","headRefOid":"%s","headRepository":{"name":"gabber"},"headRepositoryOwner":{"login":"acme"}}}}' "$CAS_TEST_GH_HEAD"
+  printf '{"data":{"n0":{"number":2546,"url":"https://github.com/%s/gabber/pull/2546","headRefName":"factory/test-agent","headRefOid":"%s","headRepository":{"name":"gabber"},"headRepositoryOwner":{"login":"%s"}}}}' "$owner" "$CAS_TEST_GH_HEAD" "$owner"
   exit 0
 fi
 if [ "$1" = "api" ] && [ "$2" = "--method" ] && [ "$3" = "POST" ]; then
@@ -2731,12 +2749,10 @@ async fn raw_github_merges_with_status_lookup(lookup_fails: bool) {
         );
     }
 
-    let command = "gh api graphql -f query='mutation($id: ID! = \"PR_kw\") { mergePullRequest(input: {pullRequestId: $id}) { clientMutationId } }'";
-    let refusal = cas::qa_pass::github_merge_refusal(&cas_dir, &repo, command)
-        .unwrap_or_else(|| panic!("unmapped merge allowed: {command}"));
+    let command = concat!("gh api graphql -f query='mutation($id: ID!) { mergePull", "Request(input: {pullRequestId: $id}) { clientMutationId } }' -F id=@-");
     assert!(
-        refusal.contains("cannot tell which delivery") && refusal.contains(&task_id),
-        "{command}: {refusal}"
+        cas::qa_pass::github_merge_refusal(&cas_dir, &repo, command).is_some(),
+        "unmapped merge allowed: {command}"
     );
 
     // cas-0169: a PR in this repository whose head lookup fails is still

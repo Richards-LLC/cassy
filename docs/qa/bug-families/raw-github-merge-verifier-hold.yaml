@@ -1,0 +1,3 @@
+title: Raw GitHub merges skipped the delivery verifier
+tasks: [cas-eb2e]
+journeys: [FACTORY-MERGE]

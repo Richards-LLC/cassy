@@ -181,10 +181,10 @@ fn heredocs_opened_by(line: &str) -> Vec<(String, bool, bool)> {
 /// Raw GitHub merges a shell command would perform (cas-2ee2 pre-tool guard).
 /// `gh pr merge --disable-auto` merges nothing and is not reported.
 pub fn github_merges_in(command: &str) -> Vec<GithubMerge> {
-    github_merges_in_depth(command, 0)
+    github_merges_in_depth(command, 0, &mut false)
 }
 
-fn github_merges_in_depth(command: &str, depth: usize) -> Vec<GithubMerge> {
+fn github_merges_in_depth(command: &str, depth: usize, opaque_graphql: &mut bool) -> Vec<GithubMerge> {
     let mut merges = Vec::new();
     let command = strip_data_heredoc_bodies(command);
     let mut quote = None;
@@ -208,7 +208,7 @@ fn github_merges_in_depth(command: &str, depth: usize) -> Vec<GithubMerge> {
         let words = words.as_ref().map(|words| words.iter().map(String::as_str).collect::<Vec<_>>());
         let invocation = words.as_deref().map(strip_command_prefixes);
         if depth < 3 && let Some(script) = invocation.and_then(shell_script) {
-            merges.extend(github_merges_in_depth(&script, depth + 1));
+            merges.extend(github_merges_in_depth(&script, depth + 1, opaque_graphql));
             continue;
         }
         let tokens: Vec<&str> = statement
@@ -234,6 +234,10 @@ fn github_merges_in_depth(command: &str, depth: usize) -> Vec<GithubMerge> {
                 match_head: None,
                 statement: statement_text,
             });
+            continue;
+        }
+        if invocation.is_some_and(graphql_input_file) {
+            *opaque_graphql = true;
             continue;
         }
         if ["mergePullRequest", "enablePullRequestAutoMerge", "enqueuePullRequest"]
@@ -423,6 +427,17 @@ fn hostname_flag<'a>(tokens: &[&'a str]) -> Option<&'a str> {
     tokens.iter().enumerate().find_map(|(index, token)| match *token {
         "--hostname" => tokens.get(index + 1).copied(),
         _ => token.strip_prefix("--hostname="),
+    })
+}
+
+fn graphql_input_file(tokens: &[&str]) -> bool {
+    let [program, "api", "graphql", args @ ..] = tokens else { return false; };
+    is_gh(program) && args.iter().enumerate().any(|(index, token)| {
+        let path = match *token {
+            "--input" => args.get(index + 1).copied(),
+            _ => token.strip_prefix("--input="),
+        };
+        path.is_some_and(|path| !path.is_empty() && path != "-")
     })
 }
 
@@ -616,20 +631,37 @@ fn graphql_merge_ids(tokens: &[&str]) -> (Vec<String>, bool) {
         regex::Regex::new(concat!(
             r"\b(?:mergePull", r"Request|enablePull", r"RequestAutoMerge|enqueuePull", r"Request)\s*\(",
             r#"(?:\s*input\s*:\s*(?:\$(\w+)|\{[^}]*?\bpullRequestId\s*:\s*(?:\$(\w+)|"([^"]+)")))?"#,
+            r#"|(?P<operation>\bmutation\b(?:\s+[_A-Za-z]\w*)?\s*(?:\((?P<definitions>(?:"(?:\\.|[^"\\])*"|[^"\)])*)\))?\s*\{)"#,
+            r#"|#[^\r\n]*|"(?:\\.|[^"\\])*""#,
         )).expect("valid GraphQL input pattern")
     });
     let mut ids = Vec::new();
     let mut complete = true;
+    let mut definitions = "";
     for captures in MERGE_INPUT.captures_iter(query) {
-        let id = if let Some(name) = captures.get(1).map(|name| name.as_str()) {
+        if captures.name("operation").is_some() {
+            definitions = captures.name("definitions").map_or("", |definitions| definitions.as_str());
+            continue;
+        }
+        if captures.get(0).is_some_and(|matched| matched.as_str().starts_with(['#', '"'])) {
+            continue;
+        }
+        let object = captures.get(1).is_some();
+        let id = if let Some(name) = captures.get(1).or_else(|| captures.get(2)).map(|name| name.as_str()) {
+            let default = || graphql_variable_default(definitions, name, object);
             match &body {
-                Some(body) => body["variables"][name]["pullRequestId"].as_str(),
-                None => fields.get(format!("{name}[pullRequestId]").as_str()).copied(),
-            }
-        } else if let Some(name) = captures.get(2).map(|name| name.as_str()) {
-            match &body {
-                Some(body) => body["variables"][name].as_str(),
-                None => fields.get(name).copied(),
+                Some(body) => match body["variables"].get(name) {
+                    Some(value) if object => value["pullRequestId"].as_str(),
+                    Some(value) => value.as_str(),
+                    None => default(),
+                },
+                None if object => fields.get(format!("{name}[pullRequestId]").as_str()).copied()
+                    .or_else(|| {
+                        let supplied = fields.keys().any(|key| *key == name
+                            || key.strip_prefix(name).is_some_and(|suffix| suffix.starts_with('[')));
+                        if supplied { None } else { default() }
+                    }),
+                None => fields.get(name).copied().or_else(default),
             }
         } else {
             captures.get(3).map(|id| id.as_str())
@@ -640,6 +672,19 @@ fn graphql_merge_ids(tokens: &[&str]) -> (Vec<String>, bool) {
         }
     }
     (ids, complete)
+}
+
+fn graphql_variable_default<'a>(definitions: &'a str, name: &str, object: bool) -> Option<&'a str> {
+    static DEFAULT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(concat!(
+            r#"#[^\r\n]*|"(?:\\.|[^"\\])*"|\$([_A-Za-z]\w*)\s*:\s*[_A-Za-z]\w*\s*!?\s*=\s*"#,
+            r#"(?:"([^"\\]+)"|\{(?:[^"}]|"(?:\\.|[^"\\])*")*?\bpullRequestId\s*:\s*"([^"\\]+)")"#,
+        )).expect("valid GraphQL variable default pattern")
+    });
+    DEFAULT.captures_iter(definitions)
+        .find(|captures| captures.get(1).is_some_and(|variable| variable.as_str() == name))
+        .and_then(|captures| captures.get(if object { 3 } else { 2 }))
+        .map(|id| id.as_str())
 }
 
 fn repo_identity(value: &str) -> Option<String> {
@@ -739,13 +784,18 @@ pub(crate) fn github_merge_refusal_with_supervisor(
     command: &str,
     supervisor: Option<&str>,
 ) -> Option<String> {
+    let mut opaque_graphql = false;
+    let merges = github_merges_in_depth(command, 0, &mut opaque_graphql);
+    if opaque_graphql {
+        tracing::warn!(code = "PR_VERIFIER_LOOKUP_FAILED", "Raw GitHub merge: GraphQL input file is opaque to the verifier");
+    }
     let mut lookups = Vec::new();
-    for merge in github_merges_in(command) {
-        for lookup in resolve_prs(cwd, &merge) {
-            if let Ok(pr) = &lookup && let Some(refusal) = pr_ci_refusal(pr, &merge) {
+    for merge in &merges {
+        for lookup in resolve_prs(cwd, merge) {
+            if let Ok(pr) = &lookup && let Some(refusal) = pr_ci_refusal(pr, merge) {
                 return Some(refusal);
             }
-            lookups.push((merge.clone(), lookup));
+            lookups.push((merge, lookup));
         }
     }
     if lookups.is_empty() { return None; }

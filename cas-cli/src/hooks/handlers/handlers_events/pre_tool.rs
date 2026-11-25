@@ -13631,9 +13631,6 @@ mod worker_commit_guard_tests {
         let candidate_head = git(&["rev-parse", "HEAD"]);
         assert_ne!(candidate_head, head);
         git(&["branch", "fixture-target", &candidate_head]);
-        let pr_branch = repo.path().join("pr-branch");
-        std::fs::write(&pr_branch, "factory/proof").unwrap();
-        env.set("CAS_TEST_PR_BRANCH", &pr_branch);
         let pr_checks = repo.path().join("pr-checks");
         std::fs::write(&pr_checks, "0").unwrap();
         env.set("CAS_TEST_PR_CHECKS", &pr_checks);
@@ -13647,38 +13644,30 @@ case "$1 $2 $3 $4 $5" in
     exit;;
 esac
 printf '%s\n' "$*" >> "$CAS_TEST_PR_LOOKUPS"
-branch=$(cat "$CAS_TEST_PR_BRANCH")
 if [ "$1 $2" = 'api graphql' ]; then
   query=$4
-  case "$query" in *'number url headRefName headRefOid'*) ;; *) exit 1;; esac
+  case "$query" in *'fragment pr on PullRequest { number url headRefName headRefOid headRepository { name } headRepositoryOwner { login } }') ;; *) exit 1;; esac
   shift 4
   printf '{"data":{'
   separator=''
   errors=''
-  host=github.com
   while [ "$#" -gt 0 ]; do
-    [ "$1" != '--hostname' ] || { shift 2; continue; }
     [ "$1" = '-f' ] && [ "$#" -gt 1 ] || exit 1
     key=${2%%=*}
     value=${2#*=}
     case "$key" in
-      id) alias=node;;
       id[0-9]*) alias=n${key#id};;
       *) exit 1;;
     esac
-    case "$query" in *"node(id: \$$key)"*) ;; *) exit 1;; esac
+    case "$query" in *"$alias: node(id: \$$key) { ...pr }"*) ;; *) exit 1;; esac
     printf '%s"%s":' "$separator" "$alias"
     separator=,
     case "$value" in
-      PR_fixture) number=2546; node_branch=$branch;;
+      PR_fixture) number=2546; node_branch=factory/proof;;
       PR_other) number=2547; node_branch=factory/other;;
       *) printf 'null'; errors="${errors}${errors:+,}{\"type\":\"NOT_FOUND\",\"path\":[\"$alias\"],\"message\":\"Could not resolve to a node\"}"; shift 2; continue;;
     esac
-    printf '{"number":%s,"url":"https://%s/acme/project/pull/%s","headRefName":"%s","headRefOid":"%s"' "$number" "$host" "$number" "$node_branch" "$CAS_TEST_PR_HEAD"
-    case "$query" in
-      *headRepository*) printf ',"headRepository":{"name":"project"},"headRepositoryOwner":{"login":"acme"}';;
-    esac
-    printf '}'
+    printf '{"number":%s,"url":"https://github.com/acme/project/pull/%s","headRefName":"%s","headRefOid":"%s","headRepository":{"name":"project"},"headRepositoryOwner":{"login":"acme"}}' "$number" "$number" "$node_branch" "$CAS_TEST_PR_HEAD"
     shift 2
   done
   printf '}'
@@ -13692,6 +13681,7 @@ if [ "$1 $2" = 'api graphql' ]; then
 fi
 [ "$1 $2" = 'pr view' ] || exit 1
 selector=$3
+[ "$selector" != '--json' ] || selector=$(git symbolic-ref --short HEAD)
 repository=acme/project
 while [ "$1" != '--json' ]; do
   [ "$#" -gt 1 ] || exit 1
@@ -13704,13 +13694,13 @@ case "$repository" in
 esac
 head=$CAS_TEST_PR_HEAD
 owner=${repository%%/*}
+branch=factory/proof
 case "$repository:$selector" in
-  acme/project:2546|other/project:2546) number=2546;;
-  acme/project:2547) number=2547; branch=factory/other;;
+  acme/project:2546|acme/project:factory/proof|other/project:2546) number=2546;;
+  acme/project:2547|acme/project:factory/other) number=2547; branch=factory/other;;
   acme/project:2548) number=2548; branch=factory/proof; head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;;
-  acme/project:fork:factory/renamed) [ "$branch" = factory/renamed ] || exit 1; number=2546; owner=fork;;
   acme/project:factory/renamed|acme/project:2549) number=2549; branch=factory/renamed; head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;;
-  acme/project:2550) number=2550; owner=forker;;
+  acme/project:2550|acme/project:forker:factory/proof) number=2550; owner=forker;;
   *) exit 1;;
 esac
 IFS=,
@@ -13723,15 +13713,15 @@ for field in $2; do
     url) printf '"https://%s/%s/pull/%s"' "$host" "$repository" "$number";;
     headRefName) printf '"%s"' "$branch";;
     headRefOid) printf '"%s"' "$head";;
-    headRepository) printf '{"id":"R_fixture","name":"project"}';;
-    headRepositoryOwner) printf '{"id":"U_fixture","login":"%s"}' "$owner";;
+    headRepository) printf '{"id":"R_%s_%s_project","name":"project","nameWithOwner":"%s/project"}' "$host" "$owner" "$owner";;
+    headRepositoryOwner) printf '{"id":"U_%s_%s","login":"%s","name":"%s"}' "$host" "$owner" "$owner" "$owner";;
     statusCheckRollup)
       printf '['
       total=$(cat "$CAS_TEST_PR_CHECKS")
       index=0
       while [ "$index" -lt "$total" ]; do
         [ "$index" -eq 0 ] || printf ','
-        printf '{"__typename":"CheckRun","name":"ci-%s","status":"COMPLETED","conclusion":"SUCCESS","workflowName":"CI","detailsUrl":"https://github.com/acme/project/actions/runs/%s"}' "$index" "$index"
+        printf '{"__typename":"CheckRun","name":"ci-%s","status":"COMPLETED","conclusion":"SUCCESS","workflowName":"CI","startedAt":"2026-01-01T01:00:00Z","completedAt":"2026-01-01T01:01:00Z","detailsUrl":"https://%s/%s/actions/runs/%s"}' "$index" "$host" "$repository" "$index"
         index=$((index + 1))
       done
       printf ']';;
@@ -13838,7 +13828,8 @@ printf '}'
         let graphql_multi = concat!("/fixture-only/gh api graphql -f query='mutation { a: mergePull", "Request(input: {pullRequestId: \"PR_other\"}) { clientMutationId } b: mergePull", "Request(input: {pullRequestId: \"PR_missing\"}) { clientMutationId } c: mergePull", "Request(input: {pullRequestId: \"PR_fixture\"}) { clientMutationId } }'");
         let graphql_wrapped = format!("bash -c {}", shell_words::quote(&graphql.replace("gh api", "/fixture-only/gh api")));
         let graphql_enqueue = concat!("/fixture-only/gh api graphql -f query='mutation { enqueuePull", "Request(input: {pullRequestId: \"PR_fixture\"}) { clientMutationId } }'");
-        let owner_branch = concat!("gh pr ", "merge fork:factory/renamed --squash");
+        let branch_selector = concat!("gh pr ", "merge factory/proof --squash");
+        let fork_selector = concat!("gh pr ", "merge forker:factory/proof --squash");
         let enterprise_url = concat!("gh pr ", "merge https://github.example.com/acme/project/pull/2546 --squash");
         let enterprise_rest = concat!("curl -X PUT https://github.example.com/api/v3/repos/acme/project/pulls/2546/", "merge");
         let first = dispatch();
@@ -13876,6 +13867,7 @@ printf '}'
         run("worker", &merge(2548), None);
         run("worker", &merge(2549), None);
         let recorded_fork_denial = denial_for("worker", &merge(2550));
+        run("worker", fork_selector, None);
         run("worker", &format!("{command} --repo other/project"), None);
         run("supervisor", &command, None);
         let overrides = events.list_by_type(EventType::GateOverridden, 10).unwrap();
@@ -13885,9 +13877,7 @@ printf '}'
         assert_eq!(audit["detail"], format!("{}: {reason}", first.id));
 
         let variables_denial = denial_for("worker", graphql_variables);
-        std::fs::write(&pr_branch, "factory/renamed").unwrap();
-        let owner_denial = denial_for("worker", owner_branch);
-        std::fs::write(&pr_branch, "factory/proof").unwrap();
+        let branch_denial = denial_for("worker", branch_selector);
         let enterprise_denial = denial_for("worker", enterprise_url);
         let enterprise_rest_denial = denial_for("worker", enterprise_rest);
         cas_store::request_changes_for_parked_delivery(&cas_root, &task.id, &supervisor.id, "repair fixture").unwrap();
@@ -13900,7 +13890,7 @@ printf '}'
         let rejected = |denial: Option<String>| denial.is_some_and(|text| text.contains("PR_VERIFIER_REJECTED"));
         assert_eq!((rejected(repair_denial), rejected(variables_denial)), (true, true), "same-source repair and GraphQL field-variable holds");
         assert_eq!(
-            (rejected(input_denial), rejected(json_denial), rejected(owner_denial), enterprise_denial.is_none(), enterprise_rest_denial.is_none()),
+            (rejected(input_denial), rejected(json_denial), rejected(branch_denial), enterprise_denial.is_none(), enterprise_rest_denial.is_none()),
             (true, true, true, true, true),
             "GraphQL input/JSON, owner-qualified branch, enterprise URL and enterprise REST",
         );

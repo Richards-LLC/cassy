@@ -462,6 +462,19 @@ async fn repeat_review_every_entry_refuses_g170_gh2373() {
     park_for_repeat_review_gh2373(&f, id, "main", None).await;
     env.set("CAS_AGENT_ROLE", "supervisor");
     reject_repeat_review_gh2373(&f, id, "The abort transition is unreachable").await;
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let session = "repeat-review-queue";
+    for actor in ["nocode-supervisor-session", "nocode-worker-session"] {
+        let mut registration = agents.get(actor).unwrap();
+        registration.factory_session = Some(session.into());
+        registration.metadata.insert("clone_path".into(), f.dir.path().display().to_string());
+        agents.update(&registration).unwrap();
+    }
+    let mut predecessor = assigned("cas-2373-predecessor", TaskType::Feature, "main");
+    f.put(&predecessor);
+    let core = CasCore::with_daemon(f.cas_dir(), None, None);
+    core.set_agent_id_for_testing("nocode-supervisor-session".into());
+    core.configure_worker_task_queue(WORKER, Some(vec![id.into()]), None).await.unwrap();
     reject_repeat_review_gh2373(&f, id, "A stale queue can claim the successor").await;
     open_agent_store(&f.cas_dir()).unwrap().register(&Agent::new_with_role(
         "replacement-session".into(), "replacement".into(), AgentRole::Worker,
@@ -496,28 +509,29 @@ async fn repeat_review_every_entry_refuses_g170_gh2373() {
         }
     }
     env.set("CAS_AGENT_ROLE", "supervisor");
-    let agents = open_agent_store(&f.cas_dir()).unwrap();
-    for actor in ["nocode-supervisor-session", "nocode-worker-session"] {
-        let mut registration = agents.get(actor).unwrap();
-        registration.factory_session = Some("repeat-review-queue".into());
-        registration.metadata.insert("clone_path".into(), f.dir.path().display().to_string());
-        agents.update(&registration).unwrap();
-    }
     let mut queued = parked.clone();
     queued.status = TaskStatus::Open;
     queued.assignee = None;
     queued.execution_note = Some("no-code".into());
     queued.deliverables.factory_branch_start = None;
     f.put(&queued);
-    let core = CasCore::with_daemon(f.cas_dir(), None, None);
-    core.set_agent_id_for_testing("nocode-supervisor-session".into());
-    let queue_result = core.configure_worker_task_queue(WORKER, Some(vec![id.into()]), None).await;
-    let queue_gate = match &queue_result {
-        Ok(rendered) => crate::gates::codes_in(rendered).contains(&"G-170"),
-        Err(error) => crate::gates::codes_in(&error.message).contains(&"G-170"),
-    };
+    predecessor.status = TaskStatus::AwaitingMerge;
+    f.put(&predecessor);
+    let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap();
+    let cursor = queues.get(session, WORKER).unwrap();
+    assert_eq!(cursor.current_task.as_deref(), Some(predecessor.id.as_str()));
+    assert_eq!(cursor.pending, vec![id.to_string()]);
+    let lease = || agents.get_lease(id).unwrap().map(|lease| (lease.agent_id, lease.epoch, lease.status));
+    let before_lease = lease();
+    let queue_result = core.advance_queue_after_delivery(&predecessor.id).await;
+    let queue_gate = queue_result.as_ref().is_err_and(|error| {
+        error.data.as_ref().is_some_and(|data| data["rule_id"] == "repeat_review_required")
+            && crate::gates::codes_in(&error.message).contains(&"G-170")
+    });
     let after = f.task(id);
-    if !queue_gate || after.status != queued.status || after.assignee != queued.assignee {
+    if !queue_gate || after.status != queued.status || after.assignee != queued.assignee
+        || queues.get(session, WORKER).unwrap() != cursor || lease() != before_lease
+    {
         failures.push(format!("ordered queue: {queue_result:?}; state={:?}/{:?}", after.status, after.assignee));
     }
     assert!(failures.is_empty(), "{failures:#?}");

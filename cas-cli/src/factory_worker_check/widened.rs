@@ -78,7 +78,6 @@ fn package(repo: &Path, path: &str) -> Scope {
 /// focused run of it selects no test: the directory holding the runner's
 /// config for it, else its nearest manifest.
 pub(crate) fn owning_package(repo: &Path, path: &str, runner: &str) -> Scope {
-    if runner == NODE_RUNNER { return package(repo, path); }
     javascript::runner_root(repo, path, runner).ok()
         .and_then(|(directory, _)| directory.strip_prefix(repo).ok().map(|relative| Scope::Package(relative.to_string_lossy().into())))
         .unwrap_or_else(|| package(repo, path))

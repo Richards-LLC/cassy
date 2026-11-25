@@ -83,7 +83,7 @@ pub(super) fn runner_words(runner: &str) -> impl Iterator<Item = &str> {
 /// that net catches is a support module: a `File` run of it finds no tests,
 /// so it widens to related tests for Jest/Vitest, or to its package otherwise.
 pub(super) fn test_match(path: &str, runner: Option<&str>) -> bool {
-    if matches!(runner, Some(NODE_RUNNER | "node --test")) { return node_test_file(path); }
+    if runner == Some(NODE_RUNNER) { return node_test_file(path); }
     let stem = Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
     !stem.ends_with(".d")
         && ([".test", ".spec", ".journey", ".integration"].iter().any(|suffix| stem.ends_with(suffix))
@@ -2941,8 +2941,8 @@ pub(super) mod tests {
             ("node_modules/x/test.mjs", false), ("test/a.json", false), ("test/a.d.ts", false),
         ] {
             let args = ["node", "--test", "--whole-file", path].map(String::from);
-            assert_eq!((node_test_file(path), test_match(path, Some("node")), test_match(path, Some("node --test")), invocation(&args).is_some()),
-                (accepts, accepts, accepts, accepts), "{path}");
+            assert_eq!((node_test_file(path), test_match(path, Some(NODE_RUNNER)), invocation(&args).is_some()),
+                (accepts, accepts, accepts), "{path}");
             if accepts { assert!(test_file(path), "{path}"); }
         }
     }

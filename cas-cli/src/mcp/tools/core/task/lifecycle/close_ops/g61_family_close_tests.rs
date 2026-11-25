@@ -200,6 +200,38 @@ async fn g61_gabber_declared_check_and_release_only_journeys() {
             {"id": id, "spec": spec, "reason": marker}
         ]));
     }
+    let raw = "tests/checkout.spec.ts";
+    let unlisted = "tests/local.spec.ts";
+    let locale = "tests/locale.json";
+    let config = "playwright.config.ts";
+    let registry = "docs/qa/journeys.yaml";
+    let spec = "import { test } from '@playwright/test';\nimport messages from './locale.json';\ntest('complete', () => { void messages; });\n";
+    let data = fixture(&mut env, &[
+        ("package.json", "{}".into()),
+        (config, "export default { webServer: { command: 'npm run preview' } };".into()),
+        (registry, format!("spec_checks:\n- {{spec: {raw}, worker_check: staging_only}}\n")),
+        (locale, r#"{"hello":"Hi"}"#.into()),
+        (raw, spec.into()),
+        (unlisted, spec.into()),
+    ], &[(locale, r#"{"hello":"Hi","bye":"Bye"}"#.into())], &[]);
+    let held = call(&data.worker, close.clone()).await;
+    assert!(crate::gates::codes_in(&held).contains(&"G-61"));
+    assert_eq!(open_task_store(&data.cas_dir).unwrap().get(ID).unwrap().status, TaskStatus::InProgress);
+    factory_worker_check::widened::record(&data.cas_dir, &data.worker_path, &data.head, factory_worker_check::widened::Proof {
+        runner: "playwright".into(), scope: factory_worker_check::widened::Scope::File(unlisted.into()),
+        reason: String::new(), configs: [(unlisted.into(), config.into())].into(),
+    }, 1).unwrap();
+    let parked = call(&data.worker, close).await;
+    let store = open_task_store(&data.cas_dir).unwrap();
+    if store.get(ID).unwrap().status != TaskStatus::AwaitingMerge {
+        failures.push((raw, parked));
+    } else {
+        let state = store.get_execution_state(ID).unwrap().unwrap();
+        assert_eq!(state["qa_impact"]["g61_deferred_journeys"], serde_json::json!([
+            {"id": raw, "spec": raw, "reason": "staging_only"}
+        ]));
+        assert_eq!(state["qa_impact"]["journeys"], serde_json::json!([]));
+    }
     assert!(package_failure.is_none() && failures.is_empty(), "Maizzle: {package_failure:?}; journeys: {failures:?}");
 }
 

@@ -216,12 +216,12 @@ fn github_merges_in_depth(command: &str, depth: usize, opaque_graphql: &mut bool
             .map(|token| token.trim_matches(|ch: char| matches!(ch, '\'' | '"' | '`' | '(' | ')')))
             .filter(|token| !token.is_empty())
             .collect();
-        let statement_text = statement.trim().to_string();
+        let statement_text = statement.trim();
         if let Some(gh) = tokens.iter().position(|token| is_gh(token))
             && tokens.get(gh + 1) == Some(&"pr")
             && tokens.get(gh + 2) == Some(&"merge")
         {
-            if let Some(merge) = parse_pr_merge(&tokens[gh + 3..], &statement_text) {
+            if let Some(merge) = parse_pr_merge(&tokens[gh + 3..], statement_text) {
                 merges.push(merge);
             }
             continue;
@@ -232,7 +232,7 @@ fn github_merges_in_depth(command: &str, depth: usize, opaque_graphql: &mut bool
                 selector: MergeSelector::Number(number),
                 repo,
                 match_head: None,
-                statement: statement_text,
+                statement: statement_text.to_owned(),
             });
             continue;
         }
@@ -248,7 +248,7 @@ fn github_merges_in_depth(command: &str, depth: usize, opaque_graphql: &mut bool
             let unresolved = !complete || ids.is_empty();
             let mut push = |selector| merges.push(GithubMerge {
                 transport: MergeTransport::Api, selector, repo: None, match_head: None,
-                statement: statement_text.clone(),
+                statement: statement_text.to_owned(),
             });
             if !ids.is_empty() {
                 push(MergeSelector::PullRequestNodes {
@@ -431,14 +431,29 @@ fn hostname_flag<'a>(tokens: &[&'a str]) -> Option<&'a str> {
 }
 
 fn graphql_input_file(tokens: &[&str]) -> bool {
-    let [program, "api", "graphql", args @ ..] = tokens else { return false; };
-    is_gh(program) && args.iter().enumerate().any(|(index, token)| {
-        let path = match *token {
-            "--input" => args.get(index + 1).copied(),
-            _ => token.strip_prefix("--input="),
-        };
-        path.is_some_and(|path| !path.is_empty() && path != "-")
-    })
+    let [program, "api", args @ ..] = tokens else { return false; };
+    if !is_gh(program) { return false; }
+    let mut args = args.iter().copied();
+    let mut endpoint = None;
+    let mut input = None;
+    while let Some(arg) = args.next() {
+        match arg {
+            "--" => {
+                endpoint = endpoint.or_else(|| args.next());
+                break;
+            }
+            "--input" => input = args.next(),
+            "--cache" | "--hostname" | "-F" | "--field" | "-f" | "--raw-field" |
+            "-H" | "--header" | "-q" | "--jq" | "-X" | "--method" | "-p" | "--preview" |
+            "-t" | "--template" => { args.next(); }
+            _ => if let Some(path) = arg.strip_prefix("--input=") {
+                input = Some(path);
+            } else if !arg.starts_with('-') {
+                endpoint.get_or_insert(arg);
+            },
+        }
+    }
+    endpoint == Some("graphql") && input.is_some_and(|path| !path.is_empty() && path != "-")
 }
 
 #[track_caller]
@@ -627,64 +642,117 @@ fn graphql_merge_ids(tokens: &[&str]) -> (Vec<String>, bool) {
         None => fields.get("query").copied(),
     };
     let Some(query) = query else { return (Vec::new(), false); };
-    static MERGE_INPUT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(concat!(
-            r"\b(?:mergePull", r"Request|enablePull", r"RequestAutoMerge|enqueuePull", r"Request)\s*\(",
-            r#"(?:\s*input\s*:\s*(?:\$(\w+)|\{[^}]*?\bpullRequestId\s*:\s*(?:\$(\w+)|"([^"]+)")))?"#,
-            r#"|(?P<operation>\bmutation\b(?:\s+[_A-Za-z]\w*)?\s*(?:\((?P<definitions>(?:"(?:\\.|[^"\\])*"|[^"\)])*)\))?\s*\{)"#,
-            r#"|#[^\r\n]*|"(?:\\.|[^"\\])*""#,
-        )).expect("valid GraphQL input pattern")
+    static TOKEN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"#[^\r\n]*|"""(?:\\"""|(?s:.))*?"""|"(?:\\.|[^"\\\r\n])*"|[_A-Za-z][_0-9A-Za-z]*|[^, \t\r\n\x{FEFF}]"#)
+            .expect("valid GraphQL token pattern")
     });
+    let tokens = TOKEN.find_iter(query).map(|token| token.as_str())
+        .filter(|token| !token.starts_with('#')).collect::<Vec<_>>();
     let mut ids = Vec::new();
     let mut complete = true;
-    let mut definitions = "";
-    for captures in MERGE_INPUT.captures_iter(query) {
-        if captures.name("operation").is_some() {
-            definitions = captures.name("definitions").map_or("", |definitions| definitions.as_str());
+    let mut definitions = &[][..];
+    let mut depth = 0usize;
+    for (index, &token) in tokens.iter().enumerate() {
+        match token {
+            "{" => depth += 1,
+            "}" => depth = depth.saturating_sub(1),
+            "mutation" if depth == 0 => {
+                let header = &tokens[index + 1..];
+                let header = match header {
+                    [name, tail @ ..] if name.starts_with(|ch: char| ch == '_' || ch.is_ascii_alphabetic()) => tail,
+                    _ => header,
+                };
+                definitions = graphql_group(header, "(", ")").unwrap_or_default();
+            }
+            _ => {}
+        }
+        if ![concat!("mergePull", "Request"), concat!("enablePull", "RequestAutoMerge"), concat!("enqueuePull", "Request")].contains(&token)
+            || tokens.get(index + 1) != Some(&"(")
+        {
             continue;
         }
-        if captures.get(0).is_some_and(|matched| matched.as_str().starts_with(['#', '"'])) {
-            continue;
-        }
-        let object = captures.get(1).is_some();
-        let id = if let Some(name) = captures.get(1).or_else(|| captures.get(2)).map(|name| name.as_str()) {
+        let input = match &tokens[index + 2..] {
+            ["input", ":", value @ ..] => value,
+            _ => &[],
+        };
+        let object = input.first() == Some(&"$");
+        let value = if object { input } else { graphql_object_id(input).unwrap_or_default() };
+        let id = if let ["$", name, ..] = value {
             let default = || graphql_variable_default(definitions, name, object);
             match &body {
-                Some(body) => match body["variables"].get(name) {
-                    Some(value) if object => value["pullRequestId"].as_str(),
-                    Some(value) => value.as_str(),
+                Some(body) => match body["variables"].get(*name) {
+                    Some(value) if object => value["pullRequestId"].as_str().map(str::to_owned),
+                    Some(value) => value.as_str().map(str::to_owned),
                     None => default(),
                 },
-                None if object => fields.get(format!("{name}[pullRequestId]").as_str()).copied()
+                None if object => fields.get(format!("{name}[pullRequestId]").as_str()).map(|id| (*id).to_owned())
                     .or_else(|| {
-                        let supplied = fields.keys().any(|key| *key == name
-                            || key.strip_prefix(name).is_some_and(|suffix| suffix.starts_with('[')));
+                        let supplied = fields.keys().any(|key| key == name
+                            || key.strip_prefix(*name).is_some_and(|suffix| suffix.starts_with('[')));
                         if supplied { None } else { default() }
                     }),
-                None => fields.get(name).copied().or_else(default),
+                None => fields.get(name).map(|id| (*id).to_owned()).or_else(default),
             }
         } else {
-            captures.get(3).map(|id| id.as_str())
+            value.first().and_then(|id| graphql_string_id(id))
         };
         match id.filter(|id| !id.is_empty() && !id.starts_with('@')) {
-            Some(id) => ids.push(id.to_owned()),
+            Some(id) => ids.push(id),
             None => complete = false,
         }
     }
     (ids, complete)
 }
 
-fn graphql_variable_default<'a>(definitions: &'a str, name: &str, object: bool) -> Option<&'a str> {
-    static DEFAULT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(concat!(
-            r#"#[^\r\n]*|"(?:\\.|[^"\\])*"|\$([_A-Za-z]\w*)\s*:\s*[_A-Za-z]\w*\s*!?\s*=\s*"#,
-            r#"(?:"([^"\\]+)"|\{(?:[^"}]|"(?:\\.|[^"\\])*")*?\bpullRequestId\s*:\s*"([^"\\]+)")"#,
-        )).expect("valid GraphQL variable default pattern")
+fn graphql_group<'a, 'b>(tokens: &'a [&'b str], open: &str, close: &str) -> Option<&'a [&'b str]> {
+    let (first, rest) = tokens.split_first()?;
+    if *first != open { return None; }
+    let mut depth = 1;
+    let end = rest.iter().position(|&token| {
+        if token == open { depth += 1; }
+        if token == close { depth -= 1; }
+        depth == 0
+    })?;
+    Some(&rest[..end])
+}
+
+fn graphql_object_id<'a, 'b>(tokens: &'a [&'b str]) -> Option<&'a [&'b str]> {
+    let fields = graphql_group(tokens, "{", "}")?;
+    let mut depth = 0usize;
+    for (index, &token) in fields.iter().enumerate() {
+        match token {
+            "{" | "[" => depth += 1,
+            "}" | "]" => depth = depth.saturating_sub(1),
+            "pullRequestId" if depth == 0 && fields.get(index + 1) == Some(&":") => return Some(&fields[index + 2..]),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn graphql_variable_default(definitions: &[&str], name: &str, object: bool) -> Option<String> {
+    let start = definitions.windows(4).position(|tokens| matches!(tokens, ["$", variable, ":", _] if *variable == name))?;
+    let tail = &definitions[start + 4..];
+    let tail = tail.strip_prefix(&["!"]).unwrap_or(tail);
+    let ["=", value @ ..] = tail else { return None; };
+    let value = if object { graphql_object_id(value)? } else { value };
+    graphql_string_id(value.first()?)
+}
+
+fn graphql_string_id(token: &str) -> Option<String> {
+    if !token.starts_with('"') { return None; }
+    if !token.contains("\\u{") { return serde_json::from_str(token).ok(); }
+    static ESCAPE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\\(?:u\{([0-9a-fA-F]+)\}|.)").expect("valid GraphQL escape pattern")
     });
-    DEFAULT.captures_iter(definitions)
-        .find(|captures| captures.get(1).is_some_and(|variable| variable.as_str() == name))
-        .and_then(|captures| captures.get(if object { 3 } else { 2 }))
-        .map(|id| id.as_str())
+    let json = ESCAPE.replace_all(token, |captures: &regex::Captures<'_>| {
+        let character = captures.get(1).and_then(|digits| u32::from_str_radix(digits.as_str(), 16).ok()).and_then(char::from_u32);
+        match character {
+            Some(character) => character.encode_utf16(&mut [0; 2]).iter().map(|unit| format!("\\u{unit:04x}")).collect::<String>(),
+            None => captures[0].to_owned(),
+        }
+    });
+    serde_json::from_str(&json).ok()
 }
 
 fn repo_identity(value: &str) -> Option<String> {

@@ -29,16 +29,14 @@ defect. Never rerun QA or substitute the children's ledgers for the batch round.
 
 1. Locate the task's `LEDGER.md` (`~/.cas/artifacts/<project-key>/<task-id>/`, or the
    evidence directory the dispatch names). A close reason never substitutes for
-   the ledger. In `qa.mode=batch`, a missing task ledger is owed to the release batch receipt; record NOT VERIFIED with that owner, never reject. Otherwise, if the file is absent, reject with the blocking
-   finding `QA evidence required: task has a demo_statement but no LEDGER.md`,
-   skip steps 2–6 and continue with the remaining phases; the one verdict also
-   carries their findings.
+   the ledger. In `qa.mode=batch`, a missing task ledger is owed to the release batch receipt; record NOT VERIFIED with that owner, never reject. Otherwise, if the file is absent, reject with this exact
+   summary: `QA evidence required: task has a demo_statement but no LEDGER.md`.
+   Record that rejection with `verification action=add` and stop.
 2. Run `cas qa ledger check <path> --task <id> --json` (the parser close also
    uses). A nonzero exit rejects the ledger before capture judgment: list each
-   returned line, row ID, field and message in the verification summary as a
-   blocking finding, skip steps 3–6 and continue with the remaining phases.
-   Use the candidate revision's command when reviewing a change to the parser
-   itself.
+   returned line, row ID, field and message in the verification summary, record
+   rejection, and stop. Use the candidate revision's command when reviewing a
+   change to the parser itself.
 3. Keep the JSON report. Schema 2 requires cited `path:line` expectations and
    `visible:`, `terminal:` or `http:` outcomes; DB-only PASSes fail. Legacy receipts remain valid.
 

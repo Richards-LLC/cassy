@@ -45,7 +45,7 @@ fn cached_graph(repo: &Path, package: &Path) -> std::rc::Rc<Graph> {
     graph
 }
 
-pub(super) fn node_specs(repo: &Path, directory: &Path) -> Vec<PathBuf> {
+pub(in crate::factory_worker_check) fn node_specs(repo: &Path, directory: &Path) -> Vec<PathBuf> {
     cached_graph(repo, directory).node.iter().filter(|path| {
         matches!(path.extension().and_then(|ext| ext.to_str()), Some("js" | "mjs" | "cjs"))
             && super::test_match(&path.to_string_lossy(), Some("node"))

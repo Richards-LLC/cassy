@@ -1539,7 +1539,45 @@ not yet parked, an expired task-only dispatch requests a fresh pending review
 on the next close, even if ordinary verification configuration changed. It
 never grants approval. A no-code report can supply a corrected portable
 `external_ref` inline on that close; its reference and fresh dispatch are saved
-together. Active cycles remain immutable, and receipt-bound delivery or epic
+together. A no-code spike, or a no-code task with a demo statement, is a
+covered report. `task/lifecycle/report_proof.rs` holds its typed proof
+(`ReportProof`: the proof reference and the sorted id and SHA-256 of each
+committed artifact) and the one gate, `require_report_verdict`, which close,
+`task update status=closed`, pre-merge preparation and release close call
+before any exemption. Coverage is sticky: the stored task, the edited task or a
+latest dispatch carrying `reviewed_proof` (migration m302) each make it
+covered. The gate returns Bound, carrying the dispatch and verdict it read, only for
+the latest dispatch, resolved, with an Approved non-legacy verdict whose
+recorded proof equals the current one; it holds on an active dispatch with an
+equal proof, carrying that proof so a replacement for an expired dispatch
+records it too, and asks for a new review otherwise. It follows the project's
+verification setting whatever the worker harness, and a close replayed on a
+Closed or Cancelled task returns before it. The gate only reads, so
+release preview calls it on a read-only connection (`read_report_verdict`): a
+dispatch whose recorded proof differs, or an active one that recorded none, is
+returned with Mint and retired by close, pre-merge preparation and the release
+parent (`ReportGate::retire_stale`,
+`invalidate_verification_dispatch_for_proof_drift`). Every read error and every
+inventory warning refuses with G-68. A covered close ignores
+published-delivery recovery, the shipped-timeout waiver, `supervisor_override`,
+rapid-response sampling, the mechanical tier, the release verdict and light
+depth, and reuses the gate's dispatch and verdict instead of reading them
+again. Before each Closed write, close, `task update status=closed` and release
+apply reread the row and refuse unless the same dispatch, verdict and proof
+still bind it and no other writer edited the reference
+(`ReportGate::recheck`); merge admission applies the same check in
+`Approval::validate_for_merge`. The automatic verifier is handed the recorded
+reference and artifacts; a recorded artifact that is revoked, missing from the
+committed list, listed or fetched with another digest or downloaded with a
+checksum or size mismatch, or a report dispatch that recorded no proof, stops the launch with
+`verifier_dispatch_proof_drift`, retires the dispatch and names the retry that
+mints a new one, while a fetch error retries the same dispatch. A revocation
+Cloud reports during a fetch is recorded on the receiving machine, so the next
+proof omits that artifact. Approval carry
+never revives a retired report dispatch. Negative-result, evidence-only and
+decision closes, the operator recovery decision, the web human close and
+turning verification off stay outside the gate, epics are not covered, and
+mechanical no-code chores are exempt. Active cycles remain immutable, and receipt-bound delivery or epic
 timeout recovery still requires the existing supervisor path. Measured Tier 0,
 light-depth and other existing policy exemptions remain explicit in close output;
 identity availability is reported separately from the exemption actually applied.

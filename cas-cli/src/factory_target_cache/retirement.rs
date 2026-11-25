@@ -560,6 +560,40 @@ mod tests {
         );
         assert!(!paths.iter().any(|entry| entry.file_name() == "output"));
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_automatic_retirement_never_runs_global_inventory_cas_a46c() {
+        const CHILD: &str = "CAS_A46C_RETIREMENT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let test = std::thread::current();
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", "(version 1)(allow default)(deny process-exec (literal \"/usr/sbin/lsof\"))"])
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", test.name().unwrap(), "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+
+        let (temp, root, worker, artifacts) = fixture();
+        let unrelated = temp.path().join("Desktop.txt");
+        let unrelated_file = fs::File::create(&unrelated).unwrap();
+        let target = worker.join("target");
+        let cargo_lock = fs::File::open(target.join("debug/.cargo-lock")).unwrap();
+        cargo_lock.lock_exclusive().unwrap();
+        let retire_target = || retire(&root, &worker, &artifacts, None, retirement_process_uses, |_, _| Ok(false)).unwrap();
+        assert!(!retire_target());
+        assert!(target.is_dir());
+        drop(cargo_lock);
+
+        assert!(retire_target());
+        assert!(!target.exists());
+        assert!(unrelated_file.metadata().unwrap().is_file());
+    }
+
     #[test]
     fn retirement_preserves_live_lane_output_and_failed_evidence_copy_cas_72f4() {
         let (_temp, root, worker, artifacts) = fixture();

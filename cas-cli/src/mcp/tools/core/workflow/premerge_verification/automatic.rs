@@ -5,6 +5,7 @@ use std::process::Stdio;
 
 const OWNER_KEY: &str = cas_store::AUTOMATIC_PREMERGE_OWNER_KEY;
 const PROOF_DRIFT_CODE: &str = "verifier_dispatch_proof_drift";
+const REPORT_PROOF_MISSING_CODE: &str = "verifier_dispatch_report_proof_missing";
 
 pub(super) fn owns(root: &Path, dispatch: &VerificationDispatch) -> bool {
     dispatch.verifier_agent_id.as_deref().is_some_and(|id| {
@@ -18,13 +19,16 @@ pub(super) fn owns(root: &Path, dispatch: &VerificationDispatch) -> bool {
 pub(crate) fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Result<String, String> {
     let store = core.open_task_store().map_err(|e| e.to_string())?;
     let parent = store.get_parent_epic(&task.id).map_err(|e| e.to_string())?;
+    let recorded = crate::mcp::tools::core::task::lifecycle::report_proof::ReportProof::recorded(&core.cas_root, &dispatch.id)?;
+    if recorded.is_none() && crate::mcp::tools::core::task::lifecycle::report_proof::is_report(task) {
+        return Err(format!("{REPORT_PROOF_MISSING_CODE}: dispatch {} has no recorded report proof", dispatch.id));
+    }
     // No-code close reviews bypass candidate preparation. Resolve committed
     // proof here, on the common launch path, before constructing the verifier
     // command. fetch_task checks task scope, revocation, size and SHA-256 and
     // derives this receiver's project namespace instead of a publisher path.
     let committed = crate::artifacts::proof::committed_task_artifacts(&core.cas_root, &task.id)
         .map_err(|error| error.to_string())?;
-    let recorded = crate::mcp::tools::core::task::lifecycle::report_proof::ReportProof::recorded(&core.cas_root, &dispatch.id)?;
     let drift = |id: &str| format!(
         "{PROOF_DRIFT_CODE}: artifact {id} no longer matches the proof recorded on dispatch {}", dispatch.id
     );
@@ -38,9 +42,6 @@ pub(crate) fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatc
                 return Err(drift(id));
             }
             proof.artifacts.clone()
-        }
-        None if crate::mcp::tools::core::task::lifecycle::report_proof::is_report(task) => {
-            return Err(format!("{PROOF_DRIFT_CODE}: dispatch {} records no proof of the report it reviews", dispatch.id));
         }
         None => committed.into_iter().map(|artifact| (artifact.id, artifact.sha256)).collect(),
     };
@@ -310,9 +311,8 @@ pub(super) struct LaunchError {
 /// The daemon names each refusal with a leading code. The code, matched whole,
 /// is the classification; the message text after it is never searched.
 pub(super) fn retry_for_code(message: &str) -> Retry {
-    match message.split_once(':').map_or(message, |(code, _)| code).trim() {
-        PROOF_DRIFT_CODE
-        | "verifier_factory_scope"
+    match refusal_code(message) {
+        "verifier_factory_scope"
         | "verifier_factory_task_terminal"
         | "verifier_factory_owner"
         | "verifier_factory_unsupported"
@@ -320,6 +320,10 @@ pub(super) fn retry_for_code(message: &str) -> Retry {
         "verifier_factory_store_busy" | "verifier_factory_launch_dropped" => Retry::Contended,
         _ => Retry::Backoff,
     }
+}
+
+fn refusal_code(message: &str) -> &str {
+    message.split_once(':').map_or(message, |(code, _)| code).trim()
 }
 
 /// A store refusal with its code, by the typed error: contention is named
@@ -584,15 +588,24 @@ pub(crate) fn launch_with_preparation(
         // durable dedupe key; do not emit a second timeout wake here.
         if let Err(error) = result && chrono::Utc::now() < live.deadline_at && !resolved(&worker, &live) {
             let error = crate::mcp::tools::service::agent_search_system::system::redact_known_credentials(&error);
-            if retry_for_code(&error) == Retry::Never && error.starts_with(PROOF_DRIFT_CODE) {
+            let code = refusal_code(&error);
+            if matches!(code, PROOF_DRIFT_CODE | REPORT_PROOF_MISSING_CODE) {
                 let retired = cas_store::invalidate_verification_dispatch_for_proof_drift(&worker.cas_root, &live.id);
-                let _ = attention(&worker, &live, &match retired {
-                    Ok(_) => format!(
-                        "Automatic verifier stopped: {error}. This dispatch was retired; retry {} to request a new review of the current report.",
-                        retry_call(&worker.cas_root, &live)
-                    ),
+                let detail = match retired {
+                    Ok(_) => {
+                        let retry = retry_call(&worker.cas_root, &live);
+                        let recovery = if code == REPORT_PROOF_MISSING_CODE {
+                            format!("Reconnect or restart the Cassy MCP session that requested the review so it uses the installed binary, then retry {retry}.")
+                        } else {
+                            format!("Retry {retry} to request a new review of the current report.")
+                        };
+                        format!("Automatic verifier stopped: {error}. This dispatch was retired. {recovery}")
+                    }
                     Err(retire) => format!("Automatic verifier stopped: {error}. Retiring this dispatch failed: {retire}. Inspect it before retrying."),
-                });
+                };
+                if let Err(notice) = attention(&worker, &live, &detail) {
+                    tracing::warn!(dispatch_id = %live.id, %notice, "{detail}");
+                }
             } else { match cas_store::release_failed_verifier_dispatch(&worker.cas_root, &live.id, &child.id, &error) {
                 Ok(true) => {
                     let retry = recovery(&worker.cas_root, &live);

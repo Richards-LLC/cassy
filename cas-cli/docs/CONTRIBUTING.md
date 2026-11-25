@@ -1569,9 +1569,13 @@ still bind it and no other writer edited the reference
 `Approval::validate_for_merge`. The automatic verifier is handed the recorded
 reference and artifacts; a recorded artifact that is revoked, missing from the
 committed list, listed or fetched with another digest or downloaded with a
-checksum or size mismatch, or a report dispatch that recorded no proof, stops the launch with
+checksum or size mismatch stops the launch with
 `verifier_dispatch_proof_drift`, retires the dispatch and names the retry that
-mints a new one, while a fetch error retries the same dispatch. A revocation
+mints a new one, while a fetch error retries the same dispatch. A report
+dispatch with no recorded proof stops with `verifier_dispatch_report_proof_missing`.
+The verifier retires it without a verdict and tells the caller to reconnect or
+restart the Cassy MCP session on the installed binary before retrying the close.
+A revocation
 Cloud reports during a fetch is recorded on the receiving machine, so the next
 proof omits that artifact. Approval carry
 never revives a retired report dispatch. Negative-result, evidence-only and

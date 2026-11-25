@@ -492,7 +492,7 @@ mod tests {
         let base = git(&["rev-parse", "HEAD"]);
         let paths = ["scripts/undocumented.json", "scripts/unknown.mjs"].map(String::from);
         std::fs::write(repo.join(&paths[0]), "{}").unwrap();
-        std::fs::write(repo.join(&paths[1]), "export const value = 1;").unwrap();
+        std::fs::write(repo.join(&paths[1]), "export const value = ;").unwrap();
         git(&["add", "."]);
         git(&["commit", "-qm", "unknown inputs"]);
         let head = git(&["rev-parse", "HEAD"]);

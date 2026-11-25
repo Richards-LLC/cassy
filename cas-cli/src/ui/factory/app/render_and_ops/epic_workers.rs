@@ -9086,7 +9086,11 @@ mod tests {
             let queue = Arc::new(SyncQueue::open(cas_dir).unwrap());
             queue.init().unwrap();
             CloudSyncer::new_for_project(
-                queue, config.clone(), CloudSyncerConfig::default(), project_id.into(), cas_dir,
+                queue,
+                config.clone(),
+                CloudSyncerConfig::default(),
+                project_id.into(),
+                cas_dir,
             )
         };
         let peer = syncer(&root);
@@ -9116,7 +9120,7 @@ mod tests {
         tasks.add(&task).unwrap();
         owner_tasks.add(&task).unwrap();
 
-        let stored = Arc::new(Mutex::new((serde_json::Value::Null, 0_u64)));
+        let stored = Arc::new(Mutex::new((serde_json::Value::Null, 0_i64)));
         let uploaded = Arc::clone(&stored);
         Mock::given(method("POST")).and(path(format!("/api/teams/{team}/sync/push")))
             .respond_with(move |request: &wiremock::Request| {
@@ -9243,7 +9247,10 @@ mod tests {
         );
         assert_eq!(audit["previous_tip"], anchor);
         env.set_current_dir(&project);
-        assert_eq!(pull(), (TaskStatus::InProgress, Some("replacement-worker".into()), branch.into(), None));
+        assert_eq!(
+            pull(),
+            (TaskStatus::InProgress, Some("replacement-worker".into()), branch.into(), None),
+        );
         env.set_current_dir(&checkout);
         // The replacement can now continue, park and merge under its own name.
         std::fs::write(checkout.join("recovery.txt"), "replacement work\n").unwrap();
@@ -9262,7 +9269,15 @@ mod tests {
             TaskStatus::AwaitingMerge
         );
         env.set_current_dir(&project);
-        assert_eq!(pull(), (TaskStatus::AwaitingMerge, Some("replacement-worker".into()), branch.into(), Some(branch.into())));
+        assert_eq!(
+            pull(),
+            (
+                TaskStatus::AwaitingMerge,
+                Some("replacement-worker".into()),
+                branch.into(),
+                Some(branch.into()),
+            ),
+        );
         // Replay the already-parked mismatch from GH #2255. The supported
         // recovery returns it for changes before supervisor branch approval.
         let mut mismatched = tasks.get(&task.id).unwrap();

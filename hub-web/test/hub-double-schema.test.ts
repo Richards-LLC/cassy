@@ -121,17 +121,12 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
     } as unknown as WebSocketRoute);
     return { frames, send: (message: unknown) => clientSend(JSON.stringify(message)) };
   };
-  const legacy = connect("/v1/sessions/running/attach");
-  legacy.send({ SupervisorCommand: { command: "standby", client_ref: "command", confirmed: true } });
-  expect(legacy.frames).toHaveLength(2);
-  check("DaemonWelcome", legacy.frames[0]);
-  check("SupervisorCommandReceipt", legacy.frames[1]?.SupervisorCommandReceipt.receipt);
-
   const multiplex = connect("/v1/attach");
   multiplex.send({ proto: 2 });
-  multiplex.send({ channel: "pty:running", subscribe: true });
   const scripted = { device_id: "journey-device", client_ref: "scripted", command: "finish", phase: "observed", detail: "", output: "", interactive: false };
-  double.send("running", { SupervisorCommandReceipt: { receipt: scripted } });
+  const sending = (async () => double.send("running", { SupervisorCommandReceipt: { receipt: scripted } }))();
+  multiplex.send({ channel: "pty:running", subscribe: true });
+  await sending;
   expect(() => double.send("running", { SupervisorCommandReceipt: { receipt: { ...scripted, client_ref: null } } })).toThrow(
     expect.objectContaining({ schemaId: "urn:cassy:hub:SupervisorCommandReceipt" }),
   );
@@ -139,6 +134,21 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   expect(multiplex.frames.slice(1).map(frame => frame.channel)).toEqual(["pty:running", "pty:running"]);
   check("DaemonWelcome", multiplex.frames[1]?.message);
   check("SupervisorCommandReceipt", multiplex.frames[2]?.message.SupervisorCommandReceipt.receipt);
+
+  const legacy = connect("/v1/sessions/running/attach");
+  legacy.send({ SupervisorCommand: { command: "standby", client_ref: "command", confirmed: true } });
+  expect(legacy.frames).toHaveLength(2);
+  check("DaemonWelcome", legacy.frames[0]);
+  check("SupervisorCommandReceipt", legacy.frames[1]?.SupervisorCommandReceipt.receipt);
+
+  vi.useFakeTimers();
+  try {
+    const refusal = expect((async () => double.send("missing", { SupervisorCommandReceipt: { receipt: scripted } }))()).rejects.toBeInstanceOf(Error);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await refusal;
+  } finally {
+    vi.useRealTimers();
+  }
 
   const result = await http("/v1/sessions/running", "DELETE");
   check("EndSessionReceipt", result.json);

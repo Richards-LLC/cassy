@@ -165,8 +165,6 @@ fn extend_progressing_verification_dispatches(
     let lead = Duration::minutes(2);
     let extension = Duration::minutes(10);
     let hard_cap = Duration::minutes(60);
-    let heartbeat_fresh = Duration::minutes(3);
-    let lane_fresh = Duration::minutes(5);
     let Ok(due) = cas_store::expired_verification_dispatches(cas_dir, now - hard_cap, now + lead, 1000)
     else {
         return 0;
@@ -181,23 +179,9 @@ fn extend_progressing_verification_dispatches(
             )
         })
         .filter(|dispatch| {
-            let heartbeat = dispatch.verifier_agent_id.as_deref().is_some_and(|verifier| {
-                agents.as_ref().and_then(|agents| agents.get(verifier).ok()).is_some_and(|agent| {
-                    matches!(agent.status, cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle)
-                        && now - agent.last_heartbeat <= heartbeat_fresh
-                })
-            });
-            heartbeat
-                || dispatch.repository.as_ref().is_some_and(|proof| {
-                    crate::factory_review_scratch::verifier_lane_active(
-                        cas_dir,
-                        &dispatch.task_id,
-                        &dispatch.id,
-                        &proof.head_commit,
-                        now,
-                        lane_fresh,
-                    )
-                })
+            let child = dispatch.verifier_agent_id.as_deref()
+                .and_then(|verifier| agents.as_ref().and_then(|agents| agents.get(verifier).ok()));
+            crate::factory_review_scratch::verifier_progressing(cas_dir, dispatch, child.as_ref(), now)
         })
         .filter(|dispatch| {
             cas_store::extend_verification_dispatch_deadline(

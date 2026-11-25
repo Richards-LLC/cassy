@@ -8,6 +8,17 @@ use std::process::ExitCode;
 use cas::{cli, config, duplicate_check, error, logging, sentry, store};
 
 fn main() -> ExitCode {
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().skip(1).eq(["--internal-sign-installed"]) {
+        return match cli::sign_installed_macos() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     // Preflight has no configuration, telemetry or store side effects.
     let preflight_args: Vec<_> = std::env::args_os().collect();
     if preflight_args.len() == 5 && preflight_args[1] == "factory"

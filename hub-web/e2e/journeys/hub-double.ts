@@ -403,7 +403,7 @@ export class HubDouble {
     const event = { sequence, revision: 0, kind, session, pane_id: paneId, at: this.stamp() };
     const frame = `id: ${sequence}.${event.revision}\nevent: ${kind.replaceAll("_", "")}\ndata: ${JSON.stringify(event)}\n\n`;
     await this.page.evaluate(
-      ([host, data]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number }).__journeyMachineEvent(host, data),
+      ([host, data]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string, framed: boolean) => number }).__journeyMachineEvent(host, data, true),
       [`${machineId}.test`, frame] as const,
     );
   }
@@ -496,7 +496,7 @@ export class HubDouble {
       const streams = new Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>();
       const w = window as unknown as {
         __journeyOutage: (host: string, isDown: boolean, reset: boolean) => void;
-        __journeyMachineEvent: (host: string, data: string) => number;
+        __journeyMachineEvent: (host: string, data: string, framed?: boolean) => number;
         __journeyResetEvents: (host: string) => void;
         __journeyEventStreamOpens: Record<string, number>;
       };
@@ -510,10 +510,11 @@ export class HubDouble {
       };
       // cas-9772: a machine event on the open streams, as the hub announces
       // a session list change. Returns how many streams carried it.
-      w.__journeyMachineEvent = (host, frame) => {
+      w.__journeyMachineEvent = (host, data, framed = false) => {
+        const bytes = new TextEncoder().encode(framed ? data : `data: ${data}\n\n`);
         let delivered = 0;
         for (const controller of streams.get(host) ?? []) {
-          try { controller.enqueue(new TextEncoder().encode(frame)); delivered += 1; } catch { /* closed */ }
+          try { controller.enqueue(bytes); delivered += 1; } catch { /* closed */ }
         }
         return delivered;
       };

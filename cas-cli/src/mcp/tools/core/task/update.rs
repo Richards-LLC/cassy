@@ -361,6 +361,11 @@ pub(crate) fn normalize_assignee_update_value(raw: &str) -> Option<String> {
     }
 }
 
+fn assignment_agent<'a>(agents: &'a [cas_types::Agent], assignee: &str) -> Option<(&'a cas_types::Agent, bool)> {
+    agents.iter().find(|agent| agent.name.eq_ignore_ascii_case(assignee)).map(|agent| (agent, true))
+        .or_else(|| agents.iter().find(|agent| agent.id.eq_ignore_ascii_case(assignee)).map(|agent| (agent, false)))
+}
+
 /// True when any caller identity facet matches the stored owner (after trim).
 pub(crate) fn caller_matches_epic_owner(
     owner: &str,
@@ -829,13 +834,7 @@ impl CasCore {
         };
         // Prefer display names, then normalize session IDs just as task mine
         // resolves worker identity. Unknown names remain valid for pre-spawn use.
-        let by_name = agents
-            .iter()
-            .find(|agent| agent.name.eq_ignore_ascii_case(assignee));
-        let worker = by_name.or_else(|| {
-            agents.iter().find(|agent| agent.id.eq_ignore_ascii_case(assignee))
-        });
-        let Some(worker) = worker else {
+        let Some((worker, by_name)) = assignment_agent(&agents, assignee) else {
             warnings.push(format!(
                 "⚠️ No registered factory agent found for assignee \
                  '{assignee}'. Verify the worker name with \
@@ -847,7 +846,7 @@ impl CasCore {
             return Ok(assignee.to_string());
         };
         let worker_name = &worker.name;
-        if by_name.is_none() {
+        if !by_name {
             warnings.push(format!(
                 "⚠️ Assignee '{assignee}' is a session ID. \
                  Normalized to display name '{worker_name}' so \
@@ -1045,6 +1044,23 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        let assignment_changes = req.assignee.as_deref().is_some_and(|raw| {
+                let Some(assignee) = normalize_assignee_update_value(raw) else { return task.assignee.is_some() };
+                if let Some((agents, next)) = self.open_agent_store().ok().and_then(|store| {
+                    let agents = store.list(None).ok()?;
+                    let next = assignment_agent(&agents, &assignee)?.0.clone();
+                    Some((store, next))
+                }) {
+                    return !super::task_assignee_matches_agent(agents.as_ref(), task.assignee.as_deref(), &next);
+                }
+                task.assignee.as_deref() != Some(assignee.as_str())
+            });
+        let status_reentry = req.status.as_deref().and_then(|value| value.parse::<TaskStatus>().ok())
+            .is_some_and(|status| status != task.status && (status == TaskStatus::InProgress
+                || status == TaskStatus::Open && task.assignee.is_some()));
+        let repair_review = if assignment_changes || status_reentry || proof_scope_fix {
+            super::repeat_review::admit_repair(&self.cas_root, &task.id)?
+        } else { super::repeat_review::RepairAdmission::default() };
         let review_dispatch_update = req.review_dispatch_id.as_deref()
             .map(|value| self.normalize_review_dispatch_id(Some(value))).transpose()?;
         self.ensure_review_assignee(
@@ -1809,6 +1825,8 @@ impl CasCore {
                 data: None,
             });
         }
+        let stored_task = matches!(req.status.as_deref().map(str::parse::<TaskStatus>), Some(Ok(TaskStatus::Closed)))
+            .then(|| task.clone());
         // A recorded receipt must never silently acquire a different epic or
         // target, including a declined delivery whose active proof was cleared.
         // Give the supported supervisor repair before the generic scope guard
@@ -2275,7 +2293,7 @@ impl CasCore {
 
                     // cas-2f4d: a new assignment is staffing, so a frozen train
                     // refuses it here, on the path MCP and Commander share.
-                    if task.assignee.as_deref() != Some(canonical_assignee.as_str()) {
+                    if assignment_changes {
                         crate::epic_design_review::ensure_staffing_allowed(&self.cas_root, &task.id)
                             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
                     }
@@ -2285,12 +2303,16 @@ impl CasCore {
                     if let Some(prior) = task
                         .assignee
                         .clone()
-                        .filter(|prior| *prior != canonical_assignee)
+                        .filter(|_| assignment_changes)
                     {
                         task.deliverables
                             .record_handoff_branch(&format!("factory/{prior}"));
                     }
                     task.assignee = Some(canonical_assignee);
+                    if repair_review.artifact_id.is_some() {
+                        task.notes.push_str(&repair_review.brief());
+                        changes.push("notes");
+                    }
                     task.deliverables.split_takeover = split_takeover.clone();
                     if let Some(audit) = assignee_override_audit.take() {
                         if !task.notes.is_empty() {
@@ -2452,6 +2474,7 @@ impl CasCore {
         // cas-062d: track status transition for supervisor lifecycle push.
         let mut lifecycle_status_change: Option<(TaskStatus, TaskStatus)> = None;
         let mut direct_close_hook_evidence = None;
+        let mut closing_report = super::lifecycle::report_proof::ReportGate::Exempt;
         if let Some(status_str) = req.status {
             use std::str::FromStr;
             let new_status =
@@ -2480,9 +2503,25 @@ impl CasCore {
             if new_status != task.status {
                 lifecycle_status_change = Some((task.status, new_status));
             }
-            if new_status == TaskStatus::Closed
-                && task.status != TaskStatus::Closed
-                && self.load_config().verification_enabled()
+            let closing = new_status == TaskStatus::Closed && task.status != TaskStatus::Closed;
+            let verification_on = closing && self.load_config().verification_enabled();
+            if closing {
+                use super::lifecycle::report_proof::{ReportGate, require_report_verdict};
+                closing_report = match require_report_verdict(
+                    &self.cas_root, verification_on, stored_task.as_ref().unwrap_or(&task), &task,
+                ) {
+                    Ok(gate @ (ReportGate::Exempt | ReportGate::Bound(_))) => gate,
+                    Ok(_) => return Ok(Self::tool_error(crate::gates::tag("G-68", format!(
+                        "VERIFICATION REQUIRED: task {} is a no-code report without an approved independent verdict for its current report, so update status=closed cannot close it. \
+                         Use task action=close to request that review.",
+                        task.id
+                    )))),
+                    Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-68", message))),
+                };
+            }
+            if closing
+                && !closing_report.covered()
+                && verification_on
                 && task.depth != cas_types::TaskDepth::Light
                 && crate::harness_policy::verification_required_for_task_type(task.task_type)
             {
@@ -3065,7 +3104,26 @@ impl CasCore {
         } else {
             None
         };
-        task.updated_at = task_store.update(&task).map_err(|e| McpError {
+        task.updated_at = if closing_report.covered() {
+            #[cfg(test)]
+            super::lifecycle::close_ops::lifecycle_race_hook::fire(&task.id);
+            let current = task_store.get(&task.id).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to update: {e}")),
+                data: None,
+            })?;
+            if let Err(change) = closing_report.recheck(&self.cas_root, stored_task.as_ref().unwrap_or(&task), &task, &current) {
+                return Ok(Self::tool_error(crate::gates::tag("G-68", format!(
+                    "VERIFICATION REQUIRED: task {} changed while this update was running ({change}), so update status=closed did not close it. \
+                     Use task action=close to request a review of the current report.",
+                    task.id
+                ))));
+            }
+            task_store.update_if_current(&task, &current)
+        } else {
+            task_store.update(&task)
+        }
+        .map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,

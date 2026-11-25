@@ -161,15 +161,29 @@ function supervisorCommandSession(machineId: string, session: string): Superviso
   if (!commands) {
     commands = new SupervisorCommandSession({
       unavailable: () => supervisorCommandUnavailable(machineId, session),
+      birth: () => sessions.get(machineId)?.find(item => item.name === session)?.started_at,
       control: async () => {
         const reason = supervisorCommandUnavailable(machineId, session); if (reason) throw new Error(reason);
         if (!leases.get(key)?.held_by_me) {
-          const lease = await requestPaneControl(machineId, session);
+          const lease = await requestPaneControl(machineId, session).catch(async error => {
+            if (!(error instanceof HubRequestError) || error.code !== "lease_unavailable") throw error;
+            const current = await connections.get(machineId)?.lease(session).catch(() => undefined);
+            if (!current || !current.controller_label || current.held_by_me) throw error;
+            return current;
+          });
           if (!lease.held_by_me) throw new Error(lease.controller_label ? `${lease.controller_label} controls this session. Wait until it releases control.` : "Could not take control of this session.");
         }
       },
       send: message => connections.get(machineId)?.send(session, message) ?? false,
-      changed: () => { updateConversationViews(); renderConversationList(); },
+      changed: () => {
+        if (slashCommands?.thread === key) slashCommands.palette.reconcile();
+        updateConversationViews(); renderConversationList();
+      },
+      clearDraft: original => clearCommandDraft(key, original),
+      completed: origin => {
+        if (slashCommands?.thread === key) slashCommands.palette.returnFocus(origin);
+        countUsage("supervisor.command");
+      },
       settled: receipt => toast(receipt.detail, { thread: key }),
       readRetained: async ref => {
         if (!hubSupports(machineId, "retained_command_receipts")) return undefined;
@@ -243,10 +257,7 @@ function bindSlashCommands(input: HTMLTextAreaElement): void {
     harness: () => sessions.get(machineId)?.find(item => item.name === session)?.harness,
     unavailable: () => supervisorCommandUnavailable(machineId, session),
     label: () => supervisorPhrase(machineId, session),
-    run: async (command, confirmed) => {
-      await supervisorCommandSession(machineId, session).run(command, confirmed);
-      countUsage("supervisor.command");
-    },
+    session: supervisorCommandSession(machineId, session),
   });
   slashCommands = { input, thread, palette };
 }
@@ -809,6 +820,7 @@ function selectionStorage(): SelectionStorage | undefined {
 function applySelection(next: SessionSelection | undefined): void {
   if (pendingReload && (next?.machineId !== pendingReload.machineId || next.session !== pendingReload.session)) pendingReload = undefined;
   if (selectedMachineId && selectedSession && (next?.machineId !== selectedMachineId || next.session !== selectedSession)) {
+    supervisorCommands.get(sessionKey(selectedMachineId, selectedSession))?.cancel();
     releasePaneControl(selectedMachineId, selectedSession);
   }
   selectedMachineId = next?.machineId;
@@ -3286,6 +3298,15 @@ function rememberComposerDraft(): void {
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
   if (composer?.dataset.threadKey) rememberDraft(composer.dataset.threadKey, { text: composer.value, caret: composer.selectionStart ?? composer.value.length });
 }
+function clearCommandDraft(key: string, original: string): void {
+  const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+  if (composer?.dataset.threadKey === key && composer.value === original) {
+    composer.value = "";
+    composer.dispatchEvent(new Event("input", { bubbles: true }));
+  } else if (conversationDrafts.get(key)?.text === original) {
+    rememberDraft(key, undefined);
+  }
+}
 // Typing is stored as it happens, and once more as the page goes away, so a
 // reload between renders loses nothing.
 document.addEventListener("input", (event) => { if ((event.target as Element | null)?.id === "message-text") rememberComposerDraft(); });
@@ -4724,7 +4745,10 @@ function render(captureDraft = true, stoppedSelection = false): void {
     pairingStepChanged: pairingView !== lastPairingView,
     focusInPairingDialog: composing && document.querySelector("#pair-dialog")?.contains(active) === true,
   });
-  if (decision !== "shell") {
+  const commandSession = selectedThreadKey ? supervisorCommands.get(selectedThreadKey) : undefined;
+  const confirming = commandSession?.intent?.phase === "confirming";
+  if (decision !== "shell" || (!stoppedSelection && confirming && deferredRender.deferDuringGesture())) {
+    slashCommands?.palette.reconcile();
     // A deferred rebuild is owed to a structural change that arrived while the
     // operator was mid-sentence; it runs the moment the field is left.
     if (decision === "defer") deferredRender.defer();
@@ -4815,6 +4839,10 @@ function render(captureDraft = true, stoppedSelection = false): void {
   lastShellSignatureWithPaletteClosed = shellSignature({ ...signatureParts, commandPaletteOpen: false }) + signatureTail;
   lastPairingView = pairingView;
   bindEvents();
+  if (!document.getElementById("message-text")) {
+    slashCommands?.palette.dispose();
+    slashCommands = undefined;
+  }
   if (commandPaletteOpen) {
     document.querySelector<HTMLDialogElement>("#command-palette")?.showModal();
     queueMicrotask(() => document.querySelector<HTMLInputElement>("#command-palette-query")?.focus());
@@ -4829,6 +4857,7 @@ function render(captureDraft = true, stoppedSelection = false): void {
   if (keepHeaderMenu && phoneLayout() && !contextSheetOpen()) {
     document.getElementById("conversation-more")?.click();
   }
+  slashCommands?.palette.reconcile();
   if (attentionFocus?.isConnected && document.activeElement === document.body) attentionFocus.focus({ preventScroll: true });
   // After the regions, not before: a control can be hidden in fresh shell
   // markup until its region shows it (the phone Attention badge, cas-a5c6),
@@ -6458,11 +6487,11 @@ function escapeAttr(value: string): string { return escapeHtml(value).replaceAll
 // left AND the pointer gesture that left it has delivered its click. Rebuilding
 // on focusout alone deleted the button under the finger before the browser
 // dispatched the click, so the tap did nothing at all (cas-c142).
-app.addEventListener("pointerdown", () => deferredRender.gestureStarted(), true);
+document.addEventListener("pointerdown", () => deferredRender.gestureStarted(), true);
 // A lifted finger's click comes in a later task, after its focus change.
-app.addEventListener("pointerup", (event) => { if (event.pointerType === "touch") deferredRender.touchEnded(); else deferredRender.gestureEnded(); }, true);
-app.addEventListener("click", () => deferredRender.clicked(), true);
-app.addEventListener("pointercancel", () => deferredRender.gestureCancelled(), true);
+document.addEventListener("pointerup", (event) => { if (event.pointerType === "touch") deferredRender.touchEnded(); else deferredRender.gestureEnded(); }, true);
+document.addEventListener("click", () => deferredRender.clicked(), true);
+document.addEventListener("pointercancel", () => deferredRender.gestureCancelled(), true);
 app.addEventListener("focusout", () => {
   // cas-3c25: wait a task, not a microtask. A keyboard Tab dispatches
   // focusout before the next control has focus, so a microtask saw <body>,

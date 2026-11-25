@@ -14742,7 +14742,7 @@ mod spawn_lifecycle_tests {
         assert!(text.contains("Supervisor brief: stored on cas-brief1"), "{text}");
         assert!(text.contains(&main.id), "{text}");
         let prompt = crate::ui::factory::daemon::runtime::queue_and_events::worker_spawn_prompt(
-            &cas_root, "worker-1", "cas-brief1", "Fix the sweep", cas_mux::SupervisorCli::Claude,
+            &cas_root, "worker-1", "cas-brief1", "Fix the sweep", cas_mux::SupervisorCli::Claude, None,
         );
         assert!(prompt.contains(focus), "{prompt}");
         let notes = task_store.get("cas-brief1").expect("task").notes;

@@ -30,15 +30,32 @@ pub struct ArtifactListing {
 
 pub fn list_task_metadata(cas_root: &Path, task_id: &str) -> anyhow::Result<ArtifactListing> {
     let store = SqliteArtifactStore::open(cas_root)?;
-    let mut records = store.list_for_task(task_id)?.into_iter()
+    let notes = match crate::store::open_task_store_local(cas_root)
+        .and_then(|tasks| tasks.get(task_id).map_err(Into::into))
+    {
+        Ok(task) => Ok(Some(task.notes)),
+        Err(crate::error::CasError::StoreErr(cas_store::StoreError::TaskNotFound(_))) => Ok(None),
+        Err(_) => Err(()),
+    };
+    Ok(listing(task_id, store.list_for_task(task_id)?, notes))
+}
+
+pub(crate) fn list_task_metadata_with_conn(conn: &rusqlite::Connection, task_id: &str) -> anyhow::Result<ArtifactListing> {
+    use rusqlite::OptionalExtension;
+    let notes = conn.query_row("SELECT notes FROM tasks WHERE id = ?1", [task_id], |row| row.get::<_, Option<String>>(0))
+        .optional()?
+        .map(Option::unwrap_or_default);
+    Ok(listing(task_id, cas_store::list_task_artifacts_with_conn(conn, task_id)?, Ok(notes)))
+}
+
+fn listing(task_id: &str, local: Vec<PublishedArtifact>, notes: Result<Option<String>, ()>) -> ArtifactListing {
+    let mut records = local.into_iter()
         .map(|record| (record.id.clone(), record))
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut warnings = std::collections::BTreeSet::new();
-    let task = crate::store::open_task_store_local(cas_root)
-        .and_then(|tasks| tasks.get(task_id).map_err(Into::into));
-    match task {
-        Ok(task) => {
-            for json in task.notes.lines().filter_map(|line| line.strip_prefix(MARKER)) {
+    match notes {
+        Ok(Some(notes)) => {
+            for json in notes.lines().filter_map(|line| line.strip_prefix(MARKER)) {
                 let Ok(record) = serde_json::from_str::<PublishedArtifact>(json) else {
                     warnings.insert("invalid_publication_reference");
                     continue;
@@ -50,21 +67,37 @@ pub fn list_task_metadata(cas_root: &Path, task_id: &str) -> anyhow::Result<Arti
                 if validate(&record, task_id).is_err() {
                     warnings.insert("invalid_publication_reference");
                 } else if let Some(local) = records.get(&record.id) {
-                    if !same_artifact(local, &record) {
+                    let mut importing = local.clone();
+                    importing.cloud_artifact_id = importing.cloud_artifact_id.or_else(|| record.cloud_artifact_id.clone());
+                    if !same_artifact(&importing, &record) {
                         warnings.insert("conflicting_publication_reference");
+                    } else if local.status != "committed" {
+                        records.insert(record.id.clone(), record);
                     }
                 } else {
                     records.insert(record.id.clone(), record);
                 }
             }
         }
-        Err(crate::error::CasError::StoreErr(cas_store::StoreError::TaskNotFound(_))) => {}
-        Err(_) => { warnings.insert("task_references_unavailable"); }
+        Ok(None) => {}
+        Err(()) => { warnings.insert("task_references_unavailable"); }
     }
-    Ok(ArtifactListing {
+    ArtifactListing {
         task_id: task_id.into(), state: "partial",
         artifacts: records.into_values().collect(), warnings: warnings.into_iter().collect(),
-    })
+    }
+}
+
+impl ArtifactListing {
+    pub fn committed(self) -> Vec<PublishedArtifact> {
+        self.artifacts.into_iter()
+            .filter(|artifact| artifact.access_status() == "committed" && artifact.cloud_artifact_id.is_some())
+            .collect()
+    }
+}
+
+pub fn committed_task_artifacts(cas_root: &Path, task_id: &str) -> anyhow::Result<Vec<PublishedArtifact>> {
+    Ok(list_task_metadata(cas_root, task_id)?.committed())
 }
 
 /// Share every successful publication through the existing trusted task-note
@@ -152,6 +185,44 @@ pub fn lookup_metadata(
 
 pub fn contains_proof_marker(note: &str) -> bool {
     note.lines().any(|line| line.starts_with("ARTIFACT_PROOF:"))
+}
+
+pub(crate) fn read_verified_text(
+    root: &Path, artifact: &PublishedArtifact, max_bytes: u64,
+) -> anyhow::Result<String> {
+    use std::io::Read as _;
+    use sha2::{Digest, Sha256};
+
+    super::require_available(artifact)?;
+    anyhow::ensure!(artifact.size_bytes <= max_bytes, "artifact exceeds byte limit");
+    ArtifactRef {
+        artifact_id: artifact.id.clone(), name: artifact.name.clone(), mime: artifact.mime.clone(),
+        size_bytes: artifact.size_bytes, sha256: artifact.sha256.clone(),
+    }.validate()?;
+    let config = crate::config::Config::load(root)?;
+    let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let roots = PublishRoots::new(root, &base, &artifact.task_id);
+    let fetched_name = format!("{}-{}", artifact.id, artifact.name);
+    let read = |path: &Path| -> anyhow::Result<String> {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?.take(max_bytes + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() as u64 == artifact.size_bytes
+            && hex::encode(Sha256::digest(&bytes)) == artifact.sha256, "bytes do not match published artifact");
+        Ok(String::from_utf8(bytes)?)
+    };
+    for dir in [&roots.task_artifacts_dir, &roots.legacy_task_artifacts_dir] {
+        if let Some(dir) = crate::config::canonical_factory_task_artifact_dir(&base, dir) {
+            for name in [&artifact.name, &fetched_name] {
+                if let Ok(path) = dir.join(name).canonicalize()
+                    && path.starts_with(&dir) && path.is_file()
+                    && let Ok(text) = read(&path)
+                { return Ok(text); }
+            }
+        }
+    }
+    let store = SqliteArtifactStore::open(root)?;
+    let path = fetch(&store, super::cloud_client(root).as_ref(), &roots, artifact.clone(), &fetched_name)?;
+    read(&path)
 }
 
 pub(crate) fn same_artifact(a: &PublishedArtifact, b: &PublishedArtifact) -> bool {
@@ -371,10 +442,24 @@ fn fetch(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("artifact is not committed to Cloud"))?;
     let client = cloud.ok_or_else(|| anyhow::anyhow!("not logged in to Cassy Cloud"))?;
-    let view = client.view_url(cloud_id).map_err(|error| match error {
-        super::ViewFailure::Revoked => anyhow::Error::from(super::ArtifactRevoked { artifact_id: artifact.id.clone() }),
-        error => error.into(),
-    })?;
+    let view = match client.view_url(cloud_id) {
+        Ok(view) => view,
+        Err(super::ViewFailure::Revoked) => {
+            if existing.is_none() {
+                store.record_local(&NewArtifact {
+                    id: artifact.id.clone(),
+                    task_id: artifact.task_id.clone(),
+                    name: artifact.name.clone(),
+                    mime: artifact.mime.clone(),
+                    size_bytes: artifact.size_bytes,
+                    sha256: artifact.sha256.clone(),
+                })?;
+            }
+            store.revoke(&artifact.id, "cloud", "Cloud reported artifact_revoked")?;
+            return Err(super::ArtifactRevoked { artifact_id: artifact.id }.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
     anyhow::ensure!(
         view.artifact_id == cloud_id,
         "Cloud returned another artifact id"

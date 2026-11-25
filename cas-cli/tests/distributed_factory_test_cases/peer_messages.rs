@@ -21,6 +21,7 @@ use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use super::TestMachine;
+use super::fake_cloud::FakeCloud;
 use super::peers::{Registry, fake_cloud, peers_of, register_supervisor, seed_project};
 
 type Mailbox = Arc<Mutex<Vec<Value>>>;
@@ -504,12 +505,11 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     // The MCP caller identity comes from the registry, never from the runner's
     // ambient CAS_* environment (a factory worker runs these tests).
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let (server, _registry, _mailbox) = fake_cloud_with_mailbox().await;
-    let endpoint = server.uri();
+    let cloud = FakeCloud::start();
     let alpha = TestMachine::new("machine-alpha");
     let beta = TestMachine::new("machine-beta");
-    seed_project(&alpha, &endpoint, "github.com/acme/widgets");
-    seed_project(&beta, &endpoint, "github.com/acme/widgets");
+    cloud.seed(&alpha.cas_dir, "github.com/acme/widgets");
+    cloud.seed(&beta.cas_dir, "github.com/acme/widgets");
     // The machines (and their temp directories) live for the whole test.
     let (a, b) = (alpha.cas_dir.clone(), beta.cas_dir.clone());
     let (a2, b2) = (a.clone(), b.clone());
@@ -529,6 +529,26 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     .unwrap_err();
     assert!(urgent.contains("cannot be urgent"), "{urgent}");
 
+    let notice_id = cas::store::open_supervisor_queue_store(&a)
+        .unwrap()
+        .notify(
+            "a",
+            "supervisor_notice",
+            &json!({"kind": "premerge_verification", "detail": "review dispatched", "recipient": "sup-a", "factory_session": "factory-a"}).to_string(),
+            cas_store::NotificationPriority::High,
+        )
+        .unwrap();
+    let request = serde_json::from_value(json!({
+        "action": "message", "target": "sup-b@machine-beta", "summary": "take cas-1234?",
+        "message": "can you take cas-1234?", "kind": "ask", "in_reply_to": notice_id,
+    }))
+    .unwrap();
+    let error = service_a
+        .coordination(rmcp::handler::server::wrapper::Parameters(request))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{error}");
+
     let sent = coordinate(
         &service_a,
         json!({"action": "message", "target": "sup-b@machine-beta", "summary": "take cas-1234?", "message": "can you take cas-1234?"}),
@@ -539,7 +559,6 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
         sent.contains("sup-b@machine-beta"),
         "{sent}"
     );
-    assert!(sent.contains("peer message pm_1"), "{sent}");
     // pin: a queued Cloud send is not delivery to the recipient's machine or supervisor (GH #1626).
     assert!(sent.contains("queued") && !sent.contains("delivered"), "{sent}");
 
@@ -551,6 +570,9 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     .await
     .unwrap();
     assert_eq!(rows.len(), 1);
+    let incoming = parse_envelope(&rows[0].prompt).unwrap();
+    let peer_message_id = incoming.id.as_str();
+    assert!(sent.contains(peer_message_id), "{sent}");
 
     // pin: cas-7dd1d, an untyped peer message must arrive as an ask for the wake gate.
     assert!(rows[0].prompt.lines().next().unwrap().contains("kind=\"ask\""), "untyped peer mail must arrive as an ask: {}", rows[0].prompt);
@@ -568,7 +590,7 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
 
     let status = coordinate(
         &service_a,
-        json!({"action": "message_status", "id": "pm_1"}),
+        json!({"action": "message_status", "id": peer_message_id}),
     )
     .await
     .unwrap();
@@ -585,9 +607,9 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     .unwrap();
     assert_eq!(replies.len(), 1);
     assert!(replies[0].prompt.ends_with("yes"));
-    // pin: pm_1 is the fixture's Cloud parent id and must survive as reply correlation.
-    assert!(replies[0].prompt.lines().next().unwrap().contains("in_reply_to=\"pm_1\""), "reply wake metadata must survive Cloud delivery: {}", replies[0].prompt);
-    assert!(parse_envelope(&replies[0].prompt).unwrap().wakes_idle(),
+    let reply = parse_envelope(&replies[0].prompt).unwrap();
+    assert_eq!(reply.in_reply_to.as_deref(), Some(peer_message_id));
+    assert!(reply.wakes_idle(),
         "an untyped answer must wake the supervisor that asked");
     let answer_body = "I will take it";
     coordinate(&service_b, json!({"action":"message", "target":"sup-a", "summary":"answer", "message":answer_body, "kind":"answer", "in_reply_to":rows[0].id})).await.unwrap();

@@ -197,6 +197,7 @@ impl CasCore {
             }
         }
         match task.execution_note.as_deref() {
+            Some("test-first") => lines.push("Method: test-first requires a capped failing test at the start base or a committed red checkpoint before the fix, or a capped compile failure at the start base.".to_string()),
             Some("additive-only") => lines.push("Method: additive-only refuses modified, deleted or renamed files.".to_string()),
             Some("value-only") => lines.push("Method: value-only refuses added, deleted, copied or renamed files.".to_string()),
             _ => {}

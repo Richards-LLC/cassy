@@ -239,6 +239,9 @@ pub trait AgentStore: Send + Sync {
     /// lookup to rebind the new session to the existing worker identity.
     fn get_by_cc_session_id(&self, cc_session_id: &str) -> Result<Option<Agent>>;
 
+    /// Preview the same lease admission used by `try_claim` without writing.
+    fn preview_task_claim(&self, task_id: &str, agent_id: &str) -> Result<Option<String>>;
+
     /// Try to claim a task for an agent (atomic operation)
     fn try_claim(
         &self,
@@ -402,21 +405,33 @@ pub trait AgentStore: Send + Sync {
 /// SQLite-based agent store
 pub struct SqliteAgentStore {
     conn: Arc<Mutex<Connection>>,
+    lease_review: Option<Box<LeaseReview>>,
 }
+
+type LeaseReview = dyn Fn(&str, DateTime<Utc>) -> Result<Option<String>> + Send + Sync;
 
 impl SqliteAgentStore {
     /// A store on an existing connection, e.g. a
     /// [`crate::shared_db::dedicated_connection`] (cas-ee9ab). The caller owns
     /// schema setup; this never runs DDL.
     pub fn with_connection(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+        Self { conn, lease_review: None }
     }
     /// Open or create a SQLite agent store
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
         let conn = crate::shared_db::shared_connection(&db_path)?;
 
-        Ok(Self { conn })
+        Ok(Self::with_connection(conn))
+    }
+
+    /// Resolve and verify artifact bytes outside the database transaction.
+    pub fn with_lease_review(
+        mut self,
+        verify: impl Fn(&str, DateTime<Utc>) -> Result<Option<String>> + Send + Sync + 'static,
+    ) -> Self {
+        self.lease_review = Some(Box::new(verify));
+        self
     }
 
     fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {

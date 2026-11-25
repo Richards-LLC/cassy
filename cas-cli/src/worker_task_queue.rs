@@ -6,6 +6,7 @@ use cas_types::{Agent, AgentRole, TaskStatus, TaskType};
 use fs2::FileExt;
 use rmcp::{ErrorData as McpError, model::ErrorCode};
 
+use crate::mcp::tools::core::task::repeat_review::{is_repair_hold, lease_claim_error};
 use crate::{mcp::CasCore, mcp::tools::TaskStartRequest};
 
 pub(crate) fn conversation_generation(worker: &Agent) -> String {
@@ -175,11 +176,49 @@ fn queue_checkout_busy(root: &Path, worker: &Agent) -> Option<&'static str> {
 }
 
 /// Only this module can construct a start principal on behalf of a worker.
-pub(crate) struct QueueStartPrincipal(Agent, File);
-impl QueueStartPrincipal {
+pub(crate) struct QueueStartPrincipal<'a> {
+    agent: Agent,
+    _start_fence: File,
+    queues: &'a SqliteWorkerTaskQueueStore,
+    queue: &'a mut WorkerTaskQueue,
+}
+
+impl QueueStartPrincipal<'_> {
     pub(crate) fn agent(&self) -> &Agent {
-        &self.0
+        &self.agent
     }
+
+    pub(crate) fn persist_review(&mut self, artifact_id: Option<&str>) -> Result<(), McpError> {
+        persist_start_review(self.queues, &self.agent, self.queue, artifact_id)
+    }
+}
+
+fn persist_start_review(
+    queues: &SqliteWorkerTaskQueueStore, worker: &Agent, queue: &mut WorkerTaskQueue,
+    artifact_id: Option<&str>,
+) -> Result<(), McpError> {
+    if let Some(artifact_id) = artifact_id
+        && queue.dispatch_review_artifact.as_deref() != Some(artifact_id)
+    {
+        queue.dispatch_review_artifact = Some(artifact_id.to_owned());
+        let session = worker.factory_session.as_deref().expect("validated session");
+        queues.save(session, &worker.name, queue).map_err(error)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn checkpoint_reserved_start_review(
+    root: &Path, worker: &Agent, task_id: &str, artifact_id: Option<&str>,
+) -> Result<File, McpError> {
+    let lock = worker_lock(root, worker, "queue")?;
+    let session = worker.factory_session.as_deref().expect("validated session");
+    let queues = SqliteWorkerTaskQueueStore::open(root).map_err(error)?;
+    let mut queue = queues.get(session, &worker.name).map_err(error)?;
+    if !queue.starting || queue.current_task.as_deref() != Some(task_id) {
+        return Err(error("Queued start reservation changed; retry task start"));
+    }
+    persist_start_review(&queues, worker, &mut queue, artifact_id)?;
+    Ok(lock)
 }
 
 /// Resolve booting names through their durable, session-scoped spawn receipt.
@@ -717,6 +756,7 @@ impl CasCore {
             queue.dispatch_from = predecessor.map(str::to_string);
             queue.starting = selected.is_some();
             queue.dispatch_revision = queue.revision + 1;
+            queue.dispatch_review_artifact = None;
             // cas-2d41: a worker whose MCP server predates the installed
             // build takes the same boundary restart, so a release reaches it
             // between tasks without an operator recycle.
@@ -731,11 +771,17 @@ impl CasCore {
                 None
             };
             queue.context_reset_request = None;
-            queues
-                .save(session, &worker.name, &mut queue)
-                .map_err(error)?;
             selected
         };
+        let artifact_id = selected.as_deref()
+            .map(|id| agents.preview_task_claim(id, &worker.id))
+            .transpose().map_err(|cause| lease_claim_error(cause, error))?.flatten();
+        if retrying {
+            persist_start_review(&queues, &worker, &mut queue, artifact_id.as_deref())?;
+        } else {
+            queue.dispatch_review_artifact = artifact_id;
+            queues.save(session, &worker.name, &mut queue).map_err(error)?;
+        }
         let Some(id) = selected else { return Ok(None) };
         let selected_task = match tasks.get(&id) {
             Ok(task) => Some(task),
@@ -825,7 +871,7 @@ impl CasCore {
                     i64::from(self.load_config().lease().default_duration_mins) * 60,
                     Some("Queued task start reservation"),
                 )
-                .map_err(error)?
+                .map_err(|cause| lease_claim_error(cause, error))?
             {
                 cas_types::ClaimResult::Success(lease) => reserved_epoch = Some(lease.epoch),
                 cas_types::ClaimResult::AlreadyClaimed { held_by, .. } if held_by == worker.id => {}
@@ -865,7 +911,10 @@ impl CasCore {
                         brief: Some(true),
                         force: None,
                     },
-                    QueueStartPrincipal(worker.clone(), start_fence),
+                    QueueStartPrincipal {
+                        agent: worker.clone(), _start_fence: start_fence,
+                        queues: &queues, queue: &mut queue,
+                    },
                 )
                 .await?;
             let committed = tasks.get(&id).map_err(error)?;
@@ -897,11 +946,15 @@ impl CasCore {
                 queues
                     .save(session, &worker.name, &mut queue)
                     .map_err(error)?;
+                let repair_brief = queue.dispatch_review_artifact.as_deref()
+                    .map(crate::mcp::tools::core::task::repeat_review::mismatch_brief)
+                    .unwrap_or_default();
                 let notification = crate::task_assignment::enqueue_queued(
                     &self.cas_root,
                     &tasks.get(&id).map_err(error)?,
                     queue.dispatch_revision,
                     queue.dispatch_from.is_none(),
+                    &repair_brief,
                 )
                 .map_err(error)?;
                 if notification.is_none() {
@@ -922,6 +975,7 @@ impl CasCore {
                     .map_err(error)?;
                 Ok(Some(format!("Task queue started {id} for {}", worker.name)))
             }
+            Err(cause) if is_repair_hold(&cause) => Err(cause),
             Err(cause) => {
                 let note = format!("Task queue deferred {id}: {}", cause.message);
                 if queue.notes.last() != Some(&note) {

@@ -257,6 +257,9 @@ pub(super) fn escalate_expired_verification_dispatches(
     /// New relays written per sweep; the sweep runs every 60 s.
     const RELAYS_PER_SWEEP: usize = 20;
     const KIND: &str = "verification_dispatch_expired";
+    if let Err(error) = crate::mcp::tools::core::task::repeat_review::settle_repeated_rejections(cas_dir, now) {
+        tracing::warn!(%error, "repeat-review notice sweep unsuccessful");
+    }
     extend_progressing_verification_dispatches(cas_dir, now);
     let since = now - chrono::Duration::hours(
         crate::mcp::tools::core::task::lifecycle::supervisor_push::EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS,
@@ -815,13 +818,30 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         occurrence,
         exit,
     );
-    let key = format!(
+    let mut key = format!(
         "merge-queue-ejection:{}:{task_id}:{pr_number}:{occurrence}",
         factory_session.as_deref().unwrap_or("")
     );
     let Ok(supervisor_queue) = crate::store::open_supervisor_queue_store(cas_dir) else {
         return WorkerAttentionRelayOutcome::Pending;
     };
+    let mut notice_occurrence = occurrence.to_owned();
+    if let Some(run_id) = failed_run_id {
+        match supervisor_queue.get_by_transition_key(&key) {
+            Ok(Some(previous)) => {
+                let Ok(payload) = serde_json::from_str::<serde_json::Value>(&previous.payload) else {
+                    return WorkerAttentionRelayOutcome::Pending;
+                };
+                if payload["failed_run_id"].is_null() {
+                    let suffix = format!(":run:{run_id}");
+                    notice_occurrence.push_str(&suffix);
+                    key.push_str(&suffix);
+                }
+            }
+            Ok(None) => {}
+            Err(_) => return WorkerAttentionRelayOutcome::Pending,
+        }
+    }
     let payload = serde_json::json!({
         "kind": "merge_queue_ejected",
         "worker": worker,
@@ -829,7 +849,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         "pr_number": pr_number,
         "failed_run_id": failed_run_id,
         "detail": detail,
-        "occurrence": occurrence,
+        "occurrence": notice_occurrence,
         "supervisor_owned": worker.is_empty(),
         "failing_job": failing_job,
     })
@@ -845,19 +865,9 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         Ok(NotifyIdempotentResult::AlreadyExists {
             id,
             prompt_delivered: true,
-        }) if supervisor.id != "operator" => {
-            // A run can be listed after the run-less exit was relayed. The
-            // notice is already delivered, but its repair may still be new.
-            let Ok(task) = task_store.get(task_id) else {
-                return WorkerAttentionRelayOutcome::Pending;
-            };
-            if !repair.apply(cas_dir, &task, &supervisor.id, &detail) {
-                return WorkerAttentionRelayOutcome::Pending;
-            }
-            return WorkerAttentionRelayOutcome::Persisted {
-                notification_id: id,
-            };
-        }
+        }) if supervisor.id != "operator" => return WorkerAttentionRelayOutcome::Persisted {
+            notification_id: id,
+        },
         Ok(NotifyIdempotentResult::AlreadyExists {
             id,
             ..
@@ -870,10 +880,36 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     let Ok(prompt_queue) = crate::store::open_prompt_queue_store(cas_dir) else {
         return WorkerAttentionRelayOutcome::Pending;
     };
-    let next_step = match repair {
-        MergeQueueRepair::Return { .. } => "\nCassy returned the task Open to its worker for its one repair cycle (rule-176(5)); no request_changes is needed.",
-        MergeQueueRepair::PageOperator { .. } => "\nThis is the task's second failed ejection; rule-176(5) allows one repair cycle, so the task stays parked and the operator was paged (P0). Decide the next step with the operator.",
-        MergeQueueRepair::None => "\nInspect the failed run and requeue or request changes.",
+    let Ok(mut task) = task_store.get(task_id) else {
+        return WorkerAttentionRelayOutcome::Pending;
+    };
+    let marker = format!("merge-queue-ejection occurrence={occurrence}");
+    if !task.notes.contains(&marker) {
+        let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+        let note = format!("[{timestamp}] 🚫 BLOCKER {detail} ({marker}).");
+        task.notes = if task.notes.is_empty() {
+            note
+        } else {
+            format!("{}\n\n{note}", task.notes)
+        };
+        task.updated_at = chrono::Utc::now();
+        if let Err(error) = task_store.update(&task) {
+            tracing::warn!(task_id, pr_number, %error, "merge-queue ejection task note write failed");
+            return WorkerAttentionRelayOutcome::Pending;
+        }
+    }
+    let Some(repair_outcome) = repair.apply(cas_dir, &task, &supervisor.id, &detail) else {
+        return WorkerAttentionRelayOutcome::Pending;
+    };
+    let repair_outcome = match repair_outcome {
+        MergeQueueRepairOutcome::Unchanged => MergeQueueRepair::recorded_outcome(&task, worker, failed_run_id, exit.head_sha),
+        outcome => outcome,
+    };
+    let next_step = match &repair_outcome {
+        MergeQueueRepairOutcome::Returned(_) => "\nCassy returned the task Open to its worker for its one repair cycle (rule-176(5)); no request_changes is needed.",
+        MergeQueueRepairOutcome::Held(reason) => reason,
+        MergeQueueRepairOutcome::OperatorPaged => "\nThis is the task's second failed ejection; rule-176(5) allows one repair cycle, so the task stays parked and the operator was paged (P0). Decide the next step with the operator.",
+        MergeQueueRepairOutcome::Unchanged => "\nInspect the failed run and requeue or request changes.",
     };
     let supervisor_body = format!(
         "<worker-attention kind=\"merge_queue_ejected\" worker=\"{worker}\" task_id=\"{task_id}\" notification_id=\"{notification_id}\">\n{detail}{next_step}\n</worker-attention>"
@@ -887,7 +923,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
             &supervisor,
             "merge_queue_ejected",
             &format!("{detail}\nNo live supervisor is available.{next_step}"),
-            &format!("{task_id}:{pr_number}:{occurrence}"),
+            &format!("{task_id}:{pr_number}:{notice_occurrence}"),
         ) {
             tracing::warn!(task_id, pr_number, %error, "merge-queue operator escalation remains pending");
             return WorkerAttentionRelayOutcome::Pending;
@@ -909,13 +945,13 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     }
     // cas-d511: a worker that can only wait for the supervisor gets its copy
     // on the next turn. cas-25ce: a returned task is the worker's to start.
-    let worker_body = if matches!(repair, MergeQueueRepair::Return { .. }) {
-        format!("{detail}\nCassy returned {task_id} to you for its one merge-queue repair cycle (rule-176(5)). Start it, run every remaining queue check locally in parallel, fix all failures in one batch, then re-deliver. A second ejection goes to the operator.")
-    } else {
-        format!("{}\n{detail}\nWait for the supervisor's merge recovery instructions before starting other work.",
-            cas_store::QUIET_MESSAGE_MARKER)
+    let worker_body = match repair_outcome {
+        MergeQueueRepairOutcome::Returned(brief) => Some(format!("{brief}\nCassy returned {task_id} to you. Start it now.")),
+        MergeQueueRepairOutcome::Held(_) => None,
+        _ => Some(format!("{}\n{detail}\nWait for the supervisor's merge recovery instructions before starting other work.",
+            cas_store::QUIET_MESSAGE_MARKER)),
     };
-    if !worker.is_empty() && prompt_queue.enqueue_idempotent(
+    if !worker.is_empty() && let Some(worker_body) = worker_body && prompt_queue.enqueue_idempotent(
         "merge-queue-ejection",
         worker,
         &worker_body,
@@ -927,30 +963,6 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     ).is_err() {
         return WorkerAttentionRelayOutcome::Pending;
     }
-    let Ok(mut task) = task_store.get(task_id) else {
-        return WorkerAttentionRelayOutcome::Pending;
-    };
-    let marker = format!("merge-queue-ejection occurrence={occurrence}");
-    if !task.notes.contains(&marker) {
-        let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
-        let note = format!("[{timestamp}] 🚫 BLOCKER {detail} ({marker}).");
-        task.notes = if task.notes.is_empty() {
-            note
-        } else {
-            format!("{}\n\n{note}", task.notes)
-        };
-        task.updated_at = chrono::Utc::now();
-        if let Err(error) = task_store.update(&task) {
-            tracing::warn!(task_id, %error, "merge-queue ejection task note write failed");
-            return WorkerAttentionRelayOutcome::Pending;
-        }
-    }
-    if !repair.apply(cas_dir, &task, &supervisor.id, &detail) {
-        return WorkerAttentionRelayOutcome::Pending;
-    }
-    // Keep the durable outbox replayable until the task-note receipt exists;
-    // otherwise a one-off store failure would leave an alert with no audit
-    // trail while future polls short-circuited as already delivered.
     if supervisor_queue
         .mark_prompt_delivered(notification_id)
         .is_err()
@@ -986,11 +998,36 @@ enum MergeQueueRepair {
     PageOperator { run: u64, head: String },
 }
 
+enum MergeQueueRepairOutcome {
+    Unchanged,
+    Returned(String),
+    Held(String),
+    OperatorPaged,
+}
+
 impl MergeQueueRepair {
     const MARKER: &'static str = "merge-queue-repair run=";
 
     fn marker(run: u64, head: &str) -> String {
         format!("({}{run} head={head})", Self::MARKER)
+    }
+
+    fn recorded_outcome(task: &cas_types::Task, worker: &str, run: Option<u64>, head: &str) -> MergeQueueRepairOutcome {
+        use cas_types::TaskStatus;
+        let Some(run) = run else { return MergeQueueRepairOutcome::Unchanged };
+        let marker = Self::marker(run, head);
+        for note in task.notes.rsplit("\n\n").filter(|note| note.contains(&marker)) {
+            if task.status == TaskStatus::Open && task.assignee.as_deref() == Some(worker)
+                && let Some((_, brief)) = note.split_once(cas_store::REQUEST_CHANGES_AUDIT_PREFIX)
+                && brief.starts_with("merge_queue_ejected: ")
+            {
+                return MergeQueueRepairOutcome::Returned(brief.to_string());
+            }
+            if task.status == TaskStatus::AwaitingMerge && note.contains("Merge-queue repair cycle 2: operator paged") {
+                return MergeQueueRepairOutcome::OperatorPaged;
+            }
+        }
+        MergeQueueRepairOutcome::Unchanged
     }
 
     /// Recorded repair-cycle runs, from this task's notes.
@@ -1047,29 +1084,32 @@ impl MergeQueueRepair {
         }
     }
 
-    /// Idempotent: the recorded marker retires the run, and the operator
-    /// page is keyed on it. Returns false when a retry is needed.
     fn apply(
         &self,
         cas_dir: &std::path::Path,
         task: &cas_types::Task,
         actor: &str,
         detail: &str,
-    ) -> bool {
+    ) -> Option<MergeQueueRepairOutcome> {
+        use crate::mcp::tools::core::task::repeat_review::{is_repair_hold, repair_parked};
         match self {
-            Self::None => true,
+            Self::None => Some(MergeQueueRepairOutcome::Unchanged),
             Self::Return { run, head } => {
                 let reason = format!(
                     "merge_queue_ejected: {detail}\nMerge-queue repair cycle 1 of 1 (rule-176(5)) {}: run every remaining queue check locally in the runner's environment and in parallel, fix all failures in one batch, then re-deliver. A second ejection pages the operator.",
                     Self::marker(*run, head),
                 );
-                let returned = cas_store::request_changes_for_parked_delivery(cas_dir, &task.id, actor, &reason)
-                    .map_err(|error| tracing::warn!(task_id = %task.id, %error, "cas-25ce: ejected delivery not returned"))
-                    .is_ok();
-                if returned {
-                    let _ = crate::store::publish_direct_task_write(cas_dir, &task.id);
+                match repair_parked(cas_dir, &task.id, actor, &reason) {
+                    Ok((_, brief)) => {
+                        let _ = crate::store::publish_direct_task_write(cas_dir, &task.id);
+                        Some(MergeQueueRepairOutcome::Returned(brief))
+                    }
+                    Err(error) if is_repair_hold(&error) => Some(MergeQueueRepairOutcome::Held(format!("\n{}", error.message))),
+                    Err(error) => {
+                        tracing::warn!(task_id = %task.id, %error, "cas-25ce: ejected delivery not returned");
+                        None
+                    }
                 }
-                returned
             }
             // gate[N-28 notice]: Second merge-queue ejection operator page
             Self::PageOperator { run, head } => {
@@ -1080,9 +1120,9 @@ impl MergeQueueRepair {
                     format!("{detail}\nThis is the second failed merge-queue ejection for {} at head {head}. Rule-176(5) allows one repair cycle; the task stays parked until you decide the next step.", task.id),
                     &format!("merge-queue-second-ejection:{}:{run}", task.id),
                 );
-                paged && Self::record(cas_dir, &task.id, &format!(
+                (paged && Self::record(cas_dir, &task.id, &format!(
                     "Merge-queue repair cycle 2: operator paged (P0) {}.", Self::marker(*run, head)
-                ))
+                ))).then_some(MergeQueueRepairOutcome::OperatorPaged)
             }
         }
     }
@@ -1837,7 +1877,7 @@ fn enqueue_worker_attention_relay_inner(
 }
 
 #[cfg(test)]
-mod worker_attention_tests {
+pub(super) mod worker_attention_tests {
     use super::*;
     use cas_types::{Agent, AgentRole, AgentStatus};
 
@@ -1848,6 +1888,28 @@ mod worker_attention_tests {
         supervisor.status = AgentStatus::Active;
         supervisor.factory_session = Some(session.to_string());
         agents.register(&supervisor).unwrap();
+    }
+
+    pub(in super::super) fn record_bound_rejection(root: &std::path::Path, task_id: &str, verdict_id: &str) {
+        let owner = "supervisor-id";
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            root, task_id, owner, owner, &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        let mut verdict = cas_types::Verification::new(verdict_id.into(), task_id.into());
+        verdict.status = cas_types::VerificationStatus::Rejected;
+        verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+        verdict.agent_id = Some(owner.into());
+        verdict.issuer_agent_id = Some(owner.into());
+        verdict.dispatch_id = Some(dispatch.id.clone());
+        let connection = cas_store::shared_db::shared_connection(&root.join("cas.db")).unwrap();
+        let mut connection = connection.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        cas_store::add_verification_with_conn(&transaction, &verdict).unwrap();
+        assert!(cas_store::resolve_verification_dispatch_with_conn(
+            &transaction, &dispatch.id, owner, None, true,
+        ).unwrap().is_some());
+        transaction.commit().unwrap();
     }
 
     #[test]
@@ -2210,6 +2272,46 @@ mod worker_attention_tests {
             rows[0].prompt
         );
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+    }
+
+    #[test]
+    fn sweep_recovers_daemon_repeat_notice_once_gh2373() {
+        use cas_types::{Dependency, DependencyType, Task, TaskStatus, TaskType, WorkTarget};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "repeat-review-sweep");
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&root, "repeat-review-sweep");
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut train = Task::new("cas-2373-train".into(), "Train".into());
+        train.task_type = TaskType::Epic;
+        train.labels.push("release-train".into());
+        train.branch = Some("epic/release-train".into());
+        train.epic_verification_owner = Some("supervisor-id".into());
+        train.deliverables.work_target = Some(WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() });
+        tasks.add(&train).unwrap();
+        let mut task = Task::new("cas-2373-recovery".into(), "Recover repeated rejection".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.work_target = Some(WorkTarget { repo_selector: "project:fixture".into(), target_branch: "epic/release-train".into() });
+        tasks.add(&task).unwrap();
+        tasks.add_dependency(&Dependency::new(task.id.clone(), train.id, DependencyType::ParentChild)).unwrap();
+        let latest = "ver-second";
+        record_bound_rejection(&root, &task.id, "ver-first");
+        record_bound_rejection(&root, &task.id, latest);
+        let notices = crate::store::open_supervisor_queue_store(&root).unwrap();
+        let key = format!("repeat-review:{}:{latest}", task.id);
+        assert!(notices.get_by_transition_key(&key).unwrap().is_none());
+        let now = chrono::Utc::now();
+        for at in [now, now + chrono::Duration::seconds(60)] {
+            escalate_expired_verification_dispatches(&root, at);
+        }
+        let count = notices.poll("supervisor-id", 10).unwrap().into_iter()
+            .filter(|notice| notice.transition_key.as_deref() == Some(key.as_str())).count();
+        assert_eq!(count, 1, "the sweep must recover exactly one notice for {key}");
+        assert!(tasks.get_parent_epic(&task.id).unwrap().is_none());
+        assert_eq!(tasks.get(&task.id).unwrap().deliverables.work_target.unwrap().target_branch, "main");
+        let verifications = cas_store::SqliteVerificationStore::open(&root).unwrap();
+        assert_eq!(verifications.latest_repeated_rejection(&task.id).unwrap().unwrap().0, latest);
     }
 
     /// cas-7456 (GH #1302 B): a verification dispatch expired overnight with
@@ -3443,8 +3545,8 @@ mod worker_attention_tests {
         );
     }
 
-    #[test]
-    fn late_listed_merge_queue_run_still_returns_task_for_repair_cas_738f() {
+    #[tokio::test]
+    async fn late_listed_merge_queue_run_still_returns_task_for_repair_cas_738f() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_FACTORY_SESSION", "late-queue-run");
         let cas_dir = crate::store::init_cas_dir(env.home()).unwrap();
@@ -3456,24 +3558,67 @@ mod worker_attention_tests {
         let mut task = cas_types::Task::new("cas-late-run".into(), "parked delivery".into());
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.assignee = Some("late-worker".into());
-        task.deliverables.factory_branch_anchor = Some("1111aaaa".into());
+        let head_sha = "1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa";
+        task.deliverables.factory_branch_anchor = Some(head_sha.into());
         task_store.add(&task).unwrap();
         let eject = |run| enqueue_merge_queue_ejection_relay(
             &cas_dir, "cas-late-run", "late-worker", 556, run,
             "queue-exit:2026-11-05T23:30:00Z", Some("Fast Validation"),
-            MergeQueueExit { head_sha: "1111aaaa", group_mate_failed: false },
+            MergeQueueExit { head_sha, group_mate_failed: false },
         );
-        assert!(matches!(eject(None), WorkerAttentionRelayOutcome::Persisted { .. }));
+        let first = eject(None);
+        assert!(matches!(first, WorkerAttentionRelayOutcome::Persisted { .. }));
         assert_eq!(task_store.get("cas-late-run").unwrap().status, cas_types::TaskStatus::AwaitingMerge);
-        for _ in 0..2 {
-            assert!(matches!(eject(Some(601)), WorkerAttentionRelayOutcome::Persisted { .. }));
-            let repaired = task_store.get("cas-late-run").unwrap();
-            assert_eq!(repaired.status, cas_types::TaskStatus::Open);
-            // pin: repair markers account for exactly one cycle per failed run.
-            assert_eq!(repaired.notes.matches("merge-queue-repair run=601 head=1111aaaa").count(), 1);
-        }
-        assert_eq!(crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap().len(), 2,
-            "late run evidence must not duplicate the already delivered relay");
+        record_bound_rejection(&cas_dir, &task.id, "ver-first");
+        record_bound_rejection(&cas_dir, &task.id, "ver-second");
+        let review = crate::mcp::tools::core::task::repeat_review::publish_test_review(
+            &cas_dir, &task.id, "supervisor-id",
+        ).await;
+
+        let late = eject(Some(601));
+        assert_eq!(task_store.get(&task.id).unwrap().status, cas_types::TaskStatus::Open);
+        let WorkerAttentionRelayOutcome::Persisted { notification_id } = late else { panic!("{late:?}") };
+        assert_ne!(late, first);
+        assert_eq!(eject(Some(601)), late);
+        let repaired = task_store.get(&task.id).unwrap();
+        assert_eq!(repaired.notes.matches(&format!("merge-queue-repair run=601 head={head_sha}")).count(), 1);
+        let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+        assert_eq!(rows.iter().filter(|row| row.target == "supervisor"
+            && row.prompt.contains(&format!("notification_id=\"{notification_id}\""))).count(), 1);
+        assert_eq!(rows.iter().filter(|row| row.target == worker.name && row.prompt.contains(&review)).count(), 1);
+        assert_eq!(rows.len(), 4);
+    }
+
+    #[test]
+    fn merge_queue_ejection_with_repeat_hold_finishes_without_worker_return_gh2373() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "repeat-review-ejection");
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        register_supervisor(&root, "repeat-review-ejection");
+        let mut worker = Agent::new_with_role("worker-id".into(), "held-worker".into(), AgentRole::Worker);
+        worker.factory_session = Some("repeat-review-ejection".into());
+        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        let tasks = crate::store::open_task_store_cached(&root).unwrap();
+        let mut task = cas_types::Task::new("cas-2373-eject".into(), "Parked delivery".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.assignee = Some(worker.name.clone());
+        let head_sha = "1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa";
+        task.deliverables.factory_branch_anchor = Some(head_sha.into());
+        tasks.add(&task).unwrap();
+        record_bound_rejection(&root, &task.id, "ver-first");
+        record_bound_rejection(&root, &task.id, "ver-second");
+
+        let outcome = enqueue_merge_queue_ejection_relay(
+            &root, &task.id, &worker.name, 556, Some(601),
+            "queue-exit:2026-11-05T23:30:00Z", Some("Fast Validation"),
+            MergeQueueExit { head_sha, group_mate_failed: false },
+        );
+        assert!(matches!(outcome, WorkerAttentionRelayOutcome::Persisted { .. }));
+        assert_eq!(tasks.get(&task.id).unwrap().status, cas_types::TaskStatus::AwaitingMerge);
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+        assert!(rows.iter().any(|row| row.target == "supervisor"
+            && crate::gates::codes_in(&row.prompt).contains(&"G-172")));
+        assert!(!rows.iter().any(|row| row.target == worker.name));
     }
 
     #[test]

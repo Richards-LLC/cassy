@@ -25,13 +25,13 @@ fn supervisor_decisions(events: &[Event]) -> impl Iterator<Item = &str> {
         .filter_map(|event| event.metadata.as_ref()?.get("supervisor_decision")?.as_str())
 }
 
-// gate[G-170 repair]: Whole-flow review required after repeated verifier rejections
-fn refusal(task_id: &str, rejection_id: Option<&str>, count: Option<u64>) -> McpError {
+// gate[G-171 repair]: Whole-flow review required after repeated verifier rejections
+fn repeat_review_refusal(task_id: &str, rejection_id: Option<&str>, count: Option<u64>) -> McpError {
     let prefix = crate::mcp::tools::core::guidance::caller_prefix();
     let count = count.map_or_else(|| "at least 2".into(), |count| count.to_string());
     McpError {
         code: ErrorCode::INVALID_PARAMS,
-        message: crate::gates::tag("G-170", format!(
+        message: crate::gates::tag("G-171", format!(
             "Whole-flow review required for {task_id}: {count} all-time verifier rejections. Have an independent reviewer publish a Markdown review from the task's artifacts directory: a table with Actor, Operation, Design and Observed columns that compares every actor and operation against the design, followed by a Mismatches heading and a list of every mismatch. Publish it with `{prefix}artifact action=publish task_id={task_id} path=<file>`. A supervisor then links it with `{prefix}task action=notes id={task_id} note_type=decision notes=\"{REVIEW_NOTE} <artifact-id>\"`. Retry with a repair brief covering the full mismatch list."
         )).into(),
         data: Some(serde_json::json!({"rule_id":REPAIR_HOLD_RULE, "task_id":task_id, "rejection_id":rejection_id})),
@@ -81,7 +81,7 @@ pub(crate) fn admit_repair(root: &Path, task_id: &str) -> Result<RepairAdmission
             return Ok(RepairAdmission { reviewed_rejection: Some(rejection), artifact_id: Some(id.to_owned()) });
         }
     }
-    Err(refusal(task_id, Some(&rejection), Some(count)))
+    Err(repeat_review_refusal(task_id, Some(&rejection), Some(count)))
 }
 
 fn is_whole_flow_review(markdown: &str) -> bool {
@@ -179,7 +179,7 @@ pub(crate) fn repair_transition<T>(
 pub(crate) fn transition_error(root: &Path, task_id: &str, error: StoreError) -> McpError {
     if matches!(&error, StoreError::Parse(reason) if reason == REPEAT_REVIEW_REQUIRED) {
         let latest = latest_repeated_rejection(root, task_id).ok().flatten();
-        return refusal(task_id, latest.as_ref().map(|(id, _, _)| id.as_str()), latest.as_ref().map(|(_, _, count)| *count));
+        return repeat_review_refusal(task_id, latest.as_ref().map(|(id, _, _)| id.as_str()), latest.as_ref().map(|(_, _, count)| *count));
     }
     McpError::new(ErrorCode::INVALID_PARAMS, format!("request_changes rejected: {error}"), None)
 }
@@ -332,7 +332,7 @@ fn enqueue_hold(
     } else {
         ""
     };
-    let guidance = refusal(task_id, Some(verdict), Some(count)).message;
+    let guidance = repeat_review_refusal(task_id, Some(verdict), Some(count)).message;
     let detail = if let Some(intent) = detached {
         let merge = if intent.requires_target_merge {
             " The assigned worker must merge the integration branch into the source branch before tests or CI, then re-park."

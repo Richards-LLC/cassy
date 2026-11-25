@@ -454,7 +454,7 @@ async fn link_repeat_review_gh2373(f: &Fixture, id: &str, path: &Path) -> String
 }
 
 #[tokio::test]
-async fn repeat_review_every_entry_refuses_g170_gh2373() {
+async fn repeat_review_every_entry_refuses_g171_gh2373() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env, "main");
     let id = "cas-2373";
@@ -504,7 +504,7 @@ async fn repeat_review_every_entry_refuses_g170_gh2373() {
         let service = if role == "worker" { &f.worker } else { &f.supervisor };
         let result = service.task(Parameters(serde_json::from_value(attempt.clone()).unwrap())).await;
         let after = f.task(id);
-        if !result.as_ref().is_err_and(|error| crate::gates::codes_in(&error.message).contains(&"G-170"))
+        if !result.as_ref().is_err_and(|error| crate::gates::codes_in(&error.message).contains(&"G-171"))
             || after.status != before.status || after.assignee != before.assignee
         {
             failures.push(format!("{attempt}: {result:?}; state={:?}/{:?}", after.status, after.assignee));
@@ -526,7 +526,7 @@ async fn repeat_review_every_entry_refuses_g170_gh2373() {
     let queue_result = core.advance_queue_after_delivery(&predecessor.id).await;
     let queue_gate = queue_result.as_ref().is_err_and(|error| {
         error.data.as_ref().is_some_and(|data| data["rule_id"] == "repeat_review_required")
-            && crate::gates::codes_in(&error.message).contains(&"G-170")
+            && crate::gates::codes_in(&error.message).contains(&"G-171")
     });
     let after = f.task(id);
     if !queue_gate || after.status != queued.status || after.assignee != queued.assignee
@@ -541,14 +541,14 @@ async fn repeat_review_every_entry_refuses_g170_gh2373() {
         "notes":"whole-flow review: art-missing"})).await;
     let refusal = f.supervisor.task(Parameters(serde_json::from_value(request.clone()).unwrap()))
         .await.unwrap_err();
-    assert!(crate::gates::codes_in(&refusal.message).contains(&"G-170"), "{refusal:?}");
+    assert!(crate::gates::codes_in(&refusal.message).contains(&"G-171"), "{refusal:?}");
     assert_eq!(refusal.data.as_ref().unwrap()["rule_id"], "repeat_review_required");
 
     let receipt = f.artifact(id);
     link_repeat_review_gh2373(&f, id, &receipt).await;
     let refusal = f.supervisor.task(Parameters(serde_json::from_value(request.clone()).unwrap()))
         .await.unwrap_err();
-    assert!(crate::gates::codes_in(&refusal.message).contains(&"G-170"), "{refusal:?}");
+    assert!(crate::gates::codes_in(&refusal.message).contains(&"G-171"), "{refusal:?}");
 
     let path = receipt.with_file_name("whole-flow-review.md");
     std::fs::write(&path, "| Actor | Operation | Design | Observed |\n| --- | --- | --- | --- |\n| Owner | Abort | Can abort an open run | Unreachable |\n| Queue | Claim | Only current generation | Stale generation admitted |\n\n## Mismatches\n\n- Owner cannot abort an open run.\n- Queue admits a stale generation.\n").unwrap();
@@ -590,7 +590,7 @@ async fn repeat_rejection_holds_automatic_conflict_return_gh2373() {
     let refusal = f.supervisor.factory(Parameters(serde_json::from_value(serde_json::json!({
         "action":"worktree_merge", "id":format!("{LANE}-{id}"), "task_id":id,
     })).unwrap())).await.unwrap_err();
-    assert!(crate::gates::codes_in(&refusal.message).contains(&"G-170"), "{refusal:?}");
+    assert!(crate::gates::codes_in(&refusal.message).contains(&"G-171"), "{refusal:?}");
     assert_eq!(refusal.data.as_ref().and_then(|data| data["rule_id"].as_str()),
         Some("repeat_review_required"), "{refusal:?}");
     let held = f.task(id);
@@ -629,7 +629,7 @@ async fn detached_task_keeps_recorded_start_gh2373() {
         if fail_first_notice {
             conn.execute_batch("CREATE TRIGGER fail_repeat_notice BEFORE INSERT ON prompt_queue
                 WHEN NEW.source LIKE 'supervisor-notice:%' AND
-                (NEW.summary = 'repeat-review-train-detached' OR instr(NEW.prompt, 'G-170') > 0)
+                (NEW.summary = 'repeat-review-train-detached' OR instr(NEW.prompt, 'G-171') > 0)
                 BEGIN SELECT RAISE(ABORT, 'injected repeat notice delivery error'); END;").unwrap();
         }
         let verdict = reject_repeat_review_gh2373(&f, id, "A stale queue can claim the successor").await;

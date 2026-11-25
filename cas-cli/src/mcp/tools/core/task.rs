@@ -13,6 +13,7 @@ pub(crate) mod rebind;
 mod recover_delivery;
 pub(crate) mod repo_context;
 pub(crate) mod release_train;
+pub(crate) mod repeat_review;
 pub(crate) mod source_claim;
 mod update;
 

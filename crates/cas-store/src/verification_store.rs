@@ -321,6 +321,23 @@ pub struct SqliteVerificationStore {
 }
 
 impl SqliteVerificationStore {
+    pub fn latest_repeated_rejection(&self, task_id: &str) -> Result<Option<(String, DateTime<Utc>, u64)>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        latest_repeated_rejection_with_conn(&conn, task_id)
+    }
+
+    pub fn tasks_with_repeated_rejections(&self, now: DateTime<Utc>) -> Result<Vec<String>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut query = conn.prepare_cached(
+            "SELECT verifications.task_id FROM verifications JOIN tasks ON tasks.id = verifications.task_id
+             WHERE verifications.status = 'rejected' AND verifications.created_at <= ?1
+               AND tasks.status NOT IN ('closed', 'cancelled')
+             GROUP BY verifications.task_id HAVING COUNT(*) >= 2",
+        )?;
+        let rows = query.query_map(params![now.to_rfc3339()], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Open or create a SQLite verification store
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
@@ -2839,9 +2856,33 @@ pub fn request_changes_for_parked_delivery_with_merge_sources(
     reason: &str,
     source_commits: &[String],
 ) -> Result<RequestChangesOutcome> {
+    request_changes_for_reviewed_delivery(cas_dir, task_id, supervisor_agent_id, reason, source_commits, None)
+}
+
+pub fn request_changes_for_reviewed_delivery(
+    cas_dir: &Path,
+    task_id: &str,
+    supervisor_agent_id: &str,
+    reason: &str,
+    source_commits: &[String],
+    reviewed_rejection: Option<&str>,
+) -> Result<RequestChangesOutcome> {
     request_changes_for_parked_delivery_impl(
-        cas_dir, task_id, supervisor_agent_id, reason, source_commits, None,
+        cas_dir, task_id, supervisor_agent_id, reason, source_commits, None, None, reviewed_rejection,
     ).map(|outcome| outcome.expect("manual request-changes has no repair budget"))
+}
+
+pub fn request_changes_for_observed_delivery(
+    cas_dir: &Path,
+    task_id: &str,
+    supervisor_agent_id: &str,
+    reason: &str,
+    observed: (&str, &str, &str),
+    reviewed_rejection: Option<&str>,
+) -> Result<RequestChangesOutcome> {
+    request_changes_for_parked_delivery_impl(
+        cas_dir, task_id, supervisor_agent_id, reason, &[], None, Some(observed), reviewed_rejection,
+    ).map(|outcome| outcome.expect("an observed delivery has no automatic repair budget"))
 }
 
 /// Atomically consume one automatic repair with the existing decline transition.
@@ -2855,8 +2896,28 @@ pub fn auto_return_premerge_rejection(
     rejected_anchor: &str,
 ) -> Result<Option<RequestChangesOutcome>> {
     request_changes_for_parked_delivery_impl(
-        cas_dir, task_id, owner_id, reason, &[], Some((dispatch_id, rejected_anchor)),
+        cas_dir, task_id, owner_id, reason, &[], Some((dispatch_id, rejected_anchor)), None, None,
     )
+}
+
+pub const REPEAT_REVIEW_REQUIRED: &str = "repeat_review_admission_required";
+
+pub(crate) fn latest_repeated_rejection_with_conn(conn: &Connection, task_id: &str) -> Result<Option<(String, DateTime<Utc>, u64)>> {
+    let mut query = conn.prepare_cached(
+        "SELECT id, created_at, COUNT(*) OVER () FROM verifications WHERE task_id = ?1 AND status = 'rejected'
+         ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )?;
+    let mut rows = query.query([task_id])?;
+    let Some(latest) = rows.next()? else { return Ok(None) };
+    let id = latest.get(0)?;
+    let created_at: String = latest.get(1)?;
+    let count = u64::try_from(latest.get::<_, i64>(2)?)
+        .map_err(|error| StoreError::Parse(format!("invalid rejection count: {error}")))?;
+    if count < 2 { return Ok(None); }
+    let created_at = DateTime::parse_from_rfc3339(&created_at)
+        .map_err(|error| StoreError::Parse(format!("invalid rejection timestamp: {error}")))?
+        .with_timezone(&Utc);
+    Ok(Some((id, created_at, count)))
 }
 
 fn request_changes_for_parked_delivery_impl(
@@ -2866,6 +2927,8 @@ fn request_changes_for_parked_delivery_impl(
     reason: &str,
     source_commits: &[String],
     automatic_repair: Option<(&str, &str)>,
+    observed: Option<(&str, &str, &str)>,
+    reviewed_rejection: Option<&str>,
 ) -> Result<Option<RequestChangesOutcome>> {
     let reason = reason.trim();
     if reason.is_empty() {
@@ -2973,6 +3036,14 @@ fn request_changes_for_parked_delivery_impl(
             params![dispatch_id], |row| row.get(0),
         )?;
         if !rejected { return Ok(None); }
+    }
+    if latest_repeated_rejection_with_conn(&tx, task_id)?
+        .is_some_and(|(id, _, _)| Some(id.as_str()) != reviewed_rejection)
+    {
+        return Err(StoreError::Parse(REPEAT_REVIEW_REQUIRED.into()));
+    }
+    if let Some((branch, target, anchor)) = observed {
+        crate::delivery_store::clear_pending_observed_delivery_merge_with_conn(&tx, task_id, branch, target, anchor)?;
     }
     // Typed grants come only from the supervisor adapter, never review prose.
     for source in source_commits {
@@ -3142,12 +3213,7 @@ fn request_changes_for_parked_delivery_impl(
             "request_changes task transition raced".to_string(),
         ));
     }
-    let event = Event::new(
-        EventType::TaskNoteAdded,
-        EventEntityType::Task,
-        task_id,
-        note,
-    );
+    let event = Event::new(EventType::TaskNoteAdded, EventEntityType::Task, task_id, note);
     record_event_with_conn(&tx, &event)?;
     tx.commit()?;
     Ok(Some(RequestChangesOutcome {
@@ -4362,7 +4428,12 @@ mod tests {
 
     #[test]
     fn automatic_premerge_repair_is_atomic_and_dispatch_bound_cas_ed08() {
+        use crate::{AgentStore, SqliteAgentStore};
         let dir = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(dir.path()).unwrap();
+        agents.init().unwrap();
+        let owner = Agent::new_with_role("owner".into(), "supervisor".into(), AgentRole::Supervisor);
+        agents.register(&owner).unwrap();
         let tasks = SqliteTaskStore::open(dir.path()).unwrap();
         tasks.init().unwrap();
         let mut task = Task::new("repair".into(), "Repair".into());
@@ -4375,11 +4446,18 @@ mod tests {
             Utc::now() + Duration::minutes(10)).unwrap();
         let mut verdict = Verification::new("rejected".into(), task.id.clone());
         verdict.status = VerificationStatus::Rejected;
-        verdict.provenance = cas_types::VerificationProvenance::System;
+        verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+        verdict.agent_id = Some(owner.id.clone());
+        verdict.issuer_agent_id = Some(owner.id.clone());
         verdict.dispatch_id = Some(dispatch.id.clone());
-        add_system_verification(dir.path(), &verdict).unwrap();
-        let conn = rusqlite::Connection::open(dir.path().join("cas.db")).unwrap();
-        resolve_verification_dispatch_with_conn(&conn, &dispatch.id, "owner", None, true).unwrap();
+        let record = |verdict: &Verification, dispatch: &VerificationDispatch| {
+            let mut connection = rusqlite::Connection::open(dir.path().join("cas.db")).unwrap();
+            let transaction = connection.transaction().unwrap();
+            add_verification_with_conn(&transaction, verdict).unwrap();
+            assert!(resolve_verification_dispatch_with_conn(&transaction, &dispatch.id, &owner.id, None, true).unwrap().is_some());
+            transaction.commit().unwrap();
+        };
+        record(&verdict, &dispatch);
         let grant = |owner: &str, id: &str, anchor: &str| auto_return_premerge_rejection(
             dir.path(), &task.id, owner, "evidence repair", id, anchor).unwrap();
         for (owner, id, anchor) in [("foreign", dispatch.id.as_str(), "a".repeat(40)),
@@ -4413,14 +4491,33 @@ mod tests {
         tasks.update(&returned).unwrap();
         let next = create_verification_dispatch(dir.path(), &task.id, "worker", "owner",
             Utc::now() + Duration::minutes(10)).unwrap();
+        let cas_types::ClaimResult::Success(existing) = agents.try_claim(&task.id, &owner.id, 600, None).unwrap() else {
+            panic!("expected a lease before the second rejection");
+        };
         verdict.id = "next".into();
         verdict.dispatch_id = Some(next.id.clone());
-        add_system_verification(dir.path(), &verdict).unwrap();
-        resolve_verification_dispatch_with_conn(&conn, &next.id, "owner", None, true).unwrap();
+        record(&verdict, &next);
+        assert_eq!(agents.preview_task_claim(&task.id, &owner.id).unwrap(), None);
+        assert!(matches!(agents.try_claim(&task.id, &owner.id, 600, None).unwrap(),
+            cas_types::ClaimResult::AlreadyClaimed { held_by, .. } if held_by == owner.id));
+        assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().epoch, existing.epoch);
+        agents.release_lease(&task.id, &owner.id).unwrap();
+        let history = agents.get_lease_history(&task.id, None).unwrap().len();
+        for refusal in [
+            agents.preview_task_claim(&task.id, &owner.id).unwrap_err(),
+            agents.try_claim(&task.id, &owner.id, 600, None).unwrap_err(),
+        ] {
+            assert!(matches!(refusal, StoreError::RepeatReviewRequired { rejection_id, count: 2, .. }
+                if rejection_id == verdict.id));
+        }
+        assert_eq!(agents.get_lease_history(&task.id, None).unwrap().len(), history);
+        assert!(agents.get_lease(&task.id).unwrap().is_none());
         assert!(grant("owner", &next.id, &"b".repeat(40)).is_none());
         assert_eq!(tasks.get(&task.id).unwrap().deliverables.premerge_repair, Some(receipt));
         // Explicit supervisor request-changes creates a new manual work cycle.
-        request_changes_for_parked_delivery(dir.path(), &task.id, "owner", "new scope").unwrap();
+        let held = request_changes_for_parked_delivery(dir.path(), &task.id, "owner", "new scope").unwrap_err();
+        assert!(matches!(held, StoreError::Parse(reason) if reason == REPEAT_REVIEW_REQUIRED));
+        request_changes_for_reviewed_delivery(dir.path(), &task.id, "owner", "new scope", &[], Some(&verdict.id)).unwrap();
         let current = tasks.get(&task.id).unwrap();
         assert!(current.deliverables.delivery_cycle > current.deliverables.premerge_repair.unwrap().repair_cycle);
     }

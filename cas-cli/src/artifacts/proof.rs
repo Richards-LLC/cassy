@@ -187,6 +187,44 @@ pub fn contains_proof_marker(note: &str) -> bool {
     note.lines().any(|line| line.starts_with("ARTIFACT_PROOF:"))
 }
 
+pub(crate) fn read_verified_text(
+    root: &Path, artifact: &PublishedArtifact, max_bytes: u64,
+) -> anyhow::Result<String> {
+    use std::io::Read as _;
+    use sha2::{Digest, Sha256};
+
+    super::require_available(artifact)?;
+    anyhow::ensure!(artifact.size_bytes <= max_bytes, "artifact exceeds byte limit");
+    ArtifactRef {
+        artifact_id: artifact.id.clone(), name: artifact.name.clone(), mime: artifact.mime.clone(),
+        size_bytes: artifact.size_bytes, sha256: artifact.sha256.clone(),
+    }.validate()?;
+    let config = crate::config::Config::load(root)?;
+    let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let roots = PublishRoots::new(root, &base, &artifact.task_id);
+    let fetched_name = format!("{}-{}", artifact.id, artifact.name);
+    let read = |path: &Path| -> anyhow::Result<String> {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?.take(max_bytes + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() as u64 == artifact.size_bytes
+            && hex::encode(Sha256::digest(&bytes)) == artifact.sha256, "bytes do not match published artifact");
+        Ok(String::from_utf8(bytes)?)
+    };
+    for dir in [&roots.task_artifacts_dir, &roots.legacy_task_artifacts_dir] {
+        if let Some(dir) = crate::config::canonical_factory_task_artifact_dir(&base, dir) {
+            for name in [&artifact.name, &fetched_name] {
+                if let Ok(path) = dir.join(name).canonicalize()
+                    && path.starts_with(&dir) && path.is_file()
+                    && let Ok(text) = read(&path)
+                { return Ok(text); }
+            }
+        }
+    }
+    let store = SqliteArtifactStore::open(root)?;
+    let path = fetch(&store, super::cloud_client(root).as_ref(), &roots, artifact.clone(), &fetched_name)?;
+    read(&path)
+}
+
 pub(crate) fn same_artifact(a: &PublishedArtifact, b: &PublishedArtifact) -> bool {
     a.id == b.id
         && a.task_id == b.task_id

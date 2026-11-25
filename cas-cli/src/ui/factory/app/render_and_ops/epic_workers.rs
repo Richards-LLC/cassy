@@ -1828,11 +1828,18 @@ fn worker_has_open_tasks(cas_dir: &std::path::Path, agent_id: &str) -> bool {
 ///
 /// Returns `true` when the task is assigned to `worker_name` after this call
 /// (including already-ours), `false` on any miss/skip/error.
-pub(crate) fn assign_task_to_new_worker(
+#[cfg(test)]
+fn assign_task_to_new_worker(
     cas_dir: &std::path::Path,
     task_id: &str,
     worker_name: &str,
 ) -> bool {
+    assign_task_to_new_worker_with_review(cas_dir, task_id, worker_name).is_ok()
+}
+
+pub(crate) fn assign_task_to_new_worker_with_review(
+    cas_dir: &std::path::Path, task_id: &str, worker_name: &str,
+) -> Result<Option<String>, String> {
     let store = match open_task_store_cached(cas_dir) {
         Ok(store) => store,
         Err(e) => {
@@ -1840,7 +1847,7 @@ pub(crate) fn assign_task_to_new_worker(
                 task_id, worker_name, error = %e,
                 "cas-6913: failed to open task store for spawn-time task pre-assignment"
             );
-            return false;
+            return Err(format!("could not open the task store to confirm the pre-assignment: {e}"));
         }
     };
 
@@ -1851,7 +1858,7 @@ pub(crate) fn assign_task_to_new_worker(
                 task_id, worker_name, error = %e,
                 "cas-6913: task not found for spawn-time pre-assignment"
             );
-            return false;
+            return Err(format!("task {task_id} could not be read: {e}"));
         }
     };
 
@@ -1865,39 +1872,40 @@ pub(crate) fn assign_task_to_new_worker(
             status = %task.status,
             "cas-8aee: refusing spawn-time pre-assignment for terminal task"
         );
-        return false;
+        return Err(format!("task {task_id} is terminal ({}) and must not be pre-assigned or briefed", task.status));
     }
 
     if let Err(error) = crate::task_assignment::ensure_review_assignment(task.review_dispatch_id.as_deref(), None) {
         tracing::warn!(task_id, %error, "refused worker review assignment");
-        return false;
+        return Err(error.to_string());
     }
 
-    if let Some(ref existing) = task.assignee {
-        if existing == worker_name {
-            // Early-assign already pinned this worker (cas-7a94 isolate path).
-            return true;
-        }
+    let review = crate::mcp::tools::core::task::repeat_review::require_review(cas_dir, &task.id)
+        .map_err(|error| error.message.into_owned())?;
+    if task.assignee.as_deref() == Some(worker_name) {
+        return Ok(review);
+    }
+
+    let task = if let Some(ref existing) = task.assignee {
         if let Err(reason) = reset_stale_preassign_holder(cas_dir, &task, existing) {
             tracing::warn!(
                 task_id, worker_name, existing_assignee = %existing, reason,
                 "cas-2327: refused spawn-time pre-assignment holder"
             );
-            return false;
+            return Err(format!("task {task_id} is assigned to '{existing}', not '{worker_name}': {reason}"));
         }
         // Reset persisted successfully; reload before assigning so the normal
         // write below never carries stale status/assignee data forward.
-        let task = match store.get(task_id) {
+        match store.get(task_id) {
             Ok(task) => task,
             Err(e) => {
                 tracing::error!(task_id, worker_name, error = %e, "cas-2327: stale-holder reset succeeded but task reload failed");
-                return false;
+                return Err(format!("task {task_id} was reset but could not be re-read: {e}"));
             }
-        };
-        return assign_unassigned_task(&*store, task, task_id, worker_name);
-    }
-
+        }
+    } else { task };
     assign_unassigned_task(&*store, task, task_id, worker_name)
+        .then_some(review).ok_or_else(|| format!("the pre-assignment did not persist for task {task_id}"))
 }
 
 /// A block belongs to the worker that made it. Once its task is reopened for
@@ -3386,13 +3394,18 @@ impl FactoryApp {
         let task_id = queue_head.unwrap_or(task_id);
         // Bind before launch so the first turn can carry the actual assignment.
         // Store reads stay here; mux/pty only receive the composed text.
+        let review = if let Some(id) = task_id.as_deref().filter(|_| !queued_spawn) {
+            match assign_task_to_new_worker_with_review(self.cas_dir(), id, &worker_name) {
+                Ok(review) => Ok(review),
+                Err(error) if crate::gates::codes_in(&error).contains(&"G-172") => anyhow::bail!("{error}"),
+                Err(error) => Err(error),
+            }
+        } else { Ok(None) };
         let startup = task_id.as_deref().and_then(|id| {
             // Ordered spawns retain their queue selector's ownership. The
             // startup instruction authorizes a normal gated start of its head;
             // registration repair may already have started it by that turn.
-            if !queued_spawn && !assign_task_to_new_worker(self.cas_dir(), id, &worker_name) {
-                return None;
-            }
+            let review = review.as_ref().ok()?;
             let store = open_task_store_cached(self.cas_dir()).ok()?;
             let task = store.get(id).ok()?;
             if queued_spawn && (task.assignee.as_deref().is_some_and(|owner| owner != worker_name)
@@ -3404,7 +3417,7 @@ impl FactoryApp {
                 return None;
             }
             let mut prompt = crate::ui::factory::daemon::runtime::queue_and_events::worker_spawn_prompt(
-                self.cas_dir(), &worker_name, id, &task.title, effective_cli,
+                self.cas_dir(), &worker_name, id, &task.title, effective_cli, review.as_deref(),
             );
             if let Some(instruction) = crate::worktree::node_modules_setup_instruction(&cwd) {
                 prompt.push_str(&format!("\n\n{instruction}"));

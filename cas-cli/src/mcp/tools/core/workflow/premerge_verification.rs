@@ -1257,8 +1257,10 @@ impl CasCore {
             || !supervisor_push::premerge_repair_worker_available(&self.cas_root, task).map_err(fail)?
         { return Ok(None); }
         let Some(candidate) = candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)? else { return Ok(None); };
+        let reason = format!("Automatic non-behavioural repair for dispatch {}.\n{findings}", dispatch.id);
         let outcome = cas_store::auto_return_premerge_rejection(&self.cas_root, &task.id,
-            &dispatch.owner_agent_id, &format!("Automatic non-behavioural repair for dispatch {}.{findings}", dispatch.id), &dispatch.id, &candidate.source_sha).map_err(fail)?;
+            &dispatch.owner_agent_id, &reason, &dispatch.id, &candidate.source_sha)
+            .map_err(|error| crate::mcp::tools::core::task::repeat_review::transition_error(&self.cas_root, &task.id, error))?;
         if outcome.is_none() {
             let current = self.open_task_store()?.get(&task.id).map_err(fail)?;
             if current.deliverables.premerge_repair.as_ref().is_some_and(|receipt| receipt.dispatch_id == dispatch.id) {
@@ -1268,7 +1270,7 @@ impl CasCore {
         }
         crate::store::publish_direct_task_write(&self.cas_root, &task.id).map_err(fail)?;
         let returned = self.open_task_store()?.get(&task.id).map_err(fail)?;
-        if supervisor_push::queue_premerge_repair_notice(&self.cas_root, &returned, &dispatch.id, findings)
+        if supervisor_push::queue_premerge_repair_notice(&self.cas_root, &returned, &dispatch.id, &reason)
             .map_err(fail)?.is_none()
         { return Ok(None); }
         Ok(Some("\nCassy returned the delivery to its assigned worker with the findings for one automatic repair. A new source commit and independent approval are required; another rejection holds for the supervisor.".into()))
@@ -2597,7 +2599,9 @@ mod tests {
             };
             let mut verdict = Verification::new(format!("ver-{name}"), task.id.clone());
             verdict.status = VerificationStatus::Rejected;
-            verdict.provenance = VerificationProvenance::System;
+            verdict.provenance = VerificationProvenance::SupervisorDirect;
+            verdict.agent_id = Some(owner.id.clone());
+            verdict.issuer_agent_id = Some(owner.id.clone());
             verdict.dispatch_id = Some(dispatch.id.clone());
             verdict.issues = issues.clone();
             core.cas_verification_add(rmcp::handler::server::wrapper::Parameters(crate::mcp::tools::VerificationAddRequest {
@@ -2606,8 +2610,8 @@ mod tests {
                 files_reviewed: Some("work.txt".into()), duration_ms: None,
                 verification_type: None, verifier_capability: None, dispatch_id: Some(dispatch.id.clone()),
             })).await.unwrap();
-            let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
             for _ in 0..2 {
+                assert!(crate::mcp::tools::core::task::repeat_review::settle(&root, &task.id).unwrap().is_none());
                 core.continue_premerge_after_verdict(&dispatch, verdict.status).await.unwrap();
             }
             let mut current = core.open_task_store().unwrap().get(&task.id).unwrap();
@@ -2659,10 +2663,8 @@ mod tests {
                 };
                 verdict.id.push_str("-next");
                 verdict.dispatch_id = Some(next.id.clone());
-                cas_store::add_system_verification(&root, &verdict).unwrap();
-                cas_store::resolve_verification_dispatch_with_conn(&conn, &next.id, &owner.id, None, true).unwrap();
-                restarted.continue_premerge_after_verdict(&next, verdict.status).await.unwrap();
-                restarted.continue_premerge_after_verdict(&dispatch, verdict.status).await.unwrap();
+                record_supervisor_rejection(&root, &verdict, &next);
+                assert!(crate::mcp::tools::core::task::repeat_review::settle(&root, &task.id).unwrap().is_some());
                 assert_eq!(core.open_task_store().unwrap().get(&task.id).unwrap().status, task.status);
                 let after = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(200).unwrap();
                 assert_eq!(after.iter().filter(|p| p.target == worker.name).count(), worker_prompts.len());
@@ -2790,14 +2792,27 @@ mod tests {
             chrono::Utc::now() + chrono::Duration::minutes(10)).unwrap();
         let mut verdict = cas_types::Verification::new("verdict".into(), task.id.clone());
         verdict.status = VerificationStatus::Rejected;
-        verdict.provenance = cas_types::VerificationProvenance::System;
+        verdict.provenance = VerificationProvenance::SupervisorDirect;
+        verdict.agent_id = Some(owner.id.clone());
+        verdict.issuer_agent_id = Some(owner.id.clone());
         verdict.summary = "REJECTED: candidate loses the operator draft".into();
         verdict.dispatch_id = Some(dispatch.id.clone());
-        cas_store::add_system_verification(&root, &verdict).unwrap();
+        record_supervisor_rejection(&root, &verdict, &dispatch);
+        assert!(crate::mcp::tools::core::task::repeat_review::settle(&root, &task.id).unwrap().is_none());
         core.continue_premerge_after_verdict(&dispatch, verdict.status).await.unwrap();
         let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
         assert_eq!(prompts.len(), 1);
         assert!(prompts[0].prompt.contains(&verdict.summary), "supervisor needs the actual findings: {:?}", prompts[0]);
+    }
+
+    fn record_supervisor_rejection(root: &Path, verdict: &Verification, dispatch: &VerificationDispatch) {
+        let mut connection = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        let transaction = connection.transaction().unwrap();
+        cas_store::add_verification_with_conn(&transaction, verdict).unwrap();
+        assert!(cas_store::resolve_verification_dispatch_with_conn(
+            &transaction, &dispatch.id, &dispatch.owner_agent_id, None, true,
+        ).unwrap().is_some());
+        transaction.commit().unwrap();
     }
 
     #[test]

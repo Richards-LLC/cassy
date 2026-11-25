@@ -18,7 +18,7 @@ test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
     await conversationRow(page).click();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000, message: "Light-stage dark-theme conversation socket never opened before the supervisor status message" }).toBe(true);
-    hub.supervisorSays(PELICAN, "Status: the Linux lane is green; the Mac lane is still running.", { kind: "status" });
+    await hub.supervisorSays(PELICAN, "Status: the Linux lane is green; the Mac lane is still running.", { kind: "status" });
   });
 
   await journey.stage("Choose the dark appearance", async () => {
@@ -67,7 +67,7 @@ test("HUB-J10 high contrast keeps the open conversation and Send marked (cas-66f
     await conversationRow(page).click();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000, message: "Contrast-stage dark-theme conversation socket never opened before the supervisor status message" }).toBe(true);
-    hub.supervisorSays(PELICAN, "Status: the Linux lane is green; the Mac lane is still running.", { kind: "status" });
+    await hub.supervisorSays(PELICAN, "Status: the Linux lane is green; the Mac lane is still running.", { kind: "status" });
     await expect(page.getByRole("log").getByText("Status: the Linux lane is green; the Mac lane is still running.")).toBeVisible();
     await page.getByRole("button", { name: "Appearance & commands" }).click();
     await page.getByRole("button", { name: /^Appearance · Dark/ }).click();

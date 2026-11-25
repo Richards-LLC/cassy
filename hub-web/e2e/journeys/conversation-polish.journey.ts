@@ -40,8 +40,8 @@ async function openQuestionless(page: Page, journey: Journey) {
   await journey.open();
   await conversationRow(page, "cas-src").click();
   await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
-  hub.supervisorSays(PELICAN, "**Earlier question:** which **route** is clearer?", { kind: "ask" });
-  const ask = hub.supervisorSays(PELICAN, "**Which plan** should we use?\n\nExplain your choice in a reply.", { kind: "ask" });
+  await hub.supervisorSays(PELICAN, "**Earlier question:** which **route** is clearer?", { kind: "ask" });
+  const ask = await hub.supervisorSays(PELICAN, "**Which plan** should we use?\n\nExplain your choice in a reply.", { kind: "ask" });
   await expect(pinnedAsk(page)).toBeVisible();
   await expect(statusView(page)).toContainText("Polish the conversation");
   return { hub, ask, workers };
@@ -135,7 +135,7 @@ test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, asyn
     await expect(askCard(page, "Which plan should we use?").getByTestId("sent")).toHaveText("Use the quieter plan.");
   });
   await journey.stage("Reply with a declared option", async () => {
-    const choice = hub.supervisorSays(PELICAN, "Choose the **next step**.", { kind: "ask", options: ["Keep editing", "Send for review"] });
+    const choice = await hub.supervisorSays(PELICAN, "Choose the **next step**.", { kind: "ask", options: ["Keep editing", "Send for review"] });
     const question = askCard(page, "Choose the next step.");
     await expect(question.getByRole("button", { name: "Send for review", exact: true })).toBeVisible();
     const sent = hub.nextSend();
@@ -182,7 +182,7 @@ test("HUB-J7 empty roster and long unreported work (cas-6e3a)", journeyPart, asy
     expect(await statusView(page).evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
     // The ask needs the session's socket, which can open after the rail draws.
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
-    hub.supervisorSays(PELICAN, "Choose a route with a readable question.\n\n" + "More detail about this decision. ".repeat(60), { kind: "ask", options: [] });
+    await hub.supervisorSays(PELICAN, "Choose a route with a readable question.\n\n" + "More detail about this decision. ".repeat(60), { kind: "ask", options: [] });
     await expect(pinnedExpand(page)).toBeVisible();
     // cas-053c (cas-d043): hovering the bar keeps its amber fill in both
     // schemes; the generic hover wash put its text at 1.17:1 in dark.

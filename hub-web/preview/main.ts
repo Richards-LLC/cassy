@@ -108,18 +108,18 @@ if (!(await seeded())) {
 } else {
   // Live moments: a question arrives, and the supervisors answer what you send.
   const whenAttached = (session: string) => hub.waitFor(() => hub.attaches.includes(session));
-  void whenAttached(CAS).then(() => setTimeout(() => {
-    hub.supervisorSays(CAS, "The inbox journeys are 41 of 82 and green so far.\n\n**Ship 3.47.0 now, or hold for the full run?**", { kind: "ask", options: ["Ship now", "Hold for the full run"] });
+  void whenAttached(CAS).then(() => setTimeout(async () => {
+    await hub.supervisorSays(CAS, "The inbox journeys are 41 of 82 and green so far.\n\n**Ship 3.47.0 now, or hold for the full run?**", { kind: "ask", options: ["Ship now", "Hold for the full run"] });
   }, params.get("ask") === "0" ? 1e9 : 1200));
   let answered = 0;
-  setInterval(() => {
+  setInterval(async () => {
     while (answered < hub.sends.length) {
       const sent = hub.sends[answered++];
       try {
-        const queued = hub.deliverLatest(sent.session);
-        setTimeout(() => {
+        const queued = await hub.deliverLatest(sent.session);
+        setTimeout(async () => {
           const text = sent.in_reply_to ? `Understood — "${sent.text}". I'll take it from here and report back.` : `Got it. I'll look into "${sent.text.slice(0, 60)}" and report back here.`;
-          try { hub.answerQueued(sent.session, queued, text); } catch { /* socket gone */ }
+          try { await hub.answerQueued(sent.session, queued, text); } catch { /* socket gone */ }
         }, 1400);
       } catch { /* socket gone */ }
     }

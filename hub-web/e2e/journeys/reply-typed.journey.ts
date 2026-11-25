@@ -33,7 +33,7 @@ test("HUB-J5 message-only pairing sends without taking pane control (cas-d402)",
     expect(taken, "semantic send does not acquire pane control").toBe(false);
   });
   await journey.stage("Delivered without taking pane control", async () => {
-    hub.deliverLatest(PELICAN);
+    await hub.deliverLatest(PELICAN);
     await expect(turn(page, "Send this without terminal access.")).toHaveAttribute("data-state", "delivered");
     await expect(deliveryLine(page, "Send this without terminal access.")).toBeVisible();
     await expect(status).toBeHidden();
@@ -54,7 +54,7 @@ test("HUB-J5 a revoked send keeps its text and draft and points to re-pairing (c
     await composer.fill("Keep my newer draft too.");
     // The real handler/wire regression supplies this actionable pairing detail;
     // here the daemon-error route proves the shared failed-send projection.
-    hub.send(PELICAN, { Error: { client_ref: sent.client_ref, message: "This device's pairing is no longer accepted. Pair this device again, then retry." } });
+    await hub.send(PELICAN, { Error: { client_ref: sent.client_ref, message: "This device's pairing is no longer accepted. Pair this device again, then retry." } });
     await expect(bubble).toHaveAttribute("data-state", "error");
     await expect(bubble).toContainText("Keep the refused message.");
     await expect(bubble.getByRole("status")).toBeVisible();
@@ -118,10 +118,10 @@ test("HUB-J5 Send again delivers without taking pane control (cas-d402)", journe
     const unreceipted = hub.nextSend();
     await send.click();
     expect((await unreceipted).text).toBe("Did the Mac tests start?");
-    hub.supervisorSays(PELICAN, "Gate run 3 of 3 is going.");
+    await hub.supervisorSays(PELICAN, "Gate run 3 of 3 is going.");
     await expect(page.getByRole("log")).toContainText("Gate run 3 of 3 is going.");
     await page.clock.fastForward(5_000);
-    hub.supervisorSays(PELICAN, "Tests are running on the Mac.");
+    await hub.supervisorSays(PELICAN, "Tests are running on the Mac.");
     const bubble = turn(page, "Did the Mac tests start?");
     await expect(bubble).toHaveAttribute("data-state", "unconfirmed");
     await expect(bubble).toHaveAttribute("data-settled", "true");
@@ -135,7 +135,7 @@ test("HUB-J5 Send again delivers without taking pane control (cas-d402)", journe
     await page.getByRole("button", { name: "Send this message again" }).click();
     expect((await resent).text).toBe("Did the Mac tests start?");
     expect(taken, "Send again does not acquire pane control").toBe(false);
-    hub.deliverLatest(PELICAN);
+    await hub.deliverLatest(PELICAN);
     await expect(deliveryLine(page, "Did the Mac tests start?")).toBeVisible();
     await expect(page.getByRole("log").getByText("Did the Mac tests start?")).toHaveCount(1);
     await expect(status).toBeHidden();

@@ -110,7 +110,7 @@ test("HUB-J7 answer a question in the thread", async ({ page, journey }) => {
   });
 
   await journey.stage("The supervisor asks a question", async () => {
-    ask = hub.supervisorSays(PELICAN, "The gate failed on one clippy warning. Fix it in the train, or ship with it allowlisted?", { kind: "ask", options: ["Fix in-train", "Ship with allowlist"] });
+    ask = await hub.supervisorSays(PELICAN, "The gate failed on one clippy warning. Fix it in the train, or ship with it allowlisted?", { kind: "ask", options: ["Fix in-train", "Ship with allowlist"] });
     await expect(pinned).toBeVisible();
     await expect(page.getByRole("log").getByRole("button", { name: "Fix in-train" })).toBeVisible();
     // One full question in the flow; the composer bookmark carries no choices.
@@ -198,10 +198,10 @@ test("HUB-J7 answer a question in the thread", async ({ page, journey }) => {
   });
 
   await journey.stage("See the supervisor act on the answer", async () => {
-    hub.answerLatest(PELICAN, "Fixing the warning in the train now.");
+    await hub.answerLatest(PELICAN, "Fixing the warning in the train now.");
     await expect(page.getByRole("log").getByText("Fixing the warning in the train now.")).toBeVisible();
     // A new blocker after the answer does wait: the answer does not reach forward in time.
-    hub.supervisorSays(PELICAN, "A second gate went red; the train is still held.", { kind: "blocker" });
+    await hub.supervisorSays(PELICAN, "A second gate went red; the train is still held.", { kind: "blocker" });
     await expect(waiting.getByRole("listitem", { includeHidden: true })).toHaveCount(1);
     await expect(waiting).toContainText("A second gate went red");
     await expect(waiting.getByTestId("context-hint")).toBeVisible();
@@ -211,12 +211,12 @@ test("HUB-J7 answer a question in the thread", async ({ page, journey }) => {
 
   await journey.stage("Jump to a long question and dismiss its bookmark", async () => {
     const composer = page.getByRole("textbox", { name: "Your message" });
-    const release = hub.supervisorSays(PELICAN, "Every lane is merged and the gate is green.\n\n- 21 tasks closed.\n- The diff is 579 files.\n- The audit docs ship with it.\n- **Ask:** open the PR to main and cut a release?", { kind: "ask", options: ["Open PR", "Hold release"] });
+    const release = await hub.supervisorSays(PELICAN, "Every lane is merged and the gate is green.\n\n- 21 tasks closed.\n- The diff is 579 files.\n- The audit docs ship with it.\n- **Ask:** open the PR to main and cut a release?", { kind: "ask", options: ["Open PR", "Hold release"] });
     const copy = threadObject(page, "Every lane is merged and the gate is green.");
     const bar = pinnedBar(page);
     await expect(copy.getByRole("button", { name: "Open PR", exact: true })).toBeVisible();
-    hub.supervisorSays(PELICAN, "FYI: the Mac tests are still running.");
-    hub.supervisorSays(PELICAN, "Gate 2 of 3 is going.", { kind: "status" });
+    await hub.supervisorSays(PELICAN, "FYI: the Mac tests are still running.");
+    await hub.supervisorSays(PELICAN, "Gate 2 of 3 is going.", { kind: "status" });
     await expect(page.getByRole("log").getByText("FYI: the Mac tests are still running.")).toBeVisible();
     await expect(copy).not.toHaveAttribute("data-retired", /.+/);
     await expect(bar).toBeVisible();
@@ -309,7 +309,7 @@ test("HUB-J7 a machine clock ahead: the first visit and a reload agree, and the 
     const sent = hub.nextSend();
     await activate(page, page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }));
     await sent;
-    hub.answerLatest(PELICAN, "Yes, the gate is green.");
+    await hub.answerLatest(PELICAN, "Yes, the gate is green.");
     await expect(log.getByText("Yes, the gate is green.")).toBeVisible();
     // The visit cannot know the machine's lead yet: the answer shows its arrival, unmarked.
     await expect(clockAhead(page)).toHaveCount(0);
@@ -339,7 +339,7 @@ test("HUB-J7 a machine clock ahead: the first visit and a reload agree, and the 
     await expect(list.getByTestId("conversation-when")).toHaveText("8m");
     // The reload measured the lead, so the next live answer says the clock is ahead.
     await openConversation(page, "cas-src");
-    hub.answerLatest(PELICAN, "Tagging 3.26.0 now.");
+    await hub.answerLatest(PELICAN, "Tagging 3.26.0 now.");
     await expect(log.getByText("Tagging 3.26.0 now.")).toBeVisible();
     await expect(clockAhead(page)).toHaveCount(1);
     await showConversationList(page);
@@ -355,7 +355,7 @@ test("HUB-J7 double-tapping the bookmark jumps without answering (cas-450b, cas-
     await page.setViewportSize({ width: 390, height: 440 }); await journey.open();
     await conversationRow(page, "cas-src").click();
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
-    ask = hub.supervisorSays(PELICAN, "Open the PR and cut a release?", { kind: "ask", options: ["Open PR", "Hold release"] });
+    ask = await hub.supervisorSays(PELICAN, "Open the PR and cut a release?", { kind: "ask", options: ["Open PR", "Hold release"] });
     await expect(pinnedBar(page)).toBeVisible();
   });
   await journey.stage("A double tap jumps without sending", async () => {
@@ -382,7 +382,7 @@ test("HUB-J7 save a secret an agent asked for (cas-1996)", journeyPart, async ({
     await journey.open();
     await conversationRow(page, "cas-src").click();
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
-    request = hub.supervisorSays(PELICAN, "Needed to publish the crate. Create one at crates.io under API Tokens.", { kind: "secret", summary: "CRATES_TOKEN" });
+    request = await hub.supervisorSays(PELICAN, "Needed to publish the crate. Create one at crates.io under API Tokens.", { kind: "secret", summary: "CRATES_TOKEN" });
     await expect(card().getByRole("code")).toHaveText("CRATES_TOKEN");
     await expect(card()).toContainText("Needed to publish the crate.");
     await expect(card().getByTestId("secret-scope")).toBeVisible();

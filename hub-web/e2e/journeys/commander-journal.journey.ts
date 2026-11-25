@@ -67,7 +67,7 @@ test("HUB-J12 a receipt in either tab settles both tabs without a duplicate retr
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
     }
     const owner = hub.sends.length ? hub : other;
-    owner.queueLatest(PELICAN);
+    await owner.queueLatest(PELICAN);
     for (const tab of [page, peer]) {
       await expect(tab.getByRole("log")).toContainText("One instruction, one delivery");
       await expectDeliveryLine(tab, "One instruction, one delivery", "acknowledged");
@@ -229,7 +229,7 @@ test("HUB-J12 send while offline, reconnect, watch it deliver: the waiting line 
     await expect(status).toBeHidden();
   });
   await journey.stage("Delivered: nothing says it will go out by itself", async () => {
-    hub.deliverLatest(PELICAN);
+    await hub.deliverLatest(PELICAN);
     await expectDeliveryLine(page, "Send this when Atlas is back", "delivered");
     await expect(status).toBeHidden();
     expect(hub.sends.map((row) => row.text)).toEqual(["Send this when Atlas is back"]);
@@ -289,7 +289,7 @@ test("HUB-J12 a held message another tab delivers clears this tab's waiting line
     await other.up("atlas");
     await choose(second);
     await expect.poll(() => other.sends.map((row) => row.text), { timeout: 20_000 }).toEqual(["Held in the first tab"]);
-    other.deliverLatest(PELICAN);
+    await other.deliverLatest(PELICAN);
     await expectDeliveryLine(second, "Held in the first tab", "delivered");
     await expect(messageStatus(second)).toBeHidden();
     // Nothing is held for this conversation any more, so the first tab no
@@ -398,7 +398,7 @@ test("HUB-J3 reply application ACK follows real IndexedDB commit and replay dedu
     // once that socket is open (as the sibling parts below wait for it).
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     await page.evaluate(() => { (window as unknown as { __receiptOrder: string[] }).__receiptOrder.length = 0; });
-    id = hub.supervisorSays(PELICAN, "A durable reply on this device", { operator_label: null });
+    id = await hub.supervisorSays(PELICAN, "A durable reply on this device", { operator_label: null });
     await expect.poll(() => hub.persistedReplies.some((row) => row.notification_id === id)).toBe(true);
     expect(hub.persistedReplies.filter((row) => row.notification_id === id)).toHaveLength(1);
     expect((await journalRows(page, "replies")).filter((row) => row.reply?.notification_id === id)).toHaveLength(1);
@@ -464,7 +464,7 @@ test("HUB-J3 failed reply persistence withholds ACK; reload replays before stori
     await journey.open(); await choose(page);
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     await page.evaluate(() => { (window as unknown as { __failReplyStorage?: boolean }).__failReplyStorage = true; });
-    id = hub.supervisorSays(PELICAN, "Replay this if the tab disappears");
+    id = await hub.supervisorSays(PELICAN, "Replay this if the tab disappears");
     await expect(turn(page, "Replay this if the tab disappears")).toHaveCount(1);
     await expect(turn(page, "Replay this if the tab disappears")).toHaveAttribute("data-stored", "false");
     expect(hub.persistedReplies.filter((row) => row.notification_id === id)).toHaveLength(0);
@@ -487,7 +487,7 @@ test("HUB-J3 replies read before a reload stay read after it (cas-97d58 F14)", j
     await journey.open();
     await casSrc.click();
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
-    hub.supervisorSays(PELICAN, "Read before the reload.");
+    await hub.supervisorSays(PELICAN, "Read before the reload.");
     await expect(page.getByRole("log").getByText("Read before the reload.")).toBeVisible();
     await conversationRow(page, "gabber-studio").click();
     await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();

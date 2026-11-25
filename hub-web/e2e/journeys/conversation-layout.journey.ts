@@ -21,7 +21,7 @@ for (const colorScheme of ["light", "dark"] as const) {
         await expect(thread).toBeVisible();
         // cas-f285: the thread mounts straight into the stage.
         await expect(threadSlot(page)).toBeVisible();
-        hub.supervisorSays(PELICAN, "The phone conversation stays readable.");
+        await hub.supervisorSays(PELICAN, "The phone conversation stays readable.");
         await expect(page.getByRole("log").getByText("The phone conversation stays readable.")).toBeVisible();
         expect(await page.locator("body").ariaSnapshot(), "no terminal in the accessibility tree").not.toContain("The supervisor is ready.");
         const geometry = await page.locator('#conversation-stage > [data-testid="conversation-thread-slot"]').evaluate((slot) => {

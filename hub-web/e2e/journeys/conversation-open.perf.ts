@@ -223,7 +223,7 @@ for (const profile of profiles) test(`${scrollFlow ? "HUB-J4 " : ""}conversation
     for (let index = 0; index < capture.pending_replies!.length; index += 10) {
       // Real authenticated persistence ACKs remove pending daemon rows.
       const acked = new Set(hub.persistedReplies.map((reply) => reply.notification_id));
-      for (const reply of capture.pending_replies!.slice(index, index + 10)) if (!acked.has(reply.notification_id as number)) hub.send(capture.session, { OperatorReply: reply });
+      for (const reply of capture.pending_replies!.slice(index, index + 10)) if (!acked.has(reply.notification_id as number)) await hub.send(capture.session, { OperatorReply: reply });
       await page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));
     }
   };

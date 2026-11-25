@@ -124,12 +124,12 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   const multiplex = connect("/v1/attach");
   multiplex.send({ proto: 2 });
   const scripted = { device_id: "journey-device", client_ref: "scripted", command: "finish", phase: "observed", detail: "", output: "", interactive: false };
-  const sending = (async () => double.send("running", { SupervisorCommandReceipt: { receipt: scripted } }))();
+  const sending = double.send("running", { SupervisorCommandReceipt: { receipt: scripted } });
   multiplex.send({ channel: "pty:running", subscribe: true });
   await sending;
-  expect(() => double.send("running", { SupervisorCommandReceipt: { receipt: { ...scripted, client_ref: null } } })).toThrow(
-    expect.objectContaining({ schemaId: "urn:cassy:hub:SupervisorCommandReceipt" }),
-  );
+  await expect(double.send("running", { SupervisorCommandReceipt: { receipt: { ...scripted, client_ref: null } } })).rejects.toMatchObject({
+    schemaId: "urn:cassy:hub:SupervisorCommandReceipt",
+  });
   expect(multiplex.frames).toHaveLength(3);
   expect(multiplex.frames.slice(1).map(frame => frame.channel)).toEqual(["pty:running", "pty:running"]);
   check("DaemonWelcome", multiplex.frames[1]?.message);
@@ -143,7 +143,7 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
 
   vi.useFakeTimers();
   try {
-    const refusal = expect((async () => double.send("missing", { SupervisorCommandReceipt: { receipt: scripted } }))()).rejects.toBeInstanceOf(Error);
+    const refusal = expect(double.send("missing", { SupervisorCommandReceipt: { receipt: scripted } })).rejects.toBeInstanceOf(Error);
     await vi.advanceTimersByTimeAsync(2_000);
     await refusal;
   } finally {

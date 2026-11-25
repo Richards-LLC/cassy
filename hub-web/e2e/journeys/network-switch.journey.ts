@@ -62,7 +62,7 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     await sendNow(page, "After the route change");
     expect((await accepted).text).toBe("After the route change");
     expect(hub.machineSocketOpens.get("atlas")).toBeGreaterThan(1);
-    hub.deliverLatest(PELICAN);
+    await hub.deliverLatest(PELICAN);
     await expectDelivered(page, "After the route change");
     expect(sentTimes(hub, "After the route change")).toBe(1);
   });
@@ -163,7 +163,7 @@ async function legacyRefusalHoldsBothSends(page: Page, journey: { stage(name: st
     // composer's "will go out by itself" line still clears once the held
     // messages went out, and stays clear once they are Delivered.
     await expect(messageStatus(page)).toBeHidden();
-    hub.deliverLatest(PELICAN);
+    await hub.deliverLatest(PELICAN);
     await expectDelivered(page, "Second before the refusal");
     await expect(messageStatus(page)).toBeHidden();
   });
@@ -247,7 +247,7 @@ test("HUB-J12 network switch: half-open machine waits for four failed heartbeats
     await expect(held).toHaveCount(0);
     await expect(messageStatus(page)).toBeHidden();
     expect(hub.sends.map(m => m.text)).toEqual(["While unsteady", "While Tailscale is off"]);
-    hub.deliverLatest(PELICAN);
+    await hub.deliverLatest(PELICAN);
     await expectDelivered(page, "While Tailscale is off");
     expect(sentTimes(hub, "While unsteady")).toBe(1);
     expect(sentTimes(hub, "While Tailscale is off")).toBe(1);
@@ -673,7 +673,7 @@ test("HUB-J12 network switch: single revoked machine stops promising reconnectio
     await accepted(page, hub, "Before the pairing is revoked");
     // cas-71f4: the supervisor has it once it is delivered; until then the
     // bubble's "Sending…" is the one signal.
-    hub.deliverLatest(PELICAN);
+    await hub.deliverLatest(PELICAN);
     await expectDelivered(page, "Before the pairing is revoked");
     const working = page.getByRole("log").getByTestId("working");
     // A receipt alone never claims supervisor execution, before or after revocation.
@@ -681,7 +681,7 @@ test("HUB-J12 network switch: single revoked machine stops promising reconnectio
     // cas-a252: fresh activity can indicate unanswered work only while live.
     // Keep that output recent across the drop: a stale TUI repaint must not
     // light "working" beside Reconnecting or Needs pairing.
-    hub.send(PELICAN, { Output: { pane_id: "supervisor", data: [46] } });
+    await hub.send(PELICAN, { Output: { pane_id: "supervisor", data: [46] } });
     await expect(working).toHaveCount(1);
     hub.refuseProofs("atlas", 1_000, "revoked", false);
     // cas-ef7a: a definitive refusal can arrive between animation frames.
@@ -811,7 +811,7 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
     await clock.advance(1_000); // settle the held attach and its send, in protocol time
     expect((await next).text).toBe("Send this when it's back");
     await expect(held).toHaveCount(0);
-    hub.deliverLatest(PELICAN);
+    await hub.deliverLatest(PELICAN);
     await expect(bubble("Send this when it's back")).toHaveAttribute("data-state", "delivered");
     await clock.advance(30_000);
     expect(sentTimes(hub, "Send this when it's back")).toBe(1);
@@ -1145,7 +1145,7 @@ test("HUB-J12 network switch: three unconfirmed messages read as one notice (cas
     const delivered = hub.nextSend();
     await sendNow(page, "Status, please");
     expect((await delivered).text).toBe("Status, please");
-    hub.deliverLatest(PELICAN);
+    await hub.deliverLatest(PELICAN);
     for (const text of ["Gate still red?", "Hold the train"]) {
       const next = hub.nextSend();
       await sendNow(page, text);
@@ -1353,15 +1353,15 @@ test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attach
     expect(controlReads.sort()).toEqual([`/v1/sessions/${PELICAN}/lease`, `/v1/sessions/${PELICAN}/status`]);
     // A route hint and repeated event-only loss must not condemn either
     // recently speaking terminal. Empty output preserves the visible frame.
-    hub.send(PELICAN, { Output: { pane_id: "supervisor", data: [] } });
-    hub.send(OTTER, { Output: { pane_id: "supervisor", data: [] } });
+    await hub.send(PELICAN, { Output: { pane_id: "supervisor", data: [] } });
+    await hub.send(OTTER, { Output: { pane_id: "supervisor", data: [] } });
     await clock.advance(1);
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
     await clock.advance(1_000);
     expect([hub.legacySocketOpens.get(PELICAN), hub.legacySocketOpens.get(OTTER)]).toEqual(before);
     for (let second = 0; second < 30; second++) {
-      hub.send(PELICAN, { Output: { pane_id: "supervisor", data: [] } });
-      hub.send(OTTER, { Output: { pane_id: "supervisor", data: [] } });
+      await hub.send(PELICAN, { Output: { pane_id: "supervisor", data: [] } });
+      await hub.send(OTTER, { Output: { pane_id: "supervisor", data: [] } });
       await page.evaluate(() => {
         const wire = window as unknown as { __journeyResetEvents: (host: string) => void };
         wire.__journeyResetEvents("atlas.test");

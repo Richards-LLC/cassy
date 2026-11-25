@@ -32,8 +32,8 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
   await journey.open(); await openConversation(page, "cas-src");
   const images = ["First screenshot.png", "Second screenshot.png", "Missing screenshot.png"].map((name, index) => ({ ...file(["gallery-first", "gallery-second", "gallery-missing"][index]!, name), mime: "image/png" }));
   await hub.socketOpen(PELICAN);
-  hub.supervisorSays(PELICAN, "Compare these screenshots.", { attachments: images });
-  hub.supervisorSays(PELICAN, "This image belongs to another turn.", { attachments: [{ ...images[0], artifact_id: "gallery-other", name: "Other turn.png" }] });
+  await hub.supervisorSays(PELICAN, "Compare these screenshots.", { attachments: images });
+  await hub.supervisorSays(PELICAN, "This image belongs to another turn.", { attachments: [{ ...images[0], artifact_id: "gallery-other", name: "Other turn.png" }] });
   const first = page.getByRole("log").getByRole("link", { name: /^First screenshot.png/ });
   await expect(first.getByRole("img", { name: "First screenshot.png", exact: true })).toBeVisible();
   const captures = testInfo.outputPath("image-viewer"); mkdirSync(captures, { recursive: true });
@@ -155,7 +155,7 @@ test("HUB-J4 prose tables keep words readable and render inline markdown", journ
   await conversationRow(page, "cas-src").click();
   await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
   await hub.socketOpen(PELICAN);
-  hub.supervisorSays(PELICAN, [
+  await hub.supervisorSays(PELICAN, [
     "| Tab | State |", "| --- | --- |",
     "| **Daniel Open Hours** | Tracks *open hours* in `time-tracking`; [details](https://example.org/hours) stay available. |",
     "| Weekly summary | Ready after the current work session ends. |", "",
@@ -254,7 +254,7 @@ test("HUB-J4 copy real tables as Markdown and spreadsheet CSV", journeyPart, asy
   await conversationRow(page, "cas-src").click();
   await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
   await hub.socketOpen(PELICAN);
-  hub.supervisorSays(PELICAN, `# Evidence ready to reuse\n\n${markdown}\n\n~~~txt\n| literal | source |\n| --- | --- |\n~~~`);
+  await hub.supervisorSays(PELICAN, `# Evidence ready to reuse\n\n${markdown}\n\n~~~txt\n| literal | source |\n| --- | --- |\n~~~`);
   const log = page.getByRole("log");
   const table = log.getByRole("table", { name: "Evidence", exact: true }).filter({ has: page.getByRole("columnheader", { name: "Item", exact: true }) });
   // The evidence sheet: the table with its Copy buttons and copy status.
@@ -300,7 +300,7 @@ test("HUB-J4 copy real tables as Markdown and spreadsheet CSV", journeyPart, asy
   }
   await journey.stage("Copy formula-leading values safely while keeping the table and Markdown exact (cas-4800)", async () => {
     const source = "| Formula | Value |\n| --- | --- |\n| =cmd | @x |\n| +1 | -1 |";
-    hub.supervisorSays(PELICAN, source);
+    await hub.supervisorSays(PELICAN, source);
     const formulas = log.getByRole("table").filter({ has: page.getByRole("columnheader", { name: "Formula", exact: true }) });
     const controls = log.getByTestId("evi").filter({ has: page.getByRole("columnheader", { name: "Formula", exact: true }) });
     await expect(formulas.getByRole("cell")).toHaveText(["=cmd", "@x", "+1", "-1"]);
@@ -323,7 +323,7 @@ test("HUB-J4 copy real tables as Markdown and spreadsheet CSV", journeyPart, asy
     await page.evaluate(() => { Reflect.deleteProperty(navigator.clipboard, "writeText"); });
     await copy.click();
     await expect(sheet.getByRole("status")).toBeVisible();
-    hub.supervisorSays(PELICAN, "| first | |\n| second | value |", { kind: "status" });
+    await hub.supervisorSays(PELICAN, "| first | |\n| second | value |", { kind: "status" });
     const headerless = log.getByRole("table").last();
     await expect(headerless.getByRole("columnheader")).toHaveCount(0);
     await expect(headerless.getByRole("cell")).toHaveText(["first", "", "second", "value"]);
@@ -337,8 +337,8 @@ test("HUB-J4 a short status shows its callout and bold, not their markers", jour
   await conversationRow(page, "cas-src").click();
   await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
   await hub.socketOpen(PELICAN);
-  hub.supervisorSays(PELICAN, "> [!WARNING]\n> **Blocked:** the queue is red on two Commander journeys.", { kind: "status" });
-  hub.supervisorSays(PELICAN, "**Merged.** Gate 11 of 14 is green and the release branch is ready for its next pass.", { kind: "status" });
+  await hub.supervisorSays(PELICAN, "> [!WARNING]\n> **Blocked:** the queue is red on two Commander journeys.", { kind: "status" });
+  await hub.supervisorSays(PELICAN, "**Merged.** Gate 11 of 14 is green and the release branch is ready for its next pass.", { kind: "status" });
   const log = page.getByRole("log");
   for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
     await journey.stage(`Read the short status at ${width} in ${colorScheme}`, async () => {
@@ -369,7 +369,7 @@ test("HUB-J4 headings and labeled caveats stay distinct from actionable cards", 
   await conversationRow(page, "cas-src").click();
   await expect(connection(page)).toHaveAttribute("data-phase", "live"); await expect(connection(page)).toHaveAttribute("data-degraded", "false");
   await hub.socketOpen(PELICAN);
-  hub.supervisorSays(PELICAN, [
+  await hub.supervisorSays(PELICAN, [
     "# Release is ready", "## Evidence", "### Checks", "The reviewed build passed.",
     "> [!NOTE]", "> **Read** the [receipt](https://example.org/receipt).", ">", "> The evidence stays available.", "",
     "> [!WARNING]", "> Keep `rollback` available.", "",

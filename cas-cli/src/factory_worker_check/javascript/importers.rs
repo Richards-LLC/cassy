@@ -12,20 +12,10 @@ pub(crate) fn related_specs(repo: &Path, path: &str) -> BTreeMap<&'static str, V
     while package.pop() && package.starts_with(repo) && !package.join("package.json").is_file() {}
     if !package.starts_with(repo) { package = repo.to_path_buf(); }
     let graph = cached_graph(repo, &package);
-    let Graph { importers, playwright, node, unit } = graph.as_ref();
-    let reached = |roots: Vec<PathBuf>| {
-        let mut seen = BTreeSet::new();
-        let mut queue = roots;
-        while let Some(file) = queue.pop() {
-            for importer in importers.get(&file).into_iter().flatten() {
-                if seen.insert(importer.clone()) { queue.push(importer.clone()); }
-            }
-        }
-        seen
-    };
-    let runs_playwright = reached(playwright.clone()).into_iter().chain(playwright.iter().cloned()).collect::<BTreeSet<_>>();
+    let Graph { playwright, node, unit, .. } = graph.as_ref();
+    let runs_playwright = graph.reached(playwright.clone()).into_iter().chain(playwright.iter().cloned()).collect::<BTreeSet<_>>();
     let mut tests = BTreeMap::<_, Vec<_>>::new();
-    for file in reached(vec![target]) {
+    for file in graph.reached(vec![target]) {
         let Some(relative) = file.strip_prefix(repo).ok().and_then(Path::to_str) else { continue };
         let runner = if node.contains(&file) { Some("node") }
             else { unit.get(&file).copied().or_else(|| runs_playwright.contains(&file).then_some("playwright")) };
@@ -46,10 +36,13 @@ fn cached_graph(repo: &Path, package: &Path) -> std::rc::Rc<Graph> {
 }
 
 pub(in crate::factory_worker_check) fn node_specs(repo: &Path, directory: &Path) -> Vec<PathBuf> {
-    cached_graph(repo, directory).node.iter().filter(|path| {
+    let graph = cached_graph(repo, directory);
+    let mut specs = graph.reached(graph.node.iter().cloned().collect());
+    specs.extend(graph.node.iter().cloned());
+    specs.into_iter().filter(|path| {
         matches!(path.extension().and_then(|ext| ext.to_str()), Some("js" | "mjs" | "cjs"))
             && super::test_match(&path.to_string_lossy(), Some("node"))
-    }).cloned().collect()
+    }).collect()
 }
 
 /// One package's import graph: who imports each module, and the files that
@@ -59,6 +52,18 @@ struct Graph {
     playwright: Vec<PathBuf>,
     node: BTreeSet<PathBuf>,
     unit: BTreeMap<PathBuf, &'static str>,
+}
+
+impl Graph {
+    fn reached(&self, mut queue: Vec<PathBuf>) -> BTreeSet<PathBuf> {
+        let mut seen = BTreeSet::new();
+        while let Some(file) = queue.pop() {
+            for importer in self.importers.get(&file).into_iter().flatten() {
+                if seen.insert(importer.clone()) { queue.push(importer.clone()); }
+            }
+        }
+        seen
+    }
 }
 
 thread_local! {

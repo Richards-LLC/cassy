@@ -175,10 +175,25 @@ fn queue_checkout_busy(root: &Path, worker: &Agent) -> Option<&'static str> {
 }
 
 /// Only this module can construct a start principal on behalf of a worker.
-pub(crate) struct QueueStartPrincipal(Agent, File);
-impl QueueStartPrincipal {
+pub(crate) struct QueueStartPrincipal<'a> {
+    agent: Agent,
+    _start_fence: File,
+    queues: &'a SqliteWorkerTaskQueueStore,
+    queue: &'a mut WorkerTaskQueue,
+}
+
+impl QueueStartPrincipal<'_> {
     pub(crate) fn agent(&self) -> &Agent {
-        &self.0
+        &self.agent
+    }
+
+    pub(crate) fn persist_review(&mut self, artifact_id: Option<&str>) -> Result<(), McpError> {
+        if self.queue.dispatch_review_artifact.as_deref() != artifact_id {
+            self.queue.dispatch_review_artifact = artifact_id.map(str::to_owned);
+            let session = self.agent.factory_session.as_deref().expect("validated session");
+            self.queues.save(session, &self.agent.name, self.queue).map_err(error)?;
+        }
+        Ok(())
     }
 }
 
@@ -718,6 +733,7 @@ impl CasCore {
             queue.dispatch_from = predecessor.map(str::to_string);
             queue.starting = selected.is_some();
             queue.dispatch_revision = queue.revision + 1;
+            queue.dispatch_review_artifact = None;
             // cas-2d41: a worker whose MCP server predates the installed
             // build takes the same boundary restart, so a release reaches it
             // between tasks without an operator recycle.
@@ -863,16 +879,19 @@ impl CasCore {
                     lease.agent_id == worker.id && lease.status == cas_types::LeaseStatus::Active
                 });
             if started {
-                return Ok(String::new());
+                return Ok(());
             }
-            let (output, repair_brief) = self
+            let output = self
                 .task_start_for_queue(
                     TaskStartRequest {
                         id: id.clone(),
                         brief: Some(true),
                         force: None,
                     },
-                    QueueStartPrincipal(worker.clone(), start_fence),
+                    QueueStartPrincipal {
+                        agent: worker.clone(), _start_fence: start_fence,
+                        queues: &queues, queue: &mut queue,
+                    },
                 )
                 .await?;
             let committed = tasks.get(&id).map_err(error)?;
@@ -884,7 +903,7 @@ impl CasCore {
                     "Queued start did not commit; inspect the task before retrying",
                 ));
             }
-            Ok(repair_brief)
+            Ok(())
         }
         .await;
         if result.is_err()
@@ -898,12 +917,15 @@ impl CasCore {
                 .map_err(error)?;
         }
         match result {
-            Ok(repair_brief) => {
+            Ok(()) => {
                 queue.current_started = true;
                 // Persist the executed cursor even if its brief cannot be queued.
                 queues
                     .save(session, &worker.name, &mut queue)
                     .map_err(error)?;
+                let repair_brief = queue.dispatch_review_artifact.as_deref()
+                    .map(crate::mcp::tools::core::task::repeat_review::mismatch_brief)
+                    .unwrap_or_default();
                 let notification = crate::task_assignment::enqueue_queued(
                     &self.cas_root,
                     &tasks.get(&id).map_err(error)?,

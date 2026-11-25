@@ -818,13 +818,30 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         occurrence,
         exit,
     );
-    let key = format!(
+    let mut key = format!(
         "merge-queue-ejection:{}:{task_id}:{pr_number}:{occurrence}",
         factory_session.as_deref().unwrap_or("")
     );
     let Ok(supervisor_queue) = crate::store::open_supervisor_queue_store(cas_dir) else {
         return WorkerAttentionRelayOutcome::Pending;
     };
+    let mut notice_occurrence = occurrence.to_owned();
+    if let Some(run_id) = failed_run_id {
+        match supervisor_queue.get_by_transition_key(&key) {
+            Ok(Some(previous)) => {
+                let Ok(payload) = serde_json::from_str::<serde_json::Value>(&previous.payload) else {
+                    return WorkerAttentionRelayOutcome::Pending;
+                };
+                if payload["failed_run_id"].is_null() {
+                    let suffix = format!(":run:{run_id}");
+                    notice_occurrence.push_str(&suffix);
+                    key.push_str(&suffix);
+                }
+            }
+            Ok(None) => {}
+            Err(_) => return WorkerAttentionRelayOutcome::Pending,
+        }
+    }
     let payload = serde_json::json!({
         "kind": "merge_queue_ejected",
         "worker": worker,
@@ -832,7 +849,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         "pr_number": pr_number,
         "failed_run_id": failed_run_id,
         "detail": detail,
-        "occurrence": occurrence,
+        "occurrence": notice_occurrence,
         "supervisor_owned": worker.is_empty(),
         "failing_job": failing_job,
     })
@@ -848,29 +865,9 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         Ok(NotifyIdempotentResult::AlreadyExists {
             id,
             prompt_delivered: true,
-        }) if supervisor.id != "operator" => {
-            // A run can be listed after the run-less exit was relayed. The
-            // notice is already delivered, but its repair may still be new.
-            if !matches!(repair, MergeQueueRepair::None) {
-                let Ok(Some(previous)) = supervisor_queue.get_by_transition_key(&key) else {
-                    return WorkerAttentionRelayOutcome::Pending;
-                };
-                let Ok(payload) = serde_json::from_str::<serde_json::Value>(&previous.payload) else {
-                    return WorkerAttentionRelayOutcome::Pending;
-                };
-                if payload["failed_run_id"].is_null() {
-                    let Ok(task) = task_store.get(task_id) else {
-                        return WorkerAttentionRelayOutcome::Pending;
-                    };
-                    if repair.apply(cas_dir, &task, &supervisor.id, &detail).is_none() {
-                        return WorkerAttentionRelayOutcome::Pending;
-                    }
-                }
-            }
-            return WorkerAttentionRelayOutcome::Persisted {
-                notification_id: id,
-            };
-        }
+        }) if supervisor.id != "operator" => return WorkerAttentionRelayOutcome::Persisted {
+            notification_id: id,
+        },
         Ok(NotifyIdempotentResult::AlreadyExists {
             id,
             ..
@@ -926,7 +923,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
             &supervisor,
             "merge_queue_ejected",
             &format!("{detail}\nNo live supervisor is available.{next_step}"),
-            &format!("{task_id}:{pr_number}:{occurrence}"),
+            &format!("{task_id}:{pr_number}:{notice_occurrence}"),
         ) {
             tracing::warn!(task_id, pr_number, %error, "merge-queue operator escalation remains pending");
             return WorkerAttentionRelayOutcome::Pending;

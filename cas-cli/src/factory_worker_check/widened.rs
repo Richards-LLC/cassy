@@ -364,7 +364,7 @@ mod tests {
     use crate::mcp::tools::core::task::lifecycle::close_ops::widened_park_refusals_for_test;
 
     fn command_args(plan: &str) -> Vec<String> {
-        plan.split_once(" -- ").unwrap().1.split_whitespace().map(String::from).collect()
+        shell_words::split(plan.split_once(" -- ").unwrap().1).unwrap()
     }
 
     fn has_g61(refusals: &[String]) -> bool {
@@ -475,7 +475,7 @@ mod tests {
         let git = |args: &[&str]| super::git(&repo, &[
             &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"], args,
         ].concat()).unwrap();
-        let spec = "scripts/standalone.test.mjs";
+        let spec = "scripts/test.mjs";
         for (path, text) in [
             (spec, "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { fileURLToPath } from 'node:url';\ntest('runs beside its module', () => assert.equal(process.cwd() + '/', fileURLToPath(new URL('.', import.meta.url))));\n"),
             ("scripts/subproject/package.json", "{}"),
@@ -509,6 +509,59 @@ mod tests {
         javascript::execute(root.path(), &args, &repo, &[]).unwrap();
         let held = refusals();
         assert!(!has_g61(&held), "{held:?}");
+    }
+
+    #[test]
+    fn node_native_consumers_in_spaced_paths_run_from_emitted_argv() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.remove("CAS_SESSION_ID");
+        let root = tempfile::tempdir().unwrap();
+        let cas_root = root.path().canonicalize().unwrap().join("cas root");
+        let repo = cas_root.join("worktrees/native");
+        let tools = "scripts/qa tools";
+        let library = format!("{tools}/lib.mjs");
+        let unknown = format!("{tools}/unknown.mjs");
+        let specs = ["smoke-test.mjs", "smoke_test.mjs", "test.mjs", "test/smoke.mjs"].map(|spec| format!("{tools}/{spec}"));
+        for spec in specs.iter().cloned().chain([format!("{tools}/tests/x.mjs")]) {
+            let relative = if spec == specs[3] || spec.ends_with("/tests/x.mjs") { "../lib.mjs" } else { "./lib.mjs" };
+            let file = repo.join(spec);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, format!("import test from 'node:test';\nimport '{relative}';\ntest('works', () => {{}});\n")).unwrap();
+        }
+        let git = |args: &[&str]| super::git(&repo, &[
+            &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"], args,
+        ].concat()).unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(&library), "export const catalogue = '';\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.join(&library), "export const catalogue = './catalogue.json';\n").unwrap();
+        std::fs::write(repo.join(&unknown), "export const value = ;\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "delivery"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let paths = [library.clone(), unknown];
+        let (tests, scopes) = stability::requirements(&repo, &head, &base, &paths, None).unwrap();
+        assert!(tests.is_empty());
+        let mut wanted = [Scope::Package(tools.into()), Scope::Related(library)];
+        wanted.sort();
+        assert_eq!(scopes, wanted);
+        let passing = PassingTests::new(&cas_root, &repo, &head);
+        let plans = commands(&passing, &paths, &scopes, &Default::default());
+        assert_eq!(plans.len(), 1, "{plans:?}");
+        let argv = shell_words::split(&plans[0]).unwrap();
+        let prefix = ["cas", "factory", "worker-check", "--cas-root", cas_root.to_str().unwrap(), "--", "node", "--test"];
+        assert_eq!(argv, prefix.map(String::from).into_iter().chain(["--whole-file".into()]).chain(specs.clone()).collect::<Vec<_>>());
+        let refusals = || widened_park_refusals_for_test(&cas_root, &repo, "cas-48cea", &paths, &head, &base);
+        assert!(has_g61(&refusals()));
+        javascript::execute(&cas_root, &argv[6..], &repo, &[]).unwrap();
+        let held = refusals();
+        assert!(!has_g61(&held), "{held:?}");
+        let reruns = stability::rerun_commands(&cas_root, &repo, &head, &[stability::Identity::exact(specs[0].clone(), "works")]);
+        assert_eq!(reruns.len(), 1);
+        assert_eq!(shell_words::split(reruns[0].trim_matches('`')).unwrap(), prefix.map(String::from).into_iter().chain([specs[0].clone()]).collect::<Vec<_>>());
     }
 
     #[test]

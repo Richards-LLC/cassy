@@ -2948,6 +2948,38 @@ pub(super) mod tests {
         Identity::exact(path, name)
     }
 
+    #[test]
+    fn node_test_file_matches_node_default_discovery() {
+        for (path, accepts) in [
+            ("test.mjs", true), ("test/smoke.mjs", true), ("smoke-test.mjs", true),
+            ("smoke_test.mjs", true), ("a.test.mjs", true), ("test-a.cjs", true), ("a.test.ts", true),
+            ("a.spec.mjs", false), ("tests/a.mjs", false), ("latest.mjs", false), ("testing.mjs", false),
+            ("node_modules/x/test.mjs", false), ("test/a.json", false), ("test/a.d.ts", false),
+        ] {
+            let args = ["node", "--test", "--whole-file", path].map(String::from);
+            assert_eq!((test_match(path, Some("node")), test_match(path, Some("node --test")), invocation(&args).is_some()),
+                (accepts, accepts, accepts), "{path}");
+            if accepts { assert!(test_file(path), "{path}"); }
+        }
+    }
+
+    #[test]
+    fn whole_file_report_requires_the_expected_file() {
+        let expected = "[t]erminal-qa.test.mjs";
+        let wrong = "terminal-qa.test.mjs";
+        let row = |file: &str| json!({"name":file,"assertionResults":[{"fullName":"works","status":"passed"}]});
+        for runner in ["node", "vitest", "jest"] {
+            let run = |rows| verify_repeats(runner, Path::new("/project"), &[], &BTreeMap::new(), |_| {
+                Ok((true, json!({"success":true,"testResults": rows})))
+            });
+            for rows in [vec![row(wrong)], vec![row(expected), row(wrong)]] {
+                let error = run(rows).unwrap_err();
+                assert!(crate::gates::codes_in(&error.to_string()).contains(&"G-61"), "{runner}: {error}");
+            }
+            assert_eq!(run(vec![row(expected)]).unwrap().0, 1, "{runner}");
+        }
+    }
+
     /// cas-a4c3: park demanded five capped passes for hub-web's `node:test`
     /// files while worker-check refused `node --test`. The changed case runs
     /// five times alone; its unchanged neighbour would fail the proof if run.

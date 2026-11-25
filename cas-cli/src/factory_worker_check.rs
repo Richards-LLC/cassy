@@ -3033,6 +3033,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shell_command_round_trips_posix_split() {
+        let words = ["nextest", "safe_@.+/=:,-", "with spaces", "a'b", "$value", "*", "[", "", "é"].map(String::from);
+        let background = queue_command(Path::new("/cas"), &words);
+        let rendered = background.strip_prefix("cargo ").unwrap().strip_suffix(" > target/worker-tests.log 2>&1 &").unwrap();
+        assert_eq!(shell_words::split(rendered).unwrap(), words);
+        assert!(rendered.starts_with("nextest safe_@.+/=:,- "));
+    }
+
+    #[test]
     fn slow_classification_keeps_emitting_progress_before_admission_gh_2121() {
         let (lines, received) = std::sync::mpsc::channel();
         // The classification blocks until worker-check itself writes a progress line, so the

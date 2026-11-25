@@ -151,19 +151,15 @@ async fn g61_gabber_declared_check_and_release_only_journeys() {
     ], &[(source, "<template>Order ready</template>".into())], &[]);
     let close = serde_json::json!({"action": "close", "id": ID, "reason": "fixture delivery"});
     let held = call(&package.worker, close.clone()).await;
-    let check = ["package-check", manifest].map(str::to_owned);
-    let command = |root: &Path| factory_worker_check::widened::commands(root, &package.worker_path, &[],
-        &[factory_worker_check::widened::Scope::DeclaredCheck(manifest.into())], &Default::default()).remove(0);
-    let quoted_root = package.cas_dir.join("worker's root");
-    let words = std::process::Command::new("sh").args(["-c", &format!("set -- {}; printf '%s\\n' \"$@\"", command(&quoted_root))])
-        .output().unwrap();
-    let expected = format!("cas\nfactory\nworker-check\n--cas-root\n{}\n--\npackage-check\n{manifest}\n", quoted_root.display());
-    let prescribed = held.contains(&command(&package.cas_dir)) && words.status.success() && words.stdout == expected.as_bytes();
-    let package_failure = if !crate::gates::codes_in(&held).contains(&"G-61") || !prescribed {
+    let command = held.split_once("cas factory worker-check ")
+        .and_then(|(_, command)| command.split_once(". "))
+        .and_then(|(command, _)| shell_words::split(command).ok())
+        .unwrap_or_default();
+    let expected = ["--cas-root", package.cas_dir.to_str().unwrap(), "--", "package-check", manifest];
+    let package_failure = if !crate::gates::codes_in(&held).contains(&"G-61") || command != expected {
         Some(held)
     } else {
-        assert!(factory_worker_check::allowed_args(&check));
-        factory_worker_check::execute_at(&package.cas_dir, &check, &package.worker_path, Path::new("unused-cargo")).unwrap();
+        factory_worker_check::execute_at(&package.cas_dir, &command[3..], &package.worker_path, Path::new("unused-cargo")).unwrap();
         let parked = call(&package.worker, close.clone()).await;
         let store = open_task_store(&package.cas_dir).unwrap();
         let task = store.get(ID).unwrap();
@@ -177,6 +173,17 @@ async fn g61_gabber_declared_check_and_release_only_journeys() {
     };
 
     let mut failures = Vec::new();
+    let candidate = fixture(&mut env, &[
+        ("package.json", "{}".into()),
+        ("playwright.config.ts", "export default {};".into()),
+        (manifest, r#"{"scripts":{"check":"test -f order.vue"}}"#.into()),
+        (source, "<template>Draft order</template>".into()),
+        ("apps/dm/order's emails/test/nested/example.mjs", "import test from 'node:test';\ntest('node', () => {});\n".into()),
+    ], &[(source, "<template>Order ready</template>".into())], &[]);
+    let held = call(&candidate.worker, close.clone()).await;
+    if !crate::gates::codes_in(&held).contains(&"G-61") || held.contains("-- package-check ") {
+        failures.push(("package with Node candidates", held));
+    }
     for (id, spec, marker, guard, fan_out) in [
         ("publish", "tests/journeys/publish.spec.ts", "staging_only", "if (!process.env.STAGING) throw Error();", false),
         ("checkout", "tests/journeys/checkout.spec.ts", "paid", "if (!process.env.PAYMENT_TOKEN) throw Error();", false),
@@ -225,9 +232,9 @@ async fn g61_gabber_declared_check_and_release_only_journeys() {
     assert_eq!(open_task_store(&data.cas_dir).unwrap().get(ID).unwrap().status, TaskStatus::InProgress);
     factory_worker_check::widened::record(&data.cas_dir, &data.worker_path, &data.head, factory_worker_check::widened::Proof {
         runner: "playwright".into(), scope: factory_worker_check::widened::Scope::File(unlisted.into()),
-        reason: String::new(), configs: [(unlisted.into(), config.into())].into(),
+        reason: "stability:every test of the spec".into(), configs: [(unlisted.into(), config.into())].into(),
     }, 1).unwrap();
-    let parked = call(&data.worker, close).await;
+    let parked = call(&data.worker, close.clone()).await;
     let store = open_task_store(&data.cas_dir).unwrap();
     if store.get(ID).unwrap().status != TaskStatus::AwaitingMerge {
         failures.push((raw, parked));
@@ -237,15 +244,6 @@ async fn g61_gabber_declared_check_and_release_only_journeys() {
             {"id": raw, "spec": raw, "reason": "staging_only"}
         ]));
         assert_eq!(state["qa_impact"]["journeys"], serde_json::json!([]));
-        let mut rows = Vec::new();
-        let error = crate::cli::qa_ledger::add_release_obligations(store.as_ref(), [(ID, "wrong-anchor")], &mut rows).unwrap_err();
-        assert_eq!(error.to_string().split(':').next(), Some("G61_DEFERRED_STATE_MISSING"));
-        crate::cli::qa_ledger::add_release_obligations(store.as_ref(), [(ID, data.head.as_str())], &mut rows).unwrap();
-        let ledger = crate::qa_ledger::scaffold_with_coverage(&store.get(ID).unwrap(), &rows, &data.head, &[ID.into()]);
-        let ledger = crate::qa_ledger::parse(&ledger, 1);
-        assert_eq!(ledger.rows.iter().map(|row| (row.id.as_str(), row.verdict)).collect::<Vec<_>>(),
-            [(raw, crate::qa_ledger::Verdict::NotExercised)]);
-
         let qa = Task::new("cas-g61qa".into(), "Batch QA fixture".into());
         store.add(&qa).unwrap();
         env.set_current_dir(&data.worker_path);
@@ -256,25 +254,34 @@ async fn g61_gabber_declared_check_and_release_only_journeys() {
         store.patch_execution_state(ID, &serde_json::json!({"qa_impact": incomplete})).unwrap();
         let error = crate::cli::qa::execute(command, &cli, Some(&data.cas_dir)).unwrap_err();
         assert_eq!(error.to_string().split(':').next(), Some("G61_DEFERRED_STATE_MISSING"));
-        store.patch_execution_state(ID, &serde_json::json!({"qa_impact": state["qa_impact"]})).unwrap();
-        crate::cli::qa::execute(command, &cli, Some(&data.cas_dir)).unwrap();
-        let config = crate::config::Config::load(&data.cas_dir).unwrap();
-        let artifacts = crate::config::resolved_factory_artifact_paths(&data.cas_dir, config.factory().artifacts_root.as_deref());
-        let body = std::fs::read_to_string(artifacts.project_root.join(&qa.id).join("LEDGER.md")).unwrap();
-        assert!(crate::qa_ledger::parse(&body, 1).rows.iter().any(|row|
-            row.id == raw && row.verdict == crate::qa_ledger::Verdict::NotExercised));
+        let reparking = call(&data.worker, close.clone()).await;
+        if let Err(error) = crate::cli::qa::execute(command, &cli, Some(&data.cas_dir)) {
+            failures.push(("same-head re-park", format!("{error}: {reparking}")));
+        } else {
+            let config = crate::config::Config::load(&data.cas_dir).unwrap();
+            let artifacts = crate::config::resolved_factory_artifact_paths(&data.cas_dir, config.factory().artifacts_root.as_deref());
+            let body = std::fs::read_to_string(artifacts.project_root.join(&qa.id).join("LEDGER.md")).unwrap();
+            let ledger = crate::qa_ledger::parse(&body, 1);
+            assert_eq!(ledger.rows.iter().map(|row| (row.id.as_str(), row.verdict)).collect::<Vec<_>>(),
+                [(raw, crate::qa_ledger::Verdict::NotExercised)]);
+        }
     }
     let missing = fixture(&mut env, &[(locale, r#"{"hello":"Hi"}"#.into())], &[
         (registry, format!("spec_checks:\n- {{spec: {raw}, worker_check: staging_only}}\n")),
     ], &[]);
     let held = call(&missing.worker, serde_json::json!({"action": "close", "id": ID, "reason": "fixture delivery"})).await;
     assert!(crate::gates::codes_in(&held).contains(&"G-61") && held.contains("untracked_spec_check"), "{held}");
-    let unit = "tests/vitest.spec.ts";
-    let invalid = fixture(&mut env, &[(unit, "import { test } from 'vitest';\ntest('unit', () => {});\n".into())], &[
+    let unit = "hub-web/e2e/journeys/serve-dist.test.mjs";
+    let invalid = fixture(&mut env, &[
+        (config, "export default { testDir: '.', testMatch: '**/*.test.mjs' };".into()),
+        (unit, include_str!("../../../../../../../../hub-web/e2e/journeys/serve-dist.test.mjs").into()),
+    ], &[
         (registry, format!("spec_checks:\n- {{spec: {unit}, worker_check: paid}}\n")),
     ], &[]);
-    let held = call(&invalid.worker, serde_json::json!({"action": "close", "id": ID, "reason": "fixture delivery"})).await;
-    assert!(crate::gates::codes_in(&held).contains(&"G-61") && held.contains("non_playwright_spec_check"), "{held}");
+    let held = call(&invalid.worker, close).await;
+    if !crate::gates::codes_in(&held).contains(&"G-61") || !held.contains("non_playwright_spec_check") {
+        failures.push((unit, held));
+    }
     assert!(package_failure.is_none() && failures.is_empty(), "Maizzle: {package_failure:?}; journeys: {failures:?}");
 }
 

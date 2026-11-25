@@ -196,6 +196,7 @@ const PANE_EPOCH = 1_788_970_165_000;
 /** The real hub's operator text for `upstream_unavailable` (hub/server.rs). */
 const UPSTREAM_UNAVAILABLE_MESSAGE = "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again.";
 type InstallationRow = { machine: string; device_id: string; credential_id: string; credential_generation: number; credential: string; scopes: string[]; device_label: string; operator_label: string; controller_origin: string; public_key_jwk: JsonWebKey; revoked_at: string | null };
+type LeaseHolder = { id: string; label: string; expiresAt: string };
 const { hash, verifyInstallation } = runtime;
 const fingerprint = (key: JsonWebKey) => hash(JSON.stringify({ crv: key.crv, kty: key.kty, x: key.x, y: key.y }));
 
@@ -304,13 +305,8 @@ export class HubDouble {
   private readonly booting = new Map<string, { machine: string; session: Session; polls: number }>();
   /** Every session frame the page sent (SendMessage, InterruptPane, ...), in order (cas-0546). */
   readonly frames: Array<{ machine: string; session: string; kind: string; body: unknown }> = [];
-  /**
-   * Sessions another device controls, by its label (cas-0546). As the real
-   * hub (hub/auth.rs acquire_or_force_lease): a take is refused while it
-   * holds, unless forced by a hub-admin pairing, which takes it over.
-   */
-  private readonly leaseHolders = new Map<string, string>();
-  private readonly releasedLeases = new Set<string>();
+  private readonly leaseHolders = new Map<string, LeaseHolder>();
+  private readonly eventSequences = new Map<string, number>();
   /** One lease read can be held at the wire boundary to exercise stale-cache races. */
   private readonly leaseReadGates = new Map<string, { wait: Promise<void>; started: () => void }>();
   private readonly leaseTakeGates = new Map<string, { wait: Promise<void>; started: () => void }>();
@@ -322,7 +318,10 @@ export class HubDouble {
   constructor(private readonly page: Page, private readonly options: DoubleOptions) {
     // Current hubs identify each daemon birth. Keep it stable across reads;
     // a replacement fixture changes started_at explicitly, just as the hub does.
-    for (const machine of options.machines) for (const session of machine.sessions) session.started_at ??= this.stamp(-60_000);
+    for (const machine of options.machines) for (const session of machine.sessions) {
+      session.started_at ??= this.stamp(-60_000);
+      this.grantLease(session.name, "journey-device", "Journey browser");
+    }
     this.composerUploads = options.composerUploads ?? new Map();
     for (const [session, rows] of Object.entries(options.pendingReplies ?? {})) this.pendingReplies.set(session, [...rows]);
   }
@@ -346,11 +345,21 @@ export class HubDouble {
 
   private now(): number { return this.options.time?.now() ?? runtime.now(); }
   private stamp(offset = 0): string { return new Date(this.now() + offset).toISOString(); }
-  private leaseSummary(callerDeviceId: string, controller: { id: string; label: string } | null) {
+  private grantLease(session: string, id: string, label: string): void {
+    this.leaseHolders.set(session, { id, label, expiresAt: this.stamp(30_000) });
+  }
+
+  private activeLease(session: string): LeaseHolder | undefined {
+    const holder = this.leaseHolders.get(session);
+    return holder && Date.parse(holder.expiresAt) >= this.now() ? holder : undefined;
+  }
+
+  private leaseSummary(callerDeviceId: string, session: string) {
+    const controller = this.activeLease(session);
     return {
       controller_device_id: controller?.id ?? null,
       controller_label: controller?.label ?? null,
-      expires_at: controller ? this.stamp(30_000) : null,
+      expires_at: controller?.expiresAt ?? null,
       held_by_me: controller?.id === callerDeviceId,
     };
   }
@@ -380,23 +389,30 @@ export class HubDouble {
    */
   async announceCatalog(machineId: string, change: { added?: string[]; removed?: string[] } = {}): Promise<void> {
     const before = this.catalogFetchCount(machineId);
-    const events = [
-      ...(change.added ?? []).map((session) => ({ kind: "session_added", session })),
-      ...(change.removed ?? []).map((session) => ({ kind: "pane_removed", session })),
-    ];
-    if (!events.length) events.push({ kind: "session_added", session: "" });
-    for (const event of events) {
-      await this.page.evaluate(
-        ([host, data]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number }).__journeyMachineEvent(host, data),
-        [`${machineId}.test`, JSON.stringify(event)] as const,
-      );
+    for (const session of change.added ?? []) await this.emitMachineEvent(machineId, "session_added", session);
+    for (const session of change.removed ?? []) await this.emitMachineEvent(machineId, "pane_removed", session, "supervisor");
+    if (!change.added?.length && !change.removed?.length) {
+      await this.emitMachineEvent(machineId, "session_added", this.machine(machineId).sessions[0]?.name ?? null);
     }
     await this.waitFor(() => this.catalogFetchCount(machineId) > before);
   }
 
+  private async emitMachineEvent(machineId: string, kind: "session_added" | "pane_removed" | "fleet_changed", session: string | null, paneId: string | null = null): Promise<void> {
+    const sequence = (this.eventSequences.get(machineId) ?? 0) + 1;
+    this.eventSequences.set(machineId, sequence);
+    const event = { sequence, revision: 0, kind, session, pane_id: paneId, at: this.stamp() };
+    const frame = `id: ${sequence}.${event.revision}\nevent: ${kind.replaceAll("_", "")}\ndata: ${JSON.stringify(event)}\n\n`;
+    await this.page.evaluate(
+      ([host, data]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number }).__journeyMachineEvent(host, data),
+      [`${machineId}.test`, frame] as const,
+    );
+  }
+
   /** Another device (named `label`) holds control of the session until a take overrides it. */
-  holdLease(session: string, label: string): void { this.leaseHolders.set(session, label); }
-  releaseOwnLease(session: string): void { this.releasedLeases.add(session); }
+  holdLease(session: string, label: string): void { this.grantLease(session, "other-journey-device", label); }
+  releaseOwnLease(session: string): void {
+    if (this.leaseHolders.get(session)?.id === "journey-device") this.leaseHolders.delete(session);
+  }
 
   /**
    * The session's stream gains a work event (cas-ff22). A live daemon then
@@ -494,10 +510,10 @@ export class HubDouble {
       };
       // cas-9772: a machine event on the open streams, as the hub announces
       // a session list change. Returns how many streams carried it.
-      w.__journeyMachineEvent = (host, data) => {
+      w.__journeyMachineEvent = (host, frame) => {
         let delivered = 0;
         for (const controller of streams.get(host) ?? []) {
-          try { controller.enqueue(new TextEncoder().encode(`data: ${data}\n\n`)); delivered += 1; } catch { /* closed */ }
+          try { controller.enqueue(new TextEncoder().encode(frame)); delivered += 1; } catch { /* closed */ }
         }
         return delivered;
       };
@@ -686,10 +702,7 @@ export class HubDouble {
     this.operationOutcomes.set(body.op_id, outcome);
     await answer(200, { op_id: body.op_id, outcome });
     // FleetChanged: every connected device refetches status.
-    await this.page.evaluate(
-      ([host, data]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number }).__journeyMachineEvent(host, data),
-      [`${machineId}.test`, JSON.stringify({ kind: "fleet_changed", session })] as const,
-    ).catch(() => undefined);
+    await this.emitMachineEvent(machineId, "fleet_changed", session).catch(() => undefined);
   }
 
   /**
@@ -1189,11 +1202,12 @@ export class HubDouble {
     const leased = /^\/v1\/sessions\/([^/]+)\/lease$/.exec(path);
     if (leased) {
       const session = decodeURIComponent(leased[1]!);
-      const holder = this.leaseHolders.get(session);
       const callerDeviceId = active?.device_id ?? "journey-device";
       if (method === "POST") {
         const force = (route.request().postDataJSON() as { force?: boolean } | null)?.force === true;
-        const status = !holder ? 200 : !force ? 409 : this.scopesFor(machineId).includes("hub-admin") ? 200 : 403;
+        const holder = this.activeLease(session);
+        const heldElsewhere = holder && holder.id !== callerDeviceId;
+        const status = !heldElsewhere ? 200 : !force ? 409 : this.scopesFor(machineId).includes("hub-admin") ? 200 : 403;
         this.leaseTakes.push({ machine: machineId, session, force, status });
         this.observed();
         const gate = this.leaseTakeGates.get(session);
@@ -1204,12 +1218,11 @@ export class HubDouble {
         }
         if (status === 409) return route.fulfill({ status, json: { error: "lease_unavailable" } });
         if (status === 403) return route.fulfill({ status, json: { error: "scope_denied", required_scope: "hub:admin" } });
-        this.leaseHolders.delete(session);
-        this.releasedLeases.delete(session);
+        this.grantLease(session, callerDeviceId, active?.device_label ?? "Journey browser");
       } else if (method === "DELETE") {
         // Match the authenticated hub's idempotent cleanup contract, including
         // its empty 204 response; never release another device's control.
-        if (!holder) this.releasedLeases.add(session);
+        if (this.leaseHolders.get(session)?.id === callerDeviceId) this.leaseHolders.delete(session);
         return route.fulfill({ status: 204, body: "" });
       } else if (method === "GET") {
         const gate = this.leaseReadGates.get(session);
@@ -1218,11 +1231,8 @@ export class HubDouble {
           gate.started();
           await gate.wait;
         }
-        const currentHolder = this.leaseHolders.get(session);
-        if (currentHolder) return route.fulfill({ json: this.leaseSummary(callerDeviceId, { id: "other-journey-device", label: currentHolder }) });
       }
-      const controller = this.releasedLeases.has(session) ? null : { id: callerDeviceId, label: active?.device_label ?? "Journey browser" };
-      return route.fulfill({ json: this.leaseSummary(callerDeviceId, controller) });
+      return route.fulfill({ json: this.leaseSummary(callerDeviceId, session) });
     }
     if (path.endsWith("/status")) {
       const session = decodeURIComponent(path.split("/")[3] ?? "");

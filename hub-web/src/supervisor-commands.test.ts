@@ -133,11 +133,12 @@ describe("supervisor slash commands", () => {
       expect(document.querySelector<HTMLElement>("#supervisor-command-palette")!.hidden).toBe(true);
     });
     const { client_ref } = run.mock.calls[0][0].SupervisorCommand;
-    session.receive({
-      client_ref, command: "usage", phase: "observed", detail: "Usage displayed by the supervisor's harness.",
+    const receipt = {
+      device_id: "journey-device", client_ref, command: "usage", phase: "observed", detail: "Usage displayed by the supervisor's harness.",
       output: "• Model: gpt-6.1-sol (reasoning high)\n• Context window: 72% left\n› Ask Codex to do anything",
       interactive: false,
-    });
+    } satisfies CommandReceipt & { device_id: string };
+    session.receive(receipt);
     run.mockClear();
     input.value = "/usage"; input.dispatchEvent(new Event("input"));
     const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });

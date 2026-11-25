@@ -181,6 +181,15 @@ pub(crate) fn launch(
     session: &str,
     dispatch_id: &str,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
+    launch_with(root, session, dispatch_id, super::automatic::launch_local)
+}
+
+pub(super) fn launch_with(
+    root: &Path,
+    session: &str,
+    dispatch_id: &str,
+    start: impl FnOnce(&CasCore, &Task, &VerificationDispatch) -> Result<Option<std::thread::JoinHandle<()>>, String>,
+) -> Result<Option<std::thread::JoinHandle<()>>, String> {
     let dispatch = super::automatic::launch_dispatch(root, dispatch_id, Some(session))?;
     let owner = crate::store::open_agent_store(root)
         .map_err(|e| e.to_string())?
@@ -216,7 +225,7 @@ pub(crate) fn launch(
         return Err("verifier_factory_task_terminal".into());
     }
     // Claim stays synchronous and exact; provider probes and the review run off-loop.
-    super::automatic::launch_local(&core, &task, &dispatch)
+    start(&core, &task, &dispatch)
 }
 
 #[cfg(test)]

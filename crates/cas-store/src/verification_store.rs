@@ -1914,9 +1914,8 @@ pub fn release_failed_verifier_dispatch(
     Ok(true)
 }
 
-/// Retry an expired review after the caller positively established local child
-/// death. Compare the observed owner and child incarnations under the verdict
-/// lock before revoking authority; a revival, replacement or verdict wins.
+pub const AUTOMATIC_PREMERGE_OWNER_KEY: &str = "automatic_premerge_dispatch";
+
 pub fn recover_expired_dead_verifier_dispatch(
     cas_dir: &Path,
     dispatch_id: &str,
@@ -1940,12 +1939,15 @@ pub fn recover_expired_dead_verifier_dispatch(
     let child_matches: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM agents WHERE id=?1 AND name='task-verifier'
          AND agent_type='sub_agent' AND role='standard' AND parent_id=?2
-         AND machine_id=?3 AND registered_at=?4 AND status=?5 AND pid IS ?6
+         AND machine_id IS ?3 AND registered_at=?4 AND status=?5 AND pid IS ?6
          AND pid_starttime IS ?7 AND factory_session IS ?8
-         AND json_extract(metadata,'$.pid_starttime') IS ?9)",
-        params![dead_child.id, owner.id, machine, dead_child.registered_at.to_rfc3339(),
+         AND json_extract(metadata,'$.pid_starttime') IS ?9
+         AND json_extract(metadata,'$.automatic_premerge_dispatch') IS ?10
+         AND last_heartbeat=?11)",
+        params![dead_child.id, owner.id, dead_child.machine_id, dead_child.registered_at.to_rfc3339(),
             dead_child.status.to_string(), dead_child.pid, dead_child.pid_starttime.map(|v| v as i64),
-            dead_child.factory_session, dead_child.metadata.get("pid_starttime")],
+            dead_child.factory_session, dead_child.metadata.get("pid_starttime"),
+            dead_child.metadata.get(AUTOMATIC_PREMERGE_OWNER_KEY), dead_child.last_heartbeat.to_rfc3339()],
         |row| row.get(0),
     )?;
     let task_active: bool = tx.query_row(
@@ -1954,7 +1956,9 @@ pub fn recover_expired_dead_verifier_dispatch(
     )?;
     if !owner_matches || !child_matches || !task_active
         || owner.machine_id.as_deref() != Some(machine.as_str())
-        || dead_child.machine_id.as_deref() != Some(machine.as_str())
+        || !(dead_child.machine_id.as_deref() == Some(machine.as_str())
+            || (dead_child.machine_id.is_none()
+                && dead_child.metadata.get(AUTOMATIC_PREMERGE_OWNER_KEY).map(String::as_str) == Some(dispatch_id)))
         || dispatch.owner_agent_id != owner.id
         || dispatch.verifier_agent_id.as_deref() != Some(dead_child.id.as_str())
         || !matches!(dispatch.state, VerificationDispatchState::Claimed | VerificationDispatchState::TimedOut)
@@ -1973,7 +1977,7 @@ pub fn recover_expired_dead_verifier_dispatch(
     )?;
     record_event_with_conn(&tx, &Event::new(
         EventType::VerificationStarted, EventEntityType::Task, &dispatch.task_id,
-        "Expired verifier claim released after confirmed local child death",
+        "Expired verifier claim released: its local verifier is dead or no longer progressing",
     ).with_metadata(serde_json::json!({
         "code":"expired_verifier_claim_recovered", "dispatch_id":dispatch_id,
         "owner":owner.id, "previous_verifier":dead_child.id,

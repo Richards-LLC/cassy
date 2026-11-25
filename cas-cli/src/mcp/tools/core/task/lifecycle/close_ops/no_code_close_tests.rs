@@ -571,21 +571,28 @@ async fn repeat_review_every_entry_refuses_g170_gh2373() {
 #[tokio::test]
 async fn repeat_rejection_holds_automatic_conflict_return_gh2373() {
     let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env, "main");
+    let target = "epic/conflict";
+    let f = fixture(&mut env, target);
     let id = "cas-2373-conflict";
     env.set("CAS_AGENT_ROLE", "worker");
-    park_for_repeat_review_gh2373(&f, id, "main", None).await;
+    park_for_repeat_review_gh2373(&f, id, target, None).await;
     env.set("CAS_AGENT_ROLE", "supervisor");
     reject_repeat_review_gh2373(&f, id, "The abort transition is unreachable").await;
     reject_repeat_review_gh2373(&f, id, "A stale queue can claim the successor").await;
 
     let parked = f.task(id);
-    let refusal = super::super::parked_conflicts::return_to_worker(
-        &f.cas_dir(), &parked, "main", &"a".repeat(40), &["feature.rs".into()], "cassy-conflict-preflight",
-    ).unwrap_err();
-    assert!(crate::gates::codes_in(&refusal.to_string()).contains(&"G-170"), "{refusal:?}");
-    let typed = refusal.downcast_ref::<McpError>().expect("typed repeat-review hold");
-    assert_eq!(typed.data.as_ref().unwrap()["rule_id"], "repeat_review_required");
+    let repo = f.dir.path();
+    git(repo, &["checkout", "-q", target]);
+    std::fs::write(repo.join("feature.rs"), "pub fn different_feature() {}\n").unwrap();
+    git(repo, &["add", "feature.rs"]);
+    git(repo, &["commit", "-qm", "conflicting target change"]);
+    git(repo, &["push", "-q", "origin", target]);
+    let refusal = f.supervisor.factory(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"worktree_merge", "id":format!("{LANE}-{id}"), "task_id":id,
+    })).unwrap())).await.unwrap_err();
+    assert!(crate::gates::codes_in(&refusal.message).contains(&"G-170"), "{refusal:?}");
+    assert_eq!(refusal.data.as_ref().and_then(|data| data["rule_id"].as_str()),
+        Some("repeat_review_required"), "{refusal:?}");
     let held = f.task(id);
     assert_eq!(held.status, TaskStatus::AwaitingMerge);
     assert_eq!(held.deliverables.factory_branch_anchor, parked.deliverables.factory_branch_anchor);
@@ -3708,10 +3715,10 @@ async fn booting_worker_assignments_reach_ordered_queue_gh1620() {
 #[tokio::test]
 async fn queued_task_starts_after_close_or_park_cas_8488() {
     let mut env = TestEnvGuard::temp_home();
-    for (park, pending_brief, cli, restart) in [
-        (true, false, "codex", false), // Default config must keep the context.
-        (false, false, "claude", true), (true, false, "codex", true),
-        (true, true, "codex", true),
+    for (park, pending_brief, cli, restart, direct_start) in [
+        (true, false, "codex", false, false), // Default config must keep the context.
+        (false, false, "claude", true, false), (true, false, "codex", true, false),
+        (true, true, "codex", true, false), (true, true, "codex", true, true),
     ] {
         let f = fixture(&mut env, "main");
         let config = f.cas_dir().join("config.toml");
@@ -3761,7 +3768,9 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         for id in ["cas-8488b", "cas-8488c"] {
             let mut next = assigned(id, TaskType::Task, "epic/next");
             next.status = TaskStatus::Open;
-            next.assignee = None;
+            if !direct_start || id != "cas-8488b" {
+                next.assignee = None;
+            }
             f.put(&next);
         }
         let admitted_review = if pending_brief {
@@ -3900,11 +3909,16 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
                 conn.execute_batch("CREATE TRIGGER defer_ordered_brief BEFORE INSERT ON prompt_queue
                     WHEN NEW.source = 'task-assignment'
                     BEGIN SELECT RAISE(ABORT, 'injected ordered prompt failure'); END;").unwrap();
-                crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+                if direct_start {
+                    call(&f.worker, serde_json::json!({"action":"start", "id":"cas-8488b"})).await;
+                } else {
+                    crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+                }
                 assert_eq!(f.task("cas-8488b").status, TaskStatus::InProgress);
                 let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap();
                 let pending = queues.get("queue-session", WORKER).unwrap();
-                assert!(pending.starting && pending.current_started);
+                assert!(pending.starting);
+                assert_eq!(pending.current_started, !direct_start);
                 conn.execute_batch("DROP TRIGGER defer_ordered_brief").unwrap();
                 let replacement = path.with_file_name("replacement-review.md");
                 std::fs::copy(path, &replacement).unwrap();

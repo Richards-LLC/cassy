@@ -1853,7 +1853,7 @@ mod worker_attention_tests {
         agents.register(&supervisor).unwrap();
     }
 
-    fn record_bound_rejection(root: &Path, task_id: &str, verdict_id: &str) {
+    fn record_bound_rejection(root: &std::path::Path, task_id: &str, verdict_id: &str) {
         let owner = "supervisor-id";
         let dispatch = cas_store::create_verification_dispatch_bound(
             root, task_id, owner, owner, &cas_types::VerificationProofBoundary::task(),
@@ -1866,7 +1866,7 @@ mod worker_attention_tests {
         verdict.issuer_agent_id = Some(owner.into());
         verdict.dispatch_id = Some(dispatch.id.clone());
         let connection = cas_store::shared_db::shared_connection(&root.join("cas.db")).unwrap();
-        let mut connection = cas_store::shared_db::lock_connection(&connection).unwrap();
+        let mut connection = connection.lock().unwrap();
         let transaction = connection.transaction().unwrap();
         cas_store::add_verification_with_conn(&transaction, &verdict).unwrap();
         assert!(cas_store::resolve_verification_dispatch_with_conn(

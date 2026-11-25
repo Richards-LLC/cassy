@@ -141,32 +141,30 @@ pub(super) fn names_runner(args: &[String]) -> bool {
 /// `validate_report` reads. Suite names join a test's own name with spaces,
 /// as `--test-name-pattern` matches them.
 const NODE_TEST_REPORTER: &str = r#"export default async function* (source) {
-  const names = [], below = [], inside = [], files = new Map();
+  const names = [], inside = [], files = new Map();
   let success = true;
   for await (const { type, data } of source) {
     if (type === 'test:start') {
       names[data.nesting] = data.name;
-      below[data.nesting] = [];
       inside[data.nesting] = [];
     }
     if (type !== 'test:pass' && type !== 'test:fail') continue;
     const file = files.get(data.file) ?? { name: data.file, status: 'passed', assertionResults: [] };
     files.set(data.file, file);
     const failed = type === 'test:fail' && !data.skip && !data.todo;
-    const failureType = failed ? data.details?.error?.failureType : undefined;
     if (failed) {
       success = false;
       file.status = 'failed';
-      for (let depth = 0; depth < data.nesting; depth++) below[depth]?.push(failureType ?? null);
     }
     if (data.details?.type === 'suite') continue;
+    const below = inside[data.nesting] ?? [];
     const row = {
       fullName: [...names.slice(0, data.nesting), data.name].join(' '),
-      failureType,
-      subtestFailures: failed ? (below[data.nesting] ?? []) : undefined,
+      failureType: failed ? data.details?.error?.failureType : undefined,
+      subtestFailures: failed ? below.filter(child => child.status === 'failed').map(child => child.failureType ?? null) : undefined,
       status: data.skip ? 'skipped' : data.todo ? 'todo' : failed ? 'failed' : 'passed',
     };
-    for (const child of inside[data.nesting] ?? []) (child.parentTests ??= []).push(row.fullName);
+    for (const child of below) (child.parentTests ??= []).push(row.fullName);
     for (let depth = 0; depth < data.nesting; depth++) inside[depth]?.push(row);
     file.assertionResults.push(row);
   }

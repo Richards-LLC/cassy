@@ -1877,7 +1877,7 @@ fn enqueue_worker_attention_relay_inner(
 }
 
 #[cfg(test)]
-mod worker_attention_tests {
+pub(super) mod worker_attention_tests {
     use super::*;
     use cas_types::{Agent, AgentRole, AgentStatus};
 
@@ -1890,7 +1890,7 @@ mod worker_attention_tests {
         agents.register(&supervisor).unwrap();
     }
 
-    fn record_bound_rejection(root: &std::path::Path, task_id: &str, verdict_id: &str) {
+    pub(in super::super) fn record_bound_rejection(root: &std::path::Path, task_id: &str, verdict_id: &str) {
         let owner = "supervisor-id";
         let dispatch = cas_store::create_verification_dispatch_bound(
             root, task_id, owner, owner, &cas_types::VerificationProofBoundary::task(),

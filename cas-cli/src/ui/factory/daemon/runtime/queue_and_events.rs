@@ -16267,13 +16267,21 @@ mod tests {
     /// that brief, so the worker has it before it can start the task.
     #[tokio::test]
     async fn ct2_p3_spawn_message_carries_the_supervisor_brief() {
+        use super::super::lifecycle::worker_attention_tests::record_bound_rejection;
+
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::TempDir::new().unwrap();
+        assert!(std::process::Command::new("git").current_dir(temp.path())
+            .args(["init", "-q", "-b", "factory/worker-1"]).status().unwrap().success());
+        assert!(std::process::Command::new("git").current_dir(temp.path())
+            .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+                "commit", "--allow-empty", "-qm", "initial checkout"]).status().unwrap().success());
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         let focus = "visible chunks first";
         std::fs::write(cas_dir.join("config.toml"), format!("[factory]\nfocus_mode='{focus}'\n")).unwrap();
         let mut task = cas_types::Task::new("cas-brief2".into(), "Fix the sweep".into());
         task.description = "Apply rule-177 to the SMS send path.".into();
+        task.execution_note = Some("no-code".into());
         // cas-d8295: only a stakeholder rule's citation asks for markers.
         let mut rule = cas_types::Rule::new("rule-177".into(), "Only SMS sends".into());
         rule.stakeholder = Some(cas_types::StakeholderAttribution {
@@ -16290,7 +16298,7 @@ mod tests {
         .join("\n\n");
         crate::store::open_task_store_cached(&cas_dir).unwrap().add(&task).unwrap();
 
-        deliver_worker_task_brief(
+        let assignment_id = deliver_worker_task_brief(
             &cas_dir,
             "factory-session",
             "worker-1",
@@ -16313,27 +16321,45 @@ mod tests {
         let mut worker = cas_types::Agent::new_with_role("worker-id".into(), "worker-1".into(),
             cas_types::AgentRole::Worker);
         worker.factory_session = Some("factory-session".into());
-        crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+        worker.metadata.insert("clone_path".into(), temp.path().display().to_string());
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        agents.register(&worker).unwrap();
         task.assignee = Some(worker.name.clone());
-        crate::store::open_task_store_cached(&cas_dir).unwrap().update(&task).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
+        tasks.update(&task).unwrap();
         crate::task_assignment::enqueue(&cas_dir, &task).unwrap();
-        // An ordered spawn starts its head at registration. It still shares
-        // the initial assignment rather than creating another model turn.
-        task.status = cas_types::TaskStatus::InProgress;
-        crate::store::open_task_store_cached(&cas_dir).unwrap().update(&task).unwrap();
-        let admission = crate::mcp::tools::core::task::repeat_review::admit_repair(&cas_dir, &task.id).unwrap();
-        assert!(admission.artifact_id.is_none());
-        crate::task_assignment::enqueue_queued(&cas_dir, &task, 1, true, &admission.brief()).unwrap();
-        assert_eq!(crate::store::open_prompt_queue_store(&cas_dir).unwrap()
-            .peek_all(10).unwrap().len(), 1, "startup, registration and head selection must reuse the assignment");
+        let mut supervisor = cas_types::Agent::new_with_role("supervisor-id".into(), "supervisor".into(),
+            cas_types::AgentRole::Supervisor);
+        supervisor.factory_session = worker.factory_session.clone();
+        agents.register(&supervisor).unwrap();
+        record_bound_rejection(&cas_dir, &task.id, "ver-first");
+        record_bound_rejection(&cas_dir, &task.id, "ver-second");
+        let review = crate::mcp::tools::core::task::repeat_review::publish_test_review(
+            &cas_dir, &task.id, &supervisor.id,
+        ).await;
+        let core = crate::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        core.configure_worker_task_queue(&worker.name, Some(vec![task.id.clone()]), None).await.unwrap();
+        let task = tasks.get(&task.id).unwrap();
+        assert_eq!(task.status, cas_types::TaskStatus::InProgress);
+        let cursor = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&cas_dir).unwrap()
+            .get("factory-session", &worker.name).unwrap();
+        assert!(cursor.current_started && !cursor.starting, "{cursor:?}");
+        assert_eq!(cursor.current_task.as_deref(), Some(task.id.as_str()));
+        assert_eq!(cursor.dispatch_review_artifact.as_deref(), Some(review.as_str()));
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
-        let row = queue.peek_all(10).unwrap().remove(0);
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1, "startup, registration and head selection must reuse the assignment");
+        let row = &rows[0];
+        assert_eq!(row.id, assignment_id);
+        assert!(row.prompt.contains(&review), "{}", row.prompt);
         assert!(crate::prompt_revalidation::assignment_stale_task(
             &row.prompt, task.status, task.assignee.as_deref(), &worker.name,
         ).is_none(), "an initial assignment still waiting for transport must become a continuation");
         queue.record_recipient_transport_delivered(row.id, &worker.name).unwrap();
         queue.mark_transport_delivered(row.id).unwrap();
-        crate::task_assignment::enqueue_queued(&cas_dir, &task, 1, true, &admission.brief()).unwrap();
+        let repair_brief = crate::mcp::tools::core::task::repeat_review::mismatch_brief(&review);
+        crate::task_assignment::enqueue_queued(&cas_dir, &task, cursor.dispatch_revision, true, &repair_brief).unwrap();
         assert!(queue.peek_all(10).unwrap().is_empty(), "a handed-off startup must not create another turn");
         // pin: the header tells the worker the brief must be read before it starts.
         assert!(prompt.contains("read it before you start"), "{prompt}");

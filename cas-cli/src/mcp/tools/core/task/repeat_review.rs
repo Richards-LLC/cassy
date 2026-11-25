@@ -99,6 +99,23 @@ fn is_whole_flow_review(markdown: &str) -> bool {
     matrix && mismatch_item
 }
 
+#[test]
+fn whole_flow_review_predicate_gh2373() {
+    let header = "| Actor | Operation | Design | Observed |";
+    let row = "| Owner | Abort | Allowed | Unreachable |";
+    let mismatches = "## Mismatches\n\n- Abort is unreachable.";
+    for (head, body, tail, valid) in [
+        (header, row, mismatches, true),
+        ("| Actor | Design | Operation | Observed |", row, mismatches, false),
+        (header, "| Owner | Abort | | Unreachable |", mismatches, false),
+        (header, row, "## Mismatches\n\nAbort is unreachable.", false),
+        (header, row, "## Mismatches\n\n## Other\n\n- Abort is unreachable.", false),
+    ] {
+        let markdown = format!("{head}\n| --- | --- | --- | --- |\n{body}\n\n{tail}\n");
+        assert_eq!(is_whole_flow_review(&markdown), valid, "{markdown}");
+    }
+}
+
 pub(crate) fn mismatch_brief(artifact_id: &str) -> String {
     format!("\nWhole-flow mismatch list: {artifact_id}. Use the review's full list for this repair.")
 }

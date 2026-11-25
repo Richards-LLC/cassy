@@ -2228,6 +2228,50 @@ mod worker_attention_tests {
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
     }
 
+    #[test]
+    fn sweep_recovers_daemon_repeat_notice_once_gh2373() {
+        use cas_types::{Dependency, DependencyType, Task, TaskStatus, TaskType, Verification, VerificationProvenance, VerificationStatus, WorkTarget};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "repeat-review-sweep");
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&root, "repeat-review-sweep");
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut train = Task::new("cas-2373-train".into(), "Train".into());
+        train.task_type = TaskType::Epic;
+        train.labels.push("release-train".into());
+        train.branch = Some("epic/release-train".into());
+        train.epic_verification_owner = Some("supervisor-id".into());
+        train.deliverables.work_target = Some(WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() });
+        tasks.add(&train).unwrap();
+        let mut task = Task::new("cas-2373-recovery".into(), "Recover repeated rejection".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.work_target = Some(WorkTarget { repo_selector: "project:fixture".into(), target_branch: "epic/release-train".into() });
+        tasks.add(&task).unwrap();
+        tasks.add_dependency(&Dependency::new(task.id.clone(), train.id, DependencyType::ParentChild)).unwrap();
+        let mut latest = String::new();
+        for id in ["ver-first", "ver-second"] {
+            let mut verdict = Verification::new(id.into(), task.id.clone());
+            verdict.status = VerificationStatus::Rejected;
+            verdict.provenance = VerificationProvenance::System;
+            cas_store::add_system_verification(&root, &verdict).unwrap();
+            latest = verdict.id;
+        }
+        let notices = crate::store::open_supervisor_queue_store(&root).unwrap();
+        let key = format!("repeat-review:{}:{latest}", task.id);
+        assert!(notices.get_by_transition_key(&key).unwrap().is_none());
+        let now = chrono::Utc::now();
+        for at in [now, now + chrono::Duration::seconds(60)] {
+            escalate_expired_verification_dispatches(&root, at);
+        }
+        let notice = notices.get_by_transition_key(&key).unwrap().unwrap();
+        assert_eq!(notices.poll(&notice.supervisor_id, 10).unwrap().len(), 1);
+        assert!(tasks.get_parent_epic(&task.id).unwrap().is_none());
+        assert_eq!(tasks.get(&task.id).unwrap().deliverables.work_target.unwrap().target_branch, "main");
+        let verifications = cas_store::SqliteVerificationStore::open(&root).unwrap();
+        assert_eq!(verifications.latest_repeated_rejection(&task.id).unwrap().unwrap().0, latest);
+    }
+
     /// cas-7456 (GH #1302 B): a verification dispatch expired overnight with
     /// no escalation. The sweep wakes the supervisor once per expired
     /// dispatch, and leaves due-later and day-old dispatches alone.

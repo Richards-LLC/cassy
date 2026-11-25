@@ -4098,6 +4098,11 @@ impl CasCore {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_started_task_merge_source(&self, repo: &Path, task: &cas_types::Task, branch: &str) -> Result<bool, McpError> {
+        self.started_task_merge_source(repo, Some(task), branch).map(|source| source.is_some())
+    }
+
     /// An active task can rebind before parking. Its recorded start is the
     /// source authority; a historical worker lane is only an identity alias.
     fn started_task_merge_source(

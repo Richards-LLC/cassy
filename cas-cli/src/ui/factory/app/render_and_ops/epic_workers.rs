@@ -1964,9 +1964,8 @@ fn reset_stale_preassign_holder(
         return Err(format!("task is still held by live worker '{holder}'"));
     }
 
-    let reason = "Stale pre-assignment force-release";
-    let lease_released = agents
-        .release_lease_for_task(&task.id, reason)
+    agents
+        .release_lease_for_task(&task.id, "Stale pre-assignment force-release")
         .map_err(|e| format!("could not release stale holder '{holder}' lease: {e}"))?;
 
     let store = open_task_store_cached(cas_dir)
@@ -1984,16 +1983,16 @@ fn reset_stale_preassign_holder(
     let prior_status = reset.status;
     reset.status = cas_types::TaskStatus::Open;
     reset.assignee = None;
-    let now = chrono::Utc::now();
-    let audit = crate::mcp::tools::core::task::audit::reset_note(
-        now, prior_status, Some(holder), lease_released, reason,
+    let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+    let audit = format!(
+        "[{timestamp}] ✅ DECISION cas-2327: force-released stale assignee '{holder}' with reset semantics; {prior_status:?}→Open. Notes, branch, and prior work were preserved before pre-assigning a replacement worker."
     );
     reset.notes = if reset.notes.is_empty() {
         audit
     } else {
         format!("{}\n\n{audit}", reset.notes)
     };
-    reset.updated_at = now;
+    reset.updated_at = chrono::Utc::now();
     store.update(&reset)
         .map_err(|e| format!("could not persist stale-holder reset: {e}"))?;
     clear_departed_block(&*store, &task.id);
@@ -9161,6 +9160,7 @@ mod tests {
             Mock::given(method("GET"))
                 .and(path(format!("/api/teams/{team}/sync/pull")))
                 .respond_with(move |request: &wiremock::Request| {
+                    let pulled_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
                     let since = request.url.query_pairs().find(|(key, _)| key == "since")
                         .map(|(_, value)| chrono::DateTime::parse_from_rfc3339(&value).unwrap());
                     let stored = stored.lock().unwrap();
@@ -9177,7 +9177,7 @@ mod tests {
                         "entries": [], "rules": [], "skills": [], "sessions": [], "verifications": [],
                         "events": [], "prompts": [], "file_changes": [], "commit_links": [],
                         "agents": [], "worktrees": [], "task_dependencies": [], "omitted_rows": [],
-                        "tasks": rows, "team_id": team, "pulled_at": chrono::Utc::now(),
+                        "tasks": rows, "team_id": team, "pulled_at": pulled_at,
                     }))
                 }).mount(&server).await;
             let task_id = task.id.clone();
@@ -9241,7 +9241,6 @@ mod tests {
             queue.starting = true;
             queues.save("takeover-session", "replacement-worker", &mut queue).unwrap();
         } else {
-            env.set_current_dir(&project);
             env.set("CAS_AGENT_ROLE", "supervisor");
             let rebind = supervisor.task(request(serde_json::json!({
                 "action": "rebind_branch", "id": task.id, "branch": branch,
@@ -9287,12 +9286,11 @@ mod tests {
         );
         assert_eq!(audit["previous_tip"], anchor);
         if let Some(sync_owner) = &sync_owner {
-            env.set_current_dir(&project);
+            let _project_dir = env.enter_dir(&project);
             assert_eq!(
                 sync_owner(),
                 (TaskStatus::InProgress, Some("replacement-worker".into()), branch.into(), None),
             );
-            env.set_current_dir(&checkout);
         }
         // The replacement can now continue, park and merge under its own name.
         std::fs::write(checkout.join("recovery.txt"), "replacement work\n").unwrap();
@@ -9311,8 +9309,8 @@ mod tests {
             TaskStatus::AwaitingMerge,
             "{park:?}"
         );
-        env.set_current_dir(&project);
         if let Some(sync_owner) = &sync_owner {
+            let _project_dir = env.enter_dir(&project);
             assert_eq!(
                 sync_owner(),
                 (

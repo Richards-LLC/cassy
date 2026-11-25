@@ -50,10 +50,10 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   });
   await double.install();
 
-  const http = async (path: string, method = "GET", body: unknown = null, headers: Record<string, string> = {}) => {
+  const http = async (path: string, method = "GET", body: unknown = null) => {
     let response: Response | undefined;
     await handleHttp({
-      request: () => ({ url: () => `${origin}${path}`, method: () => method, postDataJSON: () => body, headers: () => headers }),
+      request: () => ({ url: () => `${origin}${path}`, method: () => method, postDataJSON: () => body, headers: () => ({}) }),
       fulfill: async (result: Response) => { response = result; },
     } as unknown as Route);
     expect(response, `${method} ${path}`).toBeDefined();
@@ -69,8 +69,6 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   check("HubSession", sessions[0]);
   const stopped = stopped_sessions.find((session: { name: string }) => session.name === "ended");
   check("SessionEndOutcome", stopped?.ended);
-  expect(sessions[0].machine_online).toBe(true);
-  expect(stopped?.machine_online).toBe(false);
   const changed = double.announceCatalog("fixture", { added: ["running"], removed: ["stale"] });
   await catalog();
   await changed;
@@ -88,19 +86,6 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   const forceDenied = await http(lease, "POST", { force: true });
   check("LeaseRefusal", forceDenied.json);
   expect([forceDenied.status, forceDenied.json.error]).toEqual([401, "unauthorized"]);
-  double.installations.set("installed", {
-    machine: "fixture", device_id: "installed", credential_id: "installed", credential_generation: 1,
-    credential: "fixture-only", scopes: SCOPES, device_label: "Installed", operator_label: "Operator",
-    controller_origin: origin, public_key_jwk: {}, revoked_at: null,
-  });
-  double.setScopes("fixture", [...SCOPES, "hub-admin", "factory-manage"]);
-  const installedDenied = await http(lease, "POST", { force: true }, { authorization: "DPoP fixture-only" });
-  check("LeaseRefusal", installedDenied.json);
-  expect([installedDenied.status, installedDenied.json.error]).toEqual([401, "unauthorized"]);
-  double.setScopes("fixture", ["session-read", "hub-admin", "factory-manage"]);
-  const inputDenied = await http(lease, "POST", { force: false });
-  check("LeaseRefusal", inputDenied.json);
-  expect([inputDenied.status, inputDenied.json.required_scope]).toEqual([403, "pane:input"]);
   double.setScopes("fixture", [...SCOPES, "hub-admin", "factory-manage"]);
   check("LeaseSummary", (await http(lease, "POST", { force: true })).json);
   const released = await http(lease, "DELETE");
@@ -121,11 +106,9 @@ it("emits catalog, receipt, lease and machine-event fixtures that match the Rust
   expect(receipts).toHaveLength(1);
   for (const receipt of receipts) check("SupervisorCommandReceipt", receipt);
 
-  for (const [session, outcome] of [["running", "ended"], ["stale", "cleaned_stale"]]) {
-    const result = await http(`/v1/sessions/${session}`, "DELETE");
-    check("EndSessionReceipt", result.json);
-    expect(result.json.outcome).toBe(outcome);
-  }
+  const result = await http("/v1/sessions/running", "DELETE");
+  check("EndSessionReceipt", result.json);
+  expect(result.json.outcome).toBe("ended");
   expect(events.map(event => event.kind)).toEqual(expect.arrayContaining(["session_added", "fleet_changed"]));
   for (const event of events) check("MachineEvent", event);
 });

@@ -69,6 +69,10 @@ impl Fixture {
 /// A workspace with crate `widget`; the worker's pushed, unmerged lane
 /// changes `widget::gear`; its task declares only an unrelated target.
 pub(super) fn fixture(env: &mut TestEnvGuard) -> Fixture {
+    fixture_with_gear(env, "pub fn turn() {}\n", "pub fn turn() { let _ = 1; }\n")
+}
+
+fn fixture_with_gear(env: &mut TestEnvGuard, base: &str, checkpoint: &str) -> Fixture {
     // Task identity precedes its delivery; store setup can exceed the
     // attribution clock-skew allowance on a busy disk.
     let mut task = Task::new(ID.into(), "turn the gear".into());
@@ -77,7 +81,7 @@ pub(super) fn fixture(env: &mut TestEnvGuard) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
     git(repo, &["init", "-q", "-b", "main"]);
-    std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+    std::fs::write(repo.join(".gitignore"), ".cas/\n/Cargo.lock\n/target/\n").unwrap();
     std::fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers = [\"crates/*\"]\n").unwrap();
     std::fs::create_dir_all(repo.join("crates/widget/src")).unwrap();
     std::fs::write(repo.join("crates/widget/Cargo.toml"), "[package]\nname = \"widget\"\n").unwrap();
@@ -89,14 +93,16 @@ pub(super) fn fixture(env: &mut TestEnvGuard) -> Fixture {
     std::fs::write(repo.join("crates/widget/src/embedded.md"), "embedded prompt v1\n").unwrap();
     std::fs::create_dir_all(repo.join("docs")).unwrap();
     std::fs::write(repo.join("docs/RELEASE_SLACK_RUBRIC.md"), "release rubric v1\n").unwrap();
-    std::fs::write(repo.join("crates/widget/src/gear.rs"), "pub fn turn() {}\n").unwrap();
+    std::fs::write(repo.join("crates/widget/src/gear.rs"), base).unwrap();
     git(repo, &["add", "."]);
     git(repo, &["commit", "-q", "-m", "seed"]);
     git(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
     git(repo, &["push", "-q", "origin", "main"]);
     git(repo, &["checkout", "-q", "-b", LANE]);
-    std::fs::write(repo.join("crates/widget/src/gear.rs"), "pub fn turn() { let _ = 1; }\n").unwrap();
-    git(repo, &["commit", "-q", "-am", &format!("fix({ID}): turn the gear")]);
+    if checkpoint != base {
+        std::fs::write(repo.join("crates/widget/src/gear.rs"), checkpoint).unwrap();
+        git(repo, &["commit", "-q", "-am", &format!("fix({ID}): turn the gear")]);
+    }
     git(repo, &["push", "-q", "origin", LANE]);
     git(repo, &["checkout", "-q", "main"]);
 
@@ -1108,6 +1114,62 @@ async fn park_requires_an_ac_checklist_and_an_approved_narrowing_gh_2401() {
     let parked = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
     assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+}
+
+#[tokio::test]
+async fn park_requires_red_first_evidence_gh_2422() {
+    use crate::factory_worker_check::{record_rust_failure_for_tests, record_rust_pass_for_tests};
+
+    let mut env = TestEnvGuard::temp_home();
+    for (methodology, record_red, gate, status) in [
+        (Some("test-first"), false, Some("G-170"), TaskStatus::InProgress),
+        (Some("test-first"), true, None, TaskStatus::AwaitingMerge),
+        (None, false, None, TaskStatus::AwaitingMerge),
+    ] {
+        let fixture = fixture_with_gear(
+            &mut env,
+            "pub fn turn() -> u8 { 1 }\n#[test]\nfn regression() { assert_eq!(turn(), 2); }\n",
+            "pub fn turn() -> u8 { 2 }\n#[test]\nfn regression() { assert_eq!(2, turn()); }\n",
+        );
+        let cas_dir = fixture.cas_dir();
+        let checkout = &fixture.worker_path;
+        let base = git(checkout, &["rev-parse", "main"]);
+        let tip = git(checkout, &["rev-parse", "HEAD"]);
+        let mut task = fixture.task();
+        task.execution_note = methodology.map(str::to_owned);
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            assignee: WORKER.into(),
+            branch: LANE.into(),
+            base_sha: base.clone(),
+            work_target: task.deliverables.work_target.clone().unwrap(),
+        });
+        open_task_store(&cas_dir).unwrap().update(&task).unwrap();
+
+        let name = "gear::regression";
+        if record_red {
+            git(checkout, &["checkout", "-q", "--detach", &base]);
+            record_rust_failure_for_tests(&cas_dir, checkout, &base, ID, "widget", name);
+            git(checkout, &["checkout", "-q", LANE]);
+        }
+        record_rust_pass_for_tests(
+            &cas_dir, checkout, &tip, "widget", &format!("test(={name})"),
+            Some(stability::Proof {
+                runner: "nextest".into(),
+                tests: vec![stability::Identity::exact("crates/widget/src/gear.rs", name)],
+                consecutive_passes: stability::REQUIRED_PASSES,
+                elapsed_ms: 0,
+                inactive: Vec::new(),
+            }),
+        );
+        let reply = call(&fixture.worker, serde_json::json!({
+            "action": "close", "id": ID, "reason": "gear turns",
+        })).await;
+        assert_eq!(
+            (crate::gates::codes_in(&reply).as_slice(), fixture.task().status),
+            (gate.as_slice(), status),
+            "{methodology:?}, red={record_red}: {reply}",
+        );
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

@@ -774,50 +774,51 @@ impl CasService {
     }
 
     pub(crate) fn route_qa_rejection(&self, pass: &QaPass, reviewer: &str, summary: &str) -> String {
-        let reason = format!(
-            "Independent QA round {} by {reviewer} rejected {} @{}: {} Ledger with evidence: {}. \
-             Fix the findings, push, and close again; the next park opens round {}.",
+        let findings = format!(
+            "Independent QA round {} by {reviewer} rejected {} @{}: {} Ledger with evidence: {}.",
             pass.round,
             pass.task_id,
             pass.head8(),
             summary.trim(),
             pass.ledger_path.as_deref().unwrap_or("-"),
-            pass.round + 1,
         );
+        let reason = format!("{findings} Fix the findings, push, and close again; the next park opens round {}.", pass.round + 1);
         let task_status = self
             .inner
             .open_task_store()
             .ok()
             .and_then(|store| store.get(&pass.task_id).ok())
             .map(|task| task.status);
-        let routed = if task_status == Some(TaskStatus::AwaitingMerge) {
-            match cas_store::request_changes_for_parked_delivery(
+        let (routed, brief) = if task_status == Some(TaskStatus::AwaitingMerge) {
+            match crate::mcp::tools::core::task::repeat_review::repair_parked(
                 &self.inner.cas_root,
                 &pass.task_id,
                 reviewer,
                 &reason,
             ) {
-                Ok(_) => {
+                Ok((_, brief)) => {
                     let _ = crate::store::publish_direct_task_write(&self.inner.cas_root, &pass.task_id);
-                    format!(
+                    (format!(
                         "{} is back to Open with its assignee kept; request_changes recorded the ledger.",
                         pass.task_id
-                    )
+                    ), Some(brief))
                 }
-                Err(error) => format!(
-                    "request_changes could not reopen {}: {error}. The supervisor must decline it manually.",
+                Err(error) if crate::mcp::tools::core::task::repeat_review::is_repair_hold(&error) => (error.message.into_owned(), None),
+                Err(error) => (format!(
+                    "request_changes could not reopen {}: {error}. The task stays parked.",
                     pass.task_id
-                ),
+                ), None),
             }
         } else {
-            format!(
+            (format!(
                 "{} is not parked (status {}); the rejection stands and merge/close stay blocked for @{}.",
                 pass.task_id,
                 task_status.map(|status| status.to_string()).unwrap_or_else(|| "unknown".into()),
                 pass.head8()
-            )
+            ), None)
         };
-        if let Some(owner) = self.inner.open_task_store().ok()
+        if let Some(brief) = &brief
+            && let Some(owner) = self.inner.open_task_store().ok()
             .and_then(|store| store.get(&pass.task_id).ok())
             .filter(|task| !task.is_terminal())
             .and_then(|task| task.assignee)
@@ -829,13 +830,13 @@ impl CasService {
             self.enqueue_qa_notice(
                 &target,
                 &format!("qa-verdict:{}:implementer", pass.id),
-                &reason,
+                brief,
             );
         }
         self.enqueue_qa_notice(
             "supervisor",
             &format!("qa-verdict:{}", pass.id),
-            &format!("{reason}\n{routed}"),
+            &format!("{}\n{routed}", brief.as_deref().unwrap_or(&findings)),
         );
         routed
     }

@@ -141,19 +141,32 @@ pub(super) fn names_runner(args: &[String]) -> bool {
 /// `validate_report` reads. Suite names join a test's own name with spaces,
 /// as `--test-name-pattern` matches them.
 const NODE_TEST_REPORTER: &str = r#"export default async function* (source) {
-  const names = [], files = new Map();
+  const names = [], inside = [], files = new Map();
   let success = true;
   for await (const { type, data } of source) {
-    if (type === 'test:start') names[data.nesting] = data.name;
+    if (type === 'test:start') {
+      names[data.nesting] = data.name;
+      inside[data.nesting] = [];
+    }
     if (type !== 'test:pass' && type !== 'test:fail') continue;
     const file = files.get(data.file) ?? { name: data.file, status: 'passed', assertionResults: [] };
     files.set(data.file, file);
-    if (type === 'test:fail') { success = false; file.status = 'failed'; }
+    const failed = type === 'test:fail' && !data.skip && !data.todo;
+    if (failed) {
+      success = false;
+      file.status = 'failed';
+    }
     if (data.details?.type === 'suite') continue;
-    file.assertionResults.push({
+    const below = inside[data.nesting] ?? [];
+    const row = {
       fullName: [...names.slice(0, data.nesting), data.name].join(' '),
-      status: type === 'test:fail' ? 'failed' : data.skip ? 'skipped' : data.todo ? 'todo' : 'passed',
-    });
+      failureType: failed ? data.details?.error?.failureType : undefined,
+      subtestFailures: failed ? below.filter(child => child.status === 'failed').map(child => child.failureType ?? null) : undefined,
+      status: data.skip ? 'skipped' : data.todo ? 'todo' : failed ? 'failed' : 'passed',
+    };
+    for (const child of below) (child.parentTests ??= []).push(row.fullName);
+    for (let depth = 0; depth < data.nesting; depth++) inside[depth]?.push(row);
+    file.assertionResults.push(row);
   }
   yield JSON.stringify({ success, testResults: [...files.values()] });
 }
@@ -1992,6 +2005,7 @@ fn execute_selection(
         &std::fs::read_to_string("/proc/meminfo").unwrap_or_default(),
     );
     let mut by_file: BTreeMap<&str, Vec<&Identity>> = BTreeMap::new();
+    let red_task = super::red_first_task(cas_root, repo);
     for test in tests {
         by_file.entry(&test.path).or_default().push(test);
     }
@@ -2186,19 +2200,28 @@ fn execute_selection(
                 serde_json::from_slice(&std::fs::read(&report).with_context(|| {
                     format!("{runner} did not produce a stability report for {path}")
                 })?)?;
+            if !success && let Some(task) = &red_task {
+                let tests = failed_javascript_tests(runner, repo, &value);
+                if !tests.is_empty() {
+                    super::record_red_first_failure(cas_root, repo, head, &task.id,
+                        super::RedFirstFailure::JavaScript { runner: runner.into(), tests }, format!("{runner} {path}"))?;
+                }
+            }
             Ok((success, value))
         };
         let (ran, skipped) = if widened.is_some() && runner == "playwright" {
             let (success, report) = run(0)?;
-            // A run that found no test is no failure to attribute.
-            fn ran_a_test(suite: &Value) -> bool {
-                suite.get("specs").and_then(Value::as_array).is_some_and(|specs| !specs.is_empty())
-                    || suite.get("suites").and_then(Value::as_array).is_some_and(|suites| suites.iter().any(ran_a_test))
-            }
-            if !ran_a_test(&report) && found_no_tests(runner, success, &report) {
-                bail!(ZeroTests::new(format!("{runner} executed zero tests")));
-            }
             let inherited = if success { BTreeSet::new() } else {
+                if playwright_found_no_tests(&report) {
+                    let mut has_specs = false;
+                    let _ = walk_playwright_specs(&report["suites"], &[], &mut |_, _| {
+                        has_specs = true;
+                        Ok(())
+                    });
+                    if !has_specs {
+                        bail!(ZeroTests::new(format!("{runner} executed zero tests")));
+                    }
+                }
                 let (inherited, note) = web_attribution::attribute(cas_root, repo, head, &package,
                     &executable, &config, &report, &environment, high)
                     .map_err(|error| anyhow::anyhow!(crate::gates::tag("G-61", format!("{error:#}"))))?;
@@ -2325,88 +2348,6 @@ fn validate_declared_discovery(
     sites: &[DeclaredSite],
 ) -> Result<()> {
     type Location = (String, usize, usize);
-    type Discovered = BTreeMap<Location, BTreeMap<String, BTreeSet<String>>>;
-    fn collect(
-        repo: &Path,
-        root: &Path,
-        suites: &Value,
-        ancestry: &[String],
-        discovered: &mut Discovered,
-    ) -> Result<()> {
-        for suite in suites.as_array().context("Playwright discovery suites")? {
-            let mut names = ancestry.to_vec();
-            if !ancestry.is_empty() || suite.get("column").and_then(Value::as_u64).unwrap_or(0) != 0
-            {
-                names.push(
-                    suite
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .context("discovery suite title")?
-                        .to_string(),
-                );
-            }
-            for spec in suite
-                .get("specs")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                let mut full = names.clone();
-                full.push(
-                    spec.get("title")
-                        .and_then(Value::as_str)
-                        .context("discovery spec title")?
-                        .to_string(),
-                );
-                let file = root.join(
-                    spec.get("file")
-                        .and_then(Value::as_str)
-                        .context("discovery spec file")?,
-                );
-                let location = (
-                    report_path(repo, file.to_str().context("discovery path encoding")?)?,
-                    spec.get("line")
-                        .and_then(Value::as_u64)
-                        .context("discovery spec line")? as usize,
-                    spec.get("column")
-                        .and_then(Value::as_u64)
-                        .context("discovery spec column")? as usize,
-                );
-                let tests = spec
-                    .get("tests")
-                    .and_then(Value::as_array)
-                    .context("discovery spec tests")?;
-                if tests.is_empty() {
-                    bail!("discovery spec has no projects");
-                }
-                for test in tests {
-                    let project = test
-                        .get("projectId")
-                        .or_else(|| test.get("projectName"))
-                        .and_then(Value::as_str)
-                        .context("discovery project missing")?;
-                    if !discovered
-                        .entry(location.clone())
-                        .or_default()
-                        .entry(project.to_string())
-                        .or_default()
-                        .insert(full.join(" "))
-                    {
-                        bail!(
-                            "ambiguous duplicate discovered identity at {}:{}:{}",
-                            location.0,
-                            location.1,
-                            location.2
-                        );
-                    }
-                }
-            }
-            if let Some(nested) = suite.get("suites") {
-                collect(repo, root, nested, &names, discovered)?;
-            }
-        }
-        Ok(())
-    }
     if report
         .get("errors")
         .and_then(Value::as_array)
@@ -2421,13 +2362,32 @@ fn validate_declared_discovery(
             .and_then(Value::as_str)
             .context("discovery rootDir missing")?,
     );
-    let mut discovered = BTreeMap::new();
-    collect(
-        repo,
-        root,
+    let mut discovered = BTreeMap::<Location, BTreeMap<String, BTreeSet<String>>>::new();
+    walk_playwright_specs(
         report.get("suites").context("discovery suites missing")?,
         &[],
-        &mut discovered,
+        &mut |names, spec| {
+            let identity = playwright_spec_identity(repo, root, names, spec)?;
+            let location = (
+                identity.path,
+                spec["line"].as_u64().context("discovery spec line")? as usize,
+                spec["column"].as_u64().context("discovery spec column")? as usize,
+            );
+            let tests = spec["tests"].as_array().context("discovery spec tests")?;
+            if tests.is_empty() {
+                bail!("discovery spec has no projects");
+            }
+            for test in tests {
+                let project = test.get("projectId").or_else(|| test.get("projectName"))
+                    .and_then(Value::as_str).context("discovery project missing")?;
+                if !discovered.entry(location.clone()).or_default().entry(project.to_string())
+                    .or_default().insert(identity.name.clone())
+                {
+                    bail!("ambiguous duplicate discovered identity at {}:{}:{}", location.0, location.1, location.2);
+                }
+            }
+            Ok(())
+        },
     )?;
     let mut declared = BTreeMap::new();
     for site in sites {
@@ -2463,6 +2423,44 @@ fn validate_declared_discovery(
         }
     }
     Ok(())
+}
+
+fn failed_javascript_tests(runner: &str, repo: &Path, report: &Value) -> BTreeSet<Identity> {
+    fn rows(value: &Value) -> impl Iterator<Item = &Value> { value.as_array().into_iter().flatten() }
+    fn node_direct(failure: &Value) -> bool {
+        matches!(failure.as_str(), Some("testCodeFailure" | "testTimeoutFailure" | "uncaughtException" | "unhandledRejection"))
+    }
+    let mut failed = BTreeSet::new();
+    if runner == "playwright" {
+        if report["errors"].as_array().is_none_or(|errors| !errors.is_empty()) { return failed; }
+        let root = playwright_report_root(repo, report);
+        if walk_playwright_specs(&report["suites"], &[], &mut |names, spec| {
+            if rows(&spec["tests"]).any(|test| test["expectedStatus"] == "passed"
+                && rows(&test["results"]).any(|result| matches!(result["status"].as_str(), Some("failed" | "timedOut"))))
+            {
+                failed.insert(playwright_spec_identity(repo, root, names, spec)?);
+            }
+            Ok(())
+        }).is_err() {
+            return BTreeSet::new();
+        }
+    } else {
+        for file in rows(&report["testResults"]) {
+            let Some(raw) = file["name"].as_str() else { continue; };
+            let Ok(path) = report_path(repo, raw) else { continue; };
+            for test in rows(&file["assertionResults"]) {
+                if test["status"] == "failed"
+                    && let Some(name) = test["fullName"].as_str()
+                    && (runner != "node" || (name != raw && name != path
+                        && (node_direct(&test["failureType"]) || (test["failureType"] == "subtestsFailed"
+                            && rows(&test["subtestFailures"]).any(node_direct)))))
+                {
+                    failed.insert(Identity::exact(path.clone(), name));
+                }
+            }
+        }
+    }
+    failed
 }
 
 fn run_scoped_javascript(command: Command, high: u64, marker: &Path) -> Result<bool> {
@@ -2505,10 +2503,12 @@ fn playwright_listing(
         .env("PLAYWRIGHT_JSON_OUTPUT_FILE", &report);
     if !run_scoped_javascript(command, high, &scratch.join("listing-scope")).ok()? { return None; }
     let listed: Value = serde_json::from_slice(&std::fs::read(&report).ok()?).ok()?;
-    let root = listed.get("config").and_then(|config| config.get("rootDir")).and_then(Value::as_str)
-        .map(Path::new).unwrap_or(repo);
+    let root = playwright_report_root(repo, &listed);
     let mut tests = BTreeSet::new();
-    listed_tests(repo, root, listed.get("suites").unwrap_or(&Value::Null), &[], &mut tests);
+    walk_playwright_specs(&listed["suites"], &[], &mut |names, spec| {
+        tests.insert(playwright_spec_identity(repo, root, names, spec)?);
+        Ok(())
+    }).ok()?;
     Some(tests).filter(|tests| tests.iter().any(|test| test.path == spec))
 }
 
@@ -2530,26 +2530,6 @@ fn listing_owner(
         if directory == repo { break; }
     }
     bail!(ZeroTests::new(format!("no Playwright config lists {spec}")))
-}
-
-/// Test identities in a Playwright JSON report, named as `playwright_results` names them.
-fn listed_tests(repo: &Path, root: &Path, suites: &Value, ancestry: &[String], tests: &mut BTreeSet<Identity>) {
-    for suite in suites.as_array().into_iter().flatten() {
-        let mut names = ancestry.to_vec();
-        if !ancestry.is_empty() || suite.get("column").and_then(Value::as_u64).unwrap_or(0) != 0 {
-            names.extend(suite.get("title").and_then(Value::as_str).map(str::to_string));
-        }
-        for spec in suite.get("specs").and_then(Value::as_array).into_iter().flatten() {
-            if let (Some(file), Some(title)) = (spec.get("file").and_then(Value::as_str), spec.get("title").and_then(Value::as_str))
-                && let Ok(path) = report_path(repo, &root.join(file).to_string_lossy())
-            {
-                let mut full = names.clone();
-                full.push(title.to_string());
-                tests.insert(Identity::exact(path, full.join(" ")));
-            }
-        }
-        listed_tests(repo, root, suite.get("suites").unwrap_or(&Value::Null), &names, tests);
-    }
 }
 
 /// Playwright exits 1 and reports "No tests found" when a selection matches none.
@@ -2637,18 +2617,12 @@ fn validate_report_with_inherited(
     // Runtime rows an environment-gated selected test reported skipped.
     let mut skipped_rows = BTreeSet::new();
     if runner == "playwright" {
-        let root = report
-            .get("config")
-            .and_then(|config| config.get("rootDir"))
-            .and_then(Value::as_str)
-            .map(Path::new)
-            .unwrap_or(repo);
+        let root = playwright_report_root(repo, report);
         let mut projects = BTreeMap::new();
         playwright_results(
             repo,
             root,
             report.get("suites").context("Playwright suites missing")?,
-            &[],
             &mut projects,
             inherited,
         )?;
@@ -2716,6 +2690,9 @@ fn validate_report_with_inherited(
                     .and_then(Value::as_str)
                     .context("test fullName missing")?;
                 let id = Identity::exact(path.clone(), name);
+                let nested = runner == "node" && test.get("parentTests").and_then(Value::as_array).into_iter().flatten()
+                    .filter_map(Value::as_str)
+                    .any(|parent| tests.iter().any(|selected| selected.selects(&Identity::exact(path.clone(), parent))));
                 match test.get("status").and_then(Value::as_str) {
                     Some("passed") => {
                         if test
@@ -2733,7 +2710,7 @@ fn validate_report_with_inherited(
                                 id.name
                             );
                         }
-                        *results.entry(id).or_default() += 1;
+                        if !nested { *results.entry(id).or_default() += 1; }
                     }
                     Some("pending" | "skipped" | "todo" | "disabled")
                         if !tests.iter().any(|test| test.selects(&id)) => {}
@@ -2838,25 +2815,28 @@ fn report_path(repo: &Path, path: &str) -> Result<String> {
     Ok(path.to_string())
 }
 
-fn playwright_results(
-    repo: &Path,
-    root: &Path,
-    suites: &Value,
-    ancestry: &[String],
-    results: &mut BTreeMap<(Identity, String), usize>,
-    inherited: &BTreeSet<(Identity, String)>,
+fn playwright_report_root<'a>(repo: &'a Path, report: &'a Value) -> &'a Path {
+    report.pointer("/config/rootDir").and_then(Value::as_str).map(Path::new).unwrap_or(repo)
+}
+
+fn playwright_spec_identity(repo: &Path, root: &Path, names: &[&str], spec: &Value) -> Result<Identity> {
+    let file = root.join(spec["file"].as_str().context("spec file")?);
+    let title = spec["title"].as_str().context("spec title")?;
+    let path = report_path(repo, file.to_str().context("spec path encoding")?)?;
+    let name = names.iter().copied().chain(std::iter::once(title)).collect::<Vec<_>>().join(" ");
+    Ok(Identity::exact(path, name))
+}
+
+fn walk_playwright_specs<'a>(
+    suites: &'a Value,
+    ancestry: &[&'a str],
+    visit: &mut impl FnMut(&[&str], &Value) -> Result<()>,
 ) -> Result<()> {
     for suite in suites.as_array().context("Playwright suites array")? {
         let mut names = ancestry.to_vec();
         // Root suites are files, not describe titles.
         if !ancestry.is_empty() || suite.get("column").and_then(Value::as_u64).unwrap_or(0) != 0 {
-            names.push(
-                suite
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .context("suite title")?
-                    .to_string(),
-            );
+            names.push(suite["title"].as_str().context("suite title")?);
         }
         for spec in suite
             .get("specs")
@@ -2864,55 +2844,39 @@ fn playwright_results(
             .into_iter()
             .flatten()
         {
-            let mut full = names.clone();
-            full.push(
-                spec.get("title")
-                    .and_then(Value::as_str)
-                    .context("spec title")?
-                    .to_string(),
-            );
-            let file = root.join(
-                spec.get("file")
-                    .and_then(Value::as_str)
-                    .context("spec file")?,
-            );
-            let id = Identity::exact(
-                report_path(repo, file.to_str().context("spec path encoding")?)?,
-                full.join(" "),
-            );
-            for test in spec
-                .get("tests")
-                .and_then(Value::as_array)
-                .context("spec tests")?
-            {
-                let attempts = test
-                    .get("results")
-                    .and_then(Value::as_array)
-                    .context("test results")?;
-                let project = test.get("projectId").or_else(|| test.get("projectName"))
-                    .and_then(Value::as_str).unwrap_or_default();
-                if test.get("expectedStatus").and_then(Value::as_str) != Some("passed")
-                    || attempts.len() != 1
-                    || (attempts[0].get("status").and_then(Value::as_str) != Some("passed")
-                        && !inherited.contains(&(id.clone(), project.to_string())))
-                    || attempts[0]
-                        .get("retry")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0)
-                        != 0
-                {
-                    bail!("playwright stability failed: {} :: {}", id.path, id.name);
-                }
-                *results
-                    .entry((id.clone(), project.to_string()))
-                    .or_default() += 1;
-            }
+            visit(&names, spec)?;
         }
         if let Some(nested) = suite.get("suites") {
-            playwright_results(repo, root, nested, &names, results, inherited)?;
+            walk_playwright_specs(nested, &names, visit)?;
         }
     }
     Ok(())
+}
+
+fn playwright_results(
+    repo: &Path,
+    root: &Path,
+    suites: &Value,
+    results: &mut BTreeMap<(Identity, String), usize>,
+    inherited: &BTreeSet<(Identity, String)>,
+) -> Result<()> {
+    walk_playwright_specs(suites, &[], &mut |names, spec| {
+        let id = playwright_spec_identity(repo, root, names, spec)?;
+        for test in spec["tests"].as_array().context("spec tests")? {
+            let attempts = test["results"].as_array().context("test results")?;
+            let project = test.get("projectId").or_else(|| test.get("projectName"))
+                .and_then(Value::as_str).unwrap_or_default();
+            let row = (id.clone(), project.to_string());
+            if test["expectedStatus"] != "passed" || attempts.len() != 1
+                || (attempts[0]["status"] != "passed" && !inherited.contains(&row))
+                || attempts[0]["retry"].as_u64().unwrap_or(0) != 0
+            {
+                bail!("playwright stability failed: {} :: {}", id.path, id.name);
+            }
+            *results.entry(row).or_default() += 1;
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -2922,6 +2886,14 @@ mod tests {
 
     fn id(path: &str, name: &str) -> Identity {
         Identity::exact(path, name)
+    }
+
+    #[test]
+    fn red_first_playwright_timeout_matches_selected_spec_gh_2422() {
+        let report = serde_json::from_str(include_str!("javascript/playwright-timed-out.txt")).unwrap();
+        let timeout = id("hub-web/e2e/journeys/launch-session.journey.ts",
+            "HUB-J13 read a project's quality trend from the palette");
+        assert_eq!(failed_javascript_tests("playwright", Path::new("/project"), &report), BTreeSet::from([timeout]));
     }
 
     /// cas-a4c3: park demanded five capped passes for hub-web's `node:test`

@@ -4,6 +4,7 @@ use super::*;
 use std::process::Stdio;
 
 const OWNER_KEY: &str = cas_store::AUTOMATIC_PREMERGE_OWNER_KEY;
+const PROOF_DRIFT_CODE: &str = "verifier_dispatch_proof_drift";
 
 pub(super) fn owns(root: &Path, dispatch: &VerificationDispatch) -> bool {
     dispatch.verifier_agent_id.as_deref().is_some_and(|id| {
@@ -14,20 +15,53 @@ pub(super) fn owns(root: &Path, dispatch: &VerificationDispatch) -> bool {
     })
 }
 
-fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Result<String, String> {
+pub(crate) fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Result<String, String> {
     let store = core.open_task_store().map_err(|e| e.to_string())?;
     let parent = store.get_parent_epic(&task.id).map_err(|e| e.to_string())?;
     // No-code close reviews bypass candidate preparation. Resolve committed
     // proof here, on the common launch path, before constructing the verifier
     // command. fetch_task checks task scope, revocation, size and SHA-256 and
     // derives this receiver's project namespace instead of a publisher path.
-    let published = crate::artifacts::proof::list_task_metadata(&core.cas_root, &task.id)
+    let committed = crate::artifacts::proof::committed_task_artifacts(&core.cas_root, &task.id)
         .map_err(|error| error.to_string())?;
+    let recorded = crate::mcp::tools::core::task::lifecycle::report_proof::ReportProof::recorded(&core.cas_root, &dispatch.id)?;
+    let drift = |id: &str| format!(
+        "{PROOF_DRIFT_CODE}: artifact {id} no longer matches the proof recorded on dispatch {}", dispatch.id
+    );
+    let mut reviewed = task.clone();
+    let inventory = match recorded.as_ref() {
+        Some(proof) => {
+            reviewed.external_ref = proof.external_ref.clone();
+            if let Some((id, _)) = proof.artifacts.iter().find(|(id, sha256)| {
+                committed.iter().all(|artifact| &artifact.id != id || &artifact.sha256 != sha256)
+            }) {
+                return Err(drift(id));
+            }
+            proof.artifacts.clone()
+        }
+        None if crate::mcp::tools::core::task::lifecycle::report_proof::is_report(task) => {
+            return Err(format!("{PROOF_DRIFT_CODE}: dispatch {} records no proof of the report it reviews", dispatch.id));
+        }
+        None => committed.into_iter().map(|artifact| (artifact.id, artifact.sha256)).collect(),
+    };
+    let task = &reviewed;
     let mut artifacts = Vec::new();
-    for artifact in published.artifacts.into_iter().filter(|artifact|
-        artifact.status == "committed" && artifact.cloud_artifact_id.is_some()) {
-        let (record, path) = crate::artifacts::proof::fetch_task(&core.cas_root, &task.id, &artifact.id)
-            .map_err(|error| format!("Verifier artifact {} unavailable: {error:#}", artifact.id))?;
+    for (id, sha256) in inventory {
+        let (record, path) = crate::artifacts::proof::fetch_task(&core.cas_root, &task.id, &id)
+            .map_err(|error| {
+                let drifted = error.downcast_ref::<crate::artifacts::ArtifactRevoked>().is_some()
+                    || error.downcast_ref::<crate::artifacts::slack::PostError>().is_some_and(|download| {
+                        matches!(download.code.as_str(), "artifact_checksum_mismatch" | "artifact_size_mismatch")
+                    });
+                if recorded.is_some() && drifted {
+                    drift(&id)
+                } else {
+                    format!("Verifier artifact {id} unavailable: {error:#}")
+                }
+            })?;
+        if recorded.is_some() && (record.id != id || record.sha256 != sha256) {
+            return Err(drift(&id));
+        }
         artifacts.push(serde_json::json!({
             "task_id":record.task_id, "artifact_id":record.id, "path":path, "sha256":record.sha256,
         }));
@@ -277,7 +311,8 @@ pub(super) struct LaunchError {
 /// is the classification; the message text after it is never searched.
 pub(super) fn retry_for_code(message: &str) -> Retry {
     match message.split_once(':').map_or(message, |(code, _)| code).trim() {
-        "verifier_factory_scope"
+        PROOF_DRIFT_CODE
+        | "verifier_factory_scope"
         | "verifier_factory_task_terminal"
         | "verifier_factory_owner"
         | "verifier_factory_unsupported"
@@ -484,7 +519,7 @@ pub(super) fn launch_local(
     })
 }
 
-fn launch_with_preparation(
+pub(crate) fn launch_with_preparation(
     core: &CasCore,
     task: &Task,
     dispatch: &VerificationDispatch,
@@ -549,7 +584,16 @@ fn launch_with_preparation(
         // durable dedupe key; do not emit a second timeout wake here.
         if let Err(error) = result && chrono::Utc::now() < live.deadline_at && !resolved(&worker, &live) {
             let error = crate::mcp::tools::service::agent_search_system::system::redact_known_credentials(&error);
-            match cas_store::release_failed_verifier_dispatch(&worker.cas_root, &live.id, &child.id, &error) {
+            if retry_for_code(&error) == Retry::Never && error.starts_with(PROOF_DRIFT_CODE) {
+                let retired = cas_store::invalidate_verification_dispatch_for_proof_drift(&worker.cas_root, &live.id);
+                let _ = attention(&worker, &live, &match retired {
+                    Ok(_) => format!(
+                        "Automatic verifier stopped: {error}. This dispatch was retired; retry {} to request a new review of the current report.",
+                        retry_call(&worker.cas_root, &live)
+                    ),
+                    Err(retire) => format!("Automatic verifier stopped: {error}. Retiring this dispatch failed: {retire}. Inspect it before retrying."),
+                });
+            } else { match cas_store::release_failed_verifier_dispatch(&worker.cas_root, &live.id, &child.id, &error) {
                 Ok(true) => {
                     let retry = recovery(&worker.cas_root, &live);
                     let _ = attention(&worker, &live, &format!(
@@ -560,7 +604,7 @@ fn launch_with_preparation(
                 Err(recovery) => {
                     let _ = attention(&worker, &live, &format!("Automatic verifier stopped: {error}. Claim recovery failed: {recovery}. Inspect this exact dispatch before retrying."));
                 }
-            }
+            } }
         }
         if let Ok(agents) = worker.open_agent_store() {
             let _ = agents.graceful_shutdown(&child.id);
@@ -733,6 +777,7 @@ fn review(
     // the owner, who would otherwise never see this daemon-recorded verdict.
     // A refusal holds either kind until the supervisor records the verdict.
     if let Some(held) = held
+        && !verdict.structured_content.as_ref().is_some_and(|data| data["repeat_review_held"].as_bool() == Some(true))
         && (refused || candidate_for_dispatch(&core.cas_root, dispatch)?.is_none())
     {
         attention(core, dispatch, &held)?;

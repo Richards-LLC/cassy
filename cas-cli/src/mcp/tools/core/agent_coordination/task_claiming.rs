@@ -16,7 +16,6 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
-
         // Only start consumes a worker-bound takeover. Refuse before claim's
         // auto-assignment/adoption paths can mutate a peer's task.
         if let Some(hold) = crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.task_id) {
@@ -27,6 +26,21 @@ impl CasCore {
         }
 
         let source_admission = self.task_source_admission_for(&task, None).await?;
+
+        if task.is_terminal() {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from("Cannot claim a terminal task (closed or cancelled)"),
+                data: None,
+            });
+        }
+        let agent_id = self.get_agent_id()?;
+        let claim_error = |error| super::super::task::repeat_review::lease_claim_error(error, |error| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to claim task: {error}")),
+            data: None,
+        });
+        agent_store.preview_task_claim(&task.id, &agent_id).map_err(claim_error)?;
 
         // cas-a0d2: adopt an unattributed row into this project. Unlike
         // `start`, claim has no later write of its own, so persist the
@@ -46,20 +60,8 @@ impl CasCore {
         }
         let task = task;
 
-        if task.is_terminal() {
-            return Err(McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from("Cannot claim a terminal task (closed or cancelled)"),
-                data: None,
-            });
-        }
-
         super::super::task::ensure_no_open_blockers(task_store.as_ref(), &req.task_id, "claim")?;
         super::super::task::ensure_no_external_blockers(&self.cas_root, &req.task_id, "claim")?;
-
-        // Get or register the agent - this ensures the agent exists in the database
-        // before we try to claim a task (required due to foreign key constraint)
-        let agent_id = self.get_agent_id()?;
 
         // Check assignee restriction - task MUST be assigned to this agent
         // Exception: supervisors can claim unassigned tasks (auto-assigns to them)
@@ -120,6 +122,7 @@ impl CasCore {
         // Auto-assign to supervisor if task is unassigned (epics or orphaned tasks)
         let mut task = task;
         if task.assignee.is_none() && is_supervisor {
+            super::super::task::repeat_review::require_review(&self.cas_root, &task.id)?;
             task.assignee = Some(agent_name.clone());
             let _ = task_store.update(&task);
         }
@@ -162,6 +165,7 @@ impl CasCore {
                         .unwrap_or(true);
 
                 if can_reclaim {
+                    super::super::task::repeat_review::require_review(&self.cas_root, &task.id)?;
                     // Re-assign orphaned task to supervisor
                     task.assignee = Some(agent_name.clone());
                     task.updated_at = chrono::Utc::now();
@@ -336,11 +340,7 @@ impl CasCore {
         // Keep an old release excluded through local publication and any
         // Cloud handoff or rollback decided by that local arbitration.
         drop(peer_claim_fence);
-        let result = result.map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to claim task: {e}")),
-            data: None,
-        })?;
+        let result = result.map_err(claim_error)?;
         match result {
             ClaimResult::Success(lease) => {
                 // Update task to in_progress if it's open
@@ -1231,6 +1231,10 @@ impl CasCore {
             });
         }
 
+        let repair_review = if !super::super::task::task_assignee_matches_agent(agent_store.as_ref(), task.assignee.as_deref(), &target_agent) {
+            crate::mcp::tools::core::task::repeat_review::require_review(&self.cas_root, &task.id)?
+        } else { None };
+
         // Validate/copy the branch before releasing a lease or changing the
         // assignment. A rejected adoption leaves the old owner working.
         let adoption = if req.adopt_branch.unwrap_or(false) {
@@ -1285,6 +1289,8 @@ impl CasCore {
             format!("[{timestamp}] Handoff from {agent_id} to {}", target_label)
         };
 
+        let review_brief = repair_review.as_deref().map(crate::mcp::tools::core::task::repeat_review::mismatch_brief).unwrap_or_default();
+        let handoff_note = format!("{handoff_note}{review_brief}");
         if task.notes.is_empty() {
             task.notes = handoff_note;
         } else {
@@ -1401,7 +1407,7 @@ impl CasCore {
 
         let forced_transfer = supervisor_override_requested && (prior_lease_holder.is_some() || transferred_without_lease);
         let response = format!(
-            "Transferred task {} from {} to {}\n{}\nNote: {}{}{}",
+            "Transferred task {} from {} to {}\n{}\nNote: {}{}{}{review_brief}",
             req.task_id,
             previous_holder,
             target_label,

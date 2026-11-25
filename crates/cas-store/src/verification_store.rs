@@ -227,7 +227,8 @@ CREATE TABLE IF NOT EXISTS verification_dispatches (
     requested_at TEXT NOT NULL,
     deadline_at TEXT NOT NULL,
     resolved_at TEXT,
-    recovery_action TEXT NOT NULL DEFAULT 'supervisor_redispatch_or_direct'
+    recovery_action TEXT NOT NULL DEFAULT 'supervisor_redispatch_or_direct',
+    reviewed_proof TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_verifications_task ON verifications(task_id);
@@ -253,6 +254,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_verification_dispatches_active_task
 /// the exact same DDL.
 pub const VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT: &str =
     "ALTER TABLE verification_dispatches ADD COLUMN repository_proof TEXT";
+
+pub const VERIFICATION_DISPATCH_REVIEWED_PROOF_STATEMENT: &str =
+    "ALTER TABLE verification_dispatches ADD COLUMN reviewed_proof TEXT";
 
 const VERIFIER_CAPABILITY_TTL_MINUTES: i64 = 30;
 const SERVER_HANDOFF_ID_PREFIX: &str = "vhnd-";
@@ -317,6 +321,23 @@ pub struct SqliteVerificationStore {
 }
 
 impl SqliteVerificationStore {
+    pub fn latest_repeated_rejection(&self, task_id: &str) -> Result<Option<(String, DateTime<Utc>, u64)>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        latest_repeated_rejection_with_conn(&conn, task_id)
+    }
+
+    pub fn tasks_with_repeated_rejections(&self, now: DateTime<Utc>) -> Result<Vec<String>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut query = conn.prepare_cached(
+            "SELECT verifications.task_id FROM verifications JOIN tasks ON tasks.id = verifications.task_id
+             WHERE verifications.status = 'rejected' AND verifications.created_at <= ?1
+               AND tasks.status NOT IN ('closed', 'cancelled')
+             GROUP BY verifications.task_id HAVING COUNT(*) >= 2",
+        )?;
+        let rows = query.query_map(params![now.to_rfc3339()], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Open or create a SQLite verification store
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
@@ -370,7 +391,6 @@ impl SqliteVerificationStore {
     }
 
     fn load_issues(
-        &self,
         conn: &Connection,
         verification_id: &str,
     ) -> Result<Vec<VerificationIssue>> {
@@ -509,6 +529,13 @@ pub fn get_verification_for_dispatch(
 ) -> Result<Option<Verification>> {
     let store = SqliteVerificationStore::open(cas_dir)?;
     let conn = crate::shared_db::lock_connection(&store.conn)?;
+    get_verification_for_dispatch_with_conn(&conn, dispatch_id)
+}
+
+pub fn get_verification_for_dispatch_with_conn(
+    conn: &Connection,
+    dispatch_id: &str,
+) -> Result<Option<Verification>> {
     let verification = conn
         .query_row(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
@@ -523,7 +550,7 @@ pub fn get_verification_for_dispatch(
         .map_err(StoreError::Database)?;
     match verification {
         Some(mut verification) => {
-            verification.issues = store.load_issues(&conn, &verification.id)?;
+            verification.issues = SqliteVerificationStore::load_issues(conn, &verification.id)?;
             Ok(Some(verification))
         }
         None => Ok(None),
@@ -1050,6 +1077,13 @@ pub fn has_active_verification_dispatch(cas_dir: &Path, task_id: &str) -> Result
     ).map_err(StoreError::Database)
 }
 
+pub fn verification_dispatch_reviewed_proof_with_conn(conn: &Connection, dispatch_id: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT reviewed_proof FROM verification_dispatches WHERE id = ?1",
+        params![dispatch_id], |row| row.get(0),
+    ).map_err(StoreError::Database)
+}
+
 pub fn get_verification_dispatch_with_conn(
     conn: &Connection,
     dispatch_id: &str,
@@ -1153,6 +1187,7 @@ pub fn create_verification_dispatch_bound(
         requester_agent_id,
         owner_agent_id,
         boundary,
+        None,
         deadline_at,
         supervisor_recovery,
     )?;
@@ -1175,6 +1210,29 @@ pub fn create_verification_dispatch_bound_with_conn(
     deadline_at: DateTime<Utc>,
     supervisor_recovery: bool,
 ) -> Result<VerificationDispatch> {
+    create_verification_dispatch_reviewing_with_conn(
+        conn,
+        task_id,
+        requester_agent_id,
+        owner_agent_id,
+        boundary,
+        None,
+        deadline_at,
+        supervisor_recovery,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_verification_dispatch_reviewing_with_conn(
+    conn: &Connection,
+    task_id: &str,
+    requester_agent_id: &str,
+    owner_agent_id: &str,
+    boundary: &VerificationProofBoundary,
+    reviewed_proof: Option<&str>,
+    deadline_at: DateTime<Utc>,
+    supervisor_recovery: bool,
+) -> Result<VerificationDispatch> {
     if conn.is_autocommit() {
         let tx = crate::shared_db::begin_immediate_with_retry(conn)?;
         let dispatch = create_verification_dispatch_bound_in_transaction(
@@ -1183,6 +1241,7 @@ pub fn create_verification_dispatch_bound_with_conn(
             requester_agent_id,
             owner_agent_id,
             boundary,
+            reviewed_proof,
             deadline_at,
             supervisor_recovery,
         )?;
@@ -1196,17 +1255,20 @@ pub fn create_verification_dispatch_bound_with_conn(
         requester_agent_id,
         owner_agent_id,
         boundary,
+        reviewed_proof,
         deadline_at,
         supervisor_recovery,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_verification_dispatch_bound_in_transaction(
     conn: &Connection,
     task_id: &str,
     requester_agent_id: &str,
     owner_agent_id: &str,
     boundary: &VerificationProofBoundary,
+    reviewed_proof: Option<&str>,
     deadline_at: DateTime<Utc>,
     supervisor_recovery: bool,
 ) -> Result<VerificationDispatch> {
@@ -1294,8 +1356,8 @@ fn create_verification_dispatch_bound_in_transaction(
         "INSERT INTO verification_dispatches
          (id, task_id, receipt_id, delivery_transaction_id, repository_proof, requester_agent_id,
           owner_agent_id, verifier_agent_id, capability_id, state, requested_at,
-          deadline_at, resolved_at, recovery_action)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, NULL, ?11)",
+          deadline_at, resolved_at, recovery_action, reviewed_proof)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, NULL, ?11, ?12)",
         params![
             dispatch.id,
             dispatch.task_id,
@@ -1313,6 +1375,7 @@ fn create_verification_dispatch_bound_in_transaction(
             dispatch.requested_at.to_rfc3339(),
             dispatch.deadline_at.to_rfc3339(),
             dispatch.recovery_action.to_string(),
+            reviewed_proof,
         ],
     )?;
     Ok(dispatch)
@@ -2040,9 +2103,39 @@ pub fn invalidate_verification_dispatch_for_repository_drift(
             ),
         ));
     }
+    let invalidated = invalidate_drifted_dispatch(&tx, &dispatch)?;
+    tx.commit()?;
+    Ok(invalidated)
+}
+
+pub fn invalidate_verification_dispatch_for_proof_drift(
+    cas_dir: &Path,
+    dispatch_id: &str,
+) -> Result<VerificationDispatch> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
+    let dispatch = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
+    let latest = get_latest_verification_dispatch_with_conn(&tx, &dispatch.task_id)?
+        .ok_or_else(|| StoreError::NotFound("latest verification dispatch".to_string()))?;
+    let recorded: bool = tx.query_row(
+        "SELECT reviewed_proof IS NOT NULL FROM verification_dispatches WHERE id = ?1",
+        params![dispatch_id], |row| row.get(0),
+    )?;
+    let active = matches!(dispatch.state, VerificationDispatchState::Pending | VerificationDispatchState::Claimed);
+    if latest.id != dispatch.id || !(recorded || active) {
+        return Err(StoreError::Parse(format!(
+            "proof drift invalidation requires the latest dispatch, active or with a recorded proof (named {}; latest {})",
+            dispatch.id, latest.id
+        )));
+    }
+    let invalidated = invalidate_drifted_dispatch(&tx, &dispatch)?;
+    tx.commit()?;
+    Ok(invalidated)
+}
+
+fn invalidate_drifted_dispatch(conn: &Connection, dispatch: &VerificationDispatch) -> Result<VerificationDispatch> {
     if dispatch.state == VerificationDispatchState::Invalidated {
-        tx.commit()?;
-        return Ok(dispatch);
+        return Ok(dispatch.clone());
     }
     if !matches!(
         dispatch.state,
@@ -2052,42 +2145,25 @@ pub fn invalidate_verification_dispatch_for_repository_drift(
             | VerificationDispatchState::TimedOut
     ) {
         return Err(StoreError::Parse(
-            "repository proof dispatch cannot be invalidated from its current state".to_string(),
+            "drifted proof dispatch cannot be invalidated from its current state".to_string(),
         ));
     }
-
+    retire_dispatch_claim(conn, dispatch)?;
     let now = Utc::now().to_rfc3339();
-    if let Some(capability_id) = dispatch.capability_id.as_deref() {
-        tx.execute(
-            "UPDATE verification_capabilities SET consumed_at = COALESCE(consumed_at, ?2)
-             WHERE id = ?1",
-            params![capability_id, now],
-        )?;
-        tx.execute(
-            "UPDATE verification_handoffs
-             SET state = 'consumed', consumed_at = COALESCE(consumed_at, ?2)
-             WHERE capability_id = ?1 AND state IN ('pending', 'bound')",
-            params![capability_id, now],
-        )?;
-    }
-    let changed = tx.execute(
+    let changed = conn.execute(
         "UPDATE verification_dispatches
          SET state = 'invalidated', resolved_at = ?2
          WHERE id = ?1 AND state IN ('pending', 'claimed', 'resolved', 'timed_out')",
         params![dispatch.id, now],
     )?;
     if changed != 1 {
-        return Err(StoreError::Parse(
-            "repository proof invalidation raced".to_string(),
-        ));
+        return Err(StoreError::Parse("drifted proof invalidation raced".to_string()));
     }
-    tx.execute(
+    conn.execute(
         "UPDATE tasks SET pending_verification = 0, updated_at = ?2 WHERE id = ?1",
         params![dispatch.task_id, now],
     )?;
-    let invalidated = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
-    tx.commit()?;
-    Ok(invalidated)
+    get_verification_dispatch_with_conn(conn, &dispatch.id)
 }
 
 /// Reopen a closed task and invalidate its reusable proof as one durable mutation.
@@ -2373,7 +2449,12 @@ pub fn carry_forward_approved_verification(cas_dir: &Path, expected: &Task, disp
         "SELECT id,status FROM verifications WHERE task_id=?1 AND dispatch_id=?2 ORDER BY created_at DESC,id DESC LIMIT 1",
         params![expected.id,dispatch_id], |row| Ok((row.get(0)?,row.get(1)?)),
     ).optional()?;
-    if active.id != dispatch_id || !matches!(active.state, VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated)
+    let report_retired: bool = tx.query_row(
+        "SELECT state='invalidated' AND reviewed_proof IS NOT NULL FROM verification_dispatches WHERE id=?1",
+        [dispatch_id], |row| row.get(0),
+    )?;
+    if active.id != dispatch_id || report_retired
+        || !matches!(active.state, VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated)
         || !verdict.is_some_and(|(id,status)| id == verdict_id && status == "approved") {
         return Err(StoreError::Parse("carry does not name the latest approved verdict".into()));
     }
@@ -2775,9 +2856,33 @@ pub fn request_changes_for_parked_delivery_with_merge_sources(
     reason: &str,
     source_commits: &[String],
 ) -> Result<RequestChangesOutcome> {
+    request_changes_for_reviewed_delivery(cas_dir, task_id, supervisor_agent_id, reason, source_commits, None)
+}
+
+pub fn request_changes_for_reviewed_delivery(
+    cas_dir: &Path,
+    task_id: &str,
+    supervisor_agent_id: &str,
+    reason: &str,
+    source_commits: &[String],
+    reviewed_rejection: Option<&str>,
+) -> Result<RequestChangesOutcome> {
     request_changes_for_parked_delivery_impl(
-        cas_dir, task_id, supervisor_agent_id, reason, source_commits, None,
+        cas_dir, task_id, supervisor_agent_id, reason, source_commits, None, None, reviewed_rejection,
     ).map(|outcome| outcome.expect("manual request-changes has no repair budget"))
+}
+
+pub fn request_changes_for_observed_delivery(
+    cas_dir: &Path,
+    task_id: &str,
+    supervisor_agent_id: &str,
+    reason: &str,
+    observed: (&str, &str, &str),
+    reviewed_rejection: Option<&str>,
+) -> Result<RequestChangesOutcome> {
+    request_changes_for_parked_delivery_impl(
+        cas_dir, task_id, supervisor_agent_id, reason, &[], None, Some(observed), reviewed_rejection,
+    ).map(|outcome| outcome.expect("an observed delivery has no automatic repair budget"))
 }
 
 /// Atomically consume one automatic repair with the existing decline transition.
@@ -2791,8 +2896,28 @@ pub fn auto_return_premerge_rejection(
     rejected_anchor: &str,
 ) -> Result<Option<RequestChangesOutcome>> {
     request_changes_for_parked_delivery_impl(
-        cas_dir, task_id, owner_id, reason, &[], Some((dispatch_id, rejected_anchor)),
+        cas_dir, task_id, owner_id, reason, &[], Some((dispatch_id, rejected_anchor)), None, None,
     )
+}
+
+pub const REPEAT_REVIEW_REQUIRED: &str = "repeat_review_admission_required";
+
+pub(crate) fn latest_repeated_rejection_with_conn(conn: &Connection, task_id: &str) -> Result<Option<(String, DateTime<Utc>, u64)>> {
+    let mut query = conn.prepare_cached(
+        "SELECT id, created_at, COUNT(*) OVER () FROM verifications WHERE task_id = ?1 AND status = 'rejected'
+         ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )?;
+    let mut rows = query.query([task_id])?;
+    let Some(latest) = rows.next()? else { return Ok(None) };
+    let id = latest.get(0)?;
+    let created_at: String = latest.get(1)?;
+    let count = u64::try_from(latest.get::<_, i64>(2)?)
+        .map_err(|error| StoreError::Parse(format!("invalid rejection count: {error}")))?;
+    if count < 2 { return Ok(None); }
+    let created_at = DateTime::parse_from_rfc3339(&created_at)
+        .map_err(|error| StoreError::Parse(format!("invalid rejection timestamp: {error}")))?
+        .with_timezone(&Utc);
+    Ok(Some((id, created_at, count)))
 }
 
 fn request_changes_for_parked_delivery_impl(
@@ -2802,6 +2927,8 @@ fn request_changes_for_parked_delivery_impl(
     reason: &str,
     source_commits: &[String],
     automatic_repair: Option<(&str, &str)>,
+    observed: Option<(&str, &str, &str)>,
+    reviewed_rejection: Option<&str>,
 ) -> Result<Option<RequestChangesOutcome>> {
     let reason = reason.trim();
     if reason.is_empty() {
@@ -2909,6 +3036,14 @@ fn request_changes_for_parked_delivery_impl(
             params![dispatch_id], |row| row.get(0),
         )?;
         if !rejected { return Ok(None); }
+    }
+    if latest_repeated_rejection_with_conn(&tx, task_id)?
+        .is_some_and(|(id, _, _)| Some(id.as_str()) != reviewed_rejection)
+    {
+        return Err(StoreError::Parse(REPEAT_REVIEW_REQUIRED.into()));
+    }
+    if let Some((branch, target, anchor)) = observed {
+        crate::delivery_store::clear_pending_observed_delivery_merge_with_conn(&tx, task_id, branch, target, anchor)?;
     }
     // Typed grants come only from the supervisor adapter, never review prose.
     for source in source_commits {
@@ -3078,12 +3213,7 @@ fn request_changes_for_parked_delivery_impl(
             "request_changes task transition raced".to_string(),
         ));
     }
-    let event = Event::new(
-        EventType::TaskNoteAdded,
-        EventEntityType::Task,
-        task_id,
-        note,
-    );
+    let event = Event::new(EventType::TaskNoteAdded, EventEntityType::Task, task_id, note);
     record_event_with_conn(&tx, &event)?;
     tx.commit()?;
     Ok(Some(RequestChangesOutcome {
@@ -3959,6 +4089,12 @@ impl VerificationStore for SqliteVerificationStore {
                 "repository_proof",
                 VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT,
             )?;
+            crate::shared_db::ensure_column(
+                &conn,
+                "verification_dispatches",
+                "reviewed_proof",
+                VERIFICATION_DISPATCH_REVIEWED_PROOF_STATEMENT,
+            )?;
 
             // Serve-first startup can open current store code against a legacy
             // primary/side table before m213 runs. SQLite cannot conditionally
@@ -4043,7 +4179,7 @@ impl VerificationStore for SqliteVerificationStore {
                 _ => StoreError::Database(e),
             })?;
 
-        verification.issues = self.load_issues(&conn, id)?;
+        verification.issues = SqliteVerificationStore::load_issues(&conn, id)?;
 
         Ok(verification)
     }
@@ -4169,7 +4305,7 @@ impl VerificationStore for SqliteVerificationStore {
 
         match verification {
             Some(mut v) => {
-                v.issues = self.load_issues(&conn, &v.id)?;
+                v.issues = SqliteVerificationStore::load_issues(&conn, &v.id)?;
                 Ok(Some(v))
             }
             None => Ok(None),
@@ -4198,7 +4334,7 @@ impl VerificationStore for SqliteVerificationStore {
 
         match verification {
             Some(mut v) => {
-                v.issues = self.load_issues(&conn, &v.id)?;
+                v.issues = SqliteVerificationStore::load_issues(&conn, &v.id)?;
                 Ok(Some(v))
             }
             None => Ok(None),
@@ -4292,7 +4428,12 @@ mod tests {
 
     #[test]
     fn automatic_premerge_repair_is_atomic_and_dispatch_bound_cas_ed08() {
+        use crate::{AgentStore, SqliteAgentStore};
         let dir = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(dir.path()).unwrap();
+        agents.init().unwrap();
+        let owner = Agent::new_with_role("owner".into(), "supervisor".into(), AgentRole::Supervisor);
+        agents.register(&owner).unwrap();
         let tasks = SqliteTaskStore::open(dir.path()).unwrap();
         tasks.init().unwrap();
         let mut task = Task::new("repair".into(), "Repair".into());
@@ -4305,11 +4446,18 @@ mod tests {
             Utc::now() + Duration::minutes(10)).unwrap();
         let mut verdict = Verification::new("rejected".into(), task.id.clone());
         verdict.status = VerificationStatus::Rejected;
-        verdict.provenance = cas_types::VerificationProvenance::System;
+        verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+        verdict.agent_id = Some(owner.id.clone());
+        verdict.issuer_agent_id = Some(owner.id.clone());
         verdict.dispatch_id = Some(dispatch.id.clone());
-        add_system_verification(dir.path(), &verdict).unwrap();
-        let conn = rusqlite::Connection::open(dir.path().join("cas.db")).unwrap();
-        resolve_verification_dispatch_with_conn(&conn, &dispatch.id, "owner", None, true).unwrap();
+        let record = |verdict: &Verification, dispatch: &VerificationDispatch| {
+            let mut connection = rusqlite::Connection::open(dir.path().join("cas.db")).unwrap();
+            let transaction = connection.transaction().unwrap();
+            add_verification_with_conn(&transaction, verdict).unwrap();
+            assert!(resolve_verification_dispatch_with_conn(&transaction, &dispatch.id, &owner.id, None, true).unwrap().is_some());
+            transaction.commit().unwrap();
+        };
+        record(&verdict, &dispatch);
         let grant = |owner: &str, id: &str, anchor: &str| auto_return_premerge_rejection(
             dir.path(), &task.id, owner, "evidence repair", id, anchor).unwrap();
         for (owner, id, anchor) in [("foreign", dispatch.id.as_str(), "a".repeat(40)),
@@ -4343,14 +4491,33 @@ mod tests {
         tasks.update(&returned).unwrap();
         let next = create_verification_dispatch(dir.path(), &task.id, "worker", "owner",
             Utc::now() + Duration::minutes(10)).unwrap();
+        let cas_types::ClaimResult::Success(existing) = agents.try_claim(&task.id, &owner.id, 600, None).unwrap() else {
+            panic!("expected a lease before the second rejection");
+        };
         verdict.id = "next".into();
         verdict.dispatch_id = Some(next.id.clone());
-        add_system_verification(dir.path(), &verdict).unwrap();
-        resolve_verification_dispatch_with_conn(&conn, &next.id, "owner", None, true).unwrap();
+        record(&verdict, &next);
+        assert_eq!(agents.preview_task_claim(&task.id, &owner.id).unwrap(), None);
+        assert!(matches!(agents.try_claim(&task.id, &owner.id, 600, None).unwrap(),
+            cas_types::ClaimResult::AlreadyClaimed { held_by, .. } if held_by == owner.id));
+        assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().epoch, existing.epoch);
+        agents.release_lease(&task.id, &owner.id).unwrap();
+        let history = agents.get_lease_history(&task.id, None).unwrap().len();
+        for refusal in [
+            agents.preview_task_claim(&task.id, &owner.id).unwrap_err(),
+            agents.try_claim(&task.id, &owner.id, 600, None).unwrap_err(),
+        ] {
+            assert!(matches!(refusal, StoreError::RepeatReviewRequired { rejection_id, count: 2, .. }
+                if rejection_id == verdict.id));
+        }
+        assert_eq!(agents.get_lease_history(&task.id, None).unwrap().len(), history);
+        assert!(agents.get_lease(&task.id).unwrap().is_none());
         assert!(grant("owner", &next.id, &"b".repeat(40)).is_none());
         assert_eq!(tasks.get(&task.id).unwrap().deliverables.premerge_repair, Some(receipt));
         // Explicit supervisor request-changes creates a new manual work cycle.
-        request_changes_for_parked_delivery(dir.path(), &task.id, "owner", "new scope").unwrap();
+        let held = request_changes_for_parked_delivery(dir.path(), &task.id, "owner", "new scope").unwrap_err();
+        assert!(matches!(held, StoreError::Parse(reason) if reason == REPEAT_REVIEW_REQUIRED));
+        request_changes_for_reviewed_delivery(dir.path(), &task.id, "owner", "new scope", &[], Some(&verdict.id)).unwrap();
         let current = tasks.get(&task.id).unwrap();
         assert!(current.deliverables.delivery_cycle > current.deliverables.premerge_repair.unwrap().repair_cycle);
     }

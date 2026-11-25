@@ -457,6 +457,7 @@ mod tests {
             mcp_version: None,
             mcp_loaded_at: None,
             installed_version: None,
+            mcp_reload_needed: false,
             harness: None,
             model: None,
             effort: None,

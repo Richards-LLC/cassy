@@ -459,6 +459,36 @@ test_darwin_turns_the_hub_over_through_the_cli() {
   rm -rf "$tmp"
 }
 
+test_darwin_signs_before_hashing() {
+  local tmp out
+  tmp="$(new_fixture)"; out="$tmp/out"
+  cat >"$tmp/new-cas" <<'BIN'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf 'cas 2.52.0 (new0002)\n' ;;
+  --internal-sign-installed) printf '\n: signed\n' >> "$0" ;;
+esac
+BIN
+  if (
+    export HOME="$tmp/home" CAS_INSTALL="$tmp/bin/cas" CAS_SRC="$tmp/source"
+    export CAS_UPDATE_SOURCE_ONLY=1 CAS_UPDATE_TARGET_DIR="$tmp/target"
+    source "$helper"
+    uname() { printf 'Darwin\n'; }
+    cargo() {
+      mkdir -p "$CARGO_TARGET_DIR/release-fast" && cp "$tmp/new-cas" "$CARGO_TARGET_DIR/release-fast/cas"
+    }
+    DO_PULL=0; FORCE_BUILD=1
+    build_and_install && ! cmp -s "$tmp/new-cas" "$CAS_INSTALL" \
+      && [ "$NEW_INSTALLED_HASH" = "$(sha256_file "$CAS_INSTALL")" ]
+  ) >"$out" 2>&1; then
+    pass 'Darwin source install hashes the locally signed bytes'
+  else
+    cat "$out" >&2
+    fail 'Darwin source install hashes the locally signed bytes'
+  fi
+  rm -rf "$tmp"
+}
+
 test_source_resolution() {
   local tmp out checkout_root
   tmp="$(new_fixture)"; out="$tmp/out"
@@ -632,6 +662,7 @@ test_stale_survivor_is_nonzero
 test_no_process_and_flag_semantics
 test_darwin_turnover_is_explicitly_unverified
 test_darwin_turns_the_hub_over_through_the_cli
+test_darwin_signs_before_hashing
 test_source_resolution
 test_native_project_refresh_delegation
 test_turnover_precedes_native_project_refresh

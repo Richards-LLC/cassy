@@ -144,13 +144,11 @@ fn reload_observation(root: &std::path::Path, session: &str, supervisor: &str, b
     let server = registered_cassy_server(root, session, supervisor)?;
     if server.pid == before { return None; }
     let running = server.version.clone()?;
-    let installed = crate::factory_binary_skew::installed_version();
-    // cas-724e: a rebuild at the same version is only loaded once its build hash matches too.
-    let installed_build = crate::factory_binary_skew::installed_build();
-    if installed.as_deref() != Some(running.as_str()) || server.build != installed_build {
+    let installed = crate::factory_binary_skew::installed_identity();
+    if !installed.as_ref().is_some_and(|(version, build)| server.is_installed_build(version, build.as_deref())) {
         let build = |version: &str, build: &Option<String>| build.as_ref().map_or(version.to_owned(), |build| format!("{version} ({build})"));
         return Some((Phase::Unconfirmed, format!("Cassy reconnected but runs {}, not the installed {}. Check which cas is first on PATH, then Reload Cassy again.",
-            build(&running, &server.build), installed.as_deref().map_or("version (unavailable)".to_owned(), |installed| build(installed, &installed_build)))));
+            build(&running, &server.build), installed.as_ref().map_or("version (unavailable)".to_owned(), |(version, hash)| build(version, hash)))));
     }
     let badge = loaded_badge(&server).unwrap_or_else(|| format!("cassy {running}"));
     Some((Phase::Observed, format!("Cassy reloaded: {badge} (PID {}, previous PID {before}).", server.pid)))
@@ -703,15 +701,16 @@ impl FactoryDaemon {
             "Reload Cassy is unavailable for {}. It requires Claude Code or Codex.", format!("{cli:?}").to_lowercase());
         anyhow::ensure!(cli == Claude || confirmed, "{CODEX_RELOAD_CONSEQUENCE} Confirm to continue.");
         let (root, session, supervisor) = (self.app.cas_dir().to_path_buf(), self.session_name.clone(), self.app.supervisor_name().to_owned());
-        let (server, installed, installed_build) = tokio::task::spawn_blocking(move || {
+        let (server, installed) = tokio::task::spawn_blocking(move || {
             if cli == Claude { verify_claude_reload_version(&root, &session, &supervisor)?; }
             Ok::<_, anyhow::Error>((registered_cassy_server(&root, &session, &supervisor),
-                crate::factory_binary_skew::installed_version(), crate::factory_binary_skew::installed_build()))
+                crate::factory_binary_skew::installed_identity()))
         }).await??;
         let server = server.ok_or_else(|| anyhow::anyhow!("Reload Cassy was not sent: the supervisor's live Cassy MCP PID and version are unavailable."))?;
-        // cas-724e: the same version from another build is still a reload target.
-        if installed.is_some() && server.version == installed && server.build == installed_build {
-            let badge = loaded_badge(&server).unwrap_or_else(|| format!("cassy {}", installed.unwrap_or_default()));
+        if let Some((version, build)) = installed
+            && server.is_installed_build(&version, build.as_deref())
+        {
+            let badge = loaded_badge(&server).unwrap_or_else(|| format!("cassy {version}"));
             return self.record_command(owner, Command::ReloadCassy, None, Phase::Observed, format!("Already current: {badge}. Nothing was sent."))
                 .map(ReloadAdmission::Answered);
         }

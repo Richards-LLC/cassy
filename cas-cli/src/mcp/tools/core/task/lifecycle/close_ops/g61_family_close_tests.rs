@@ -136,6 +136,68 @@ fn executable(path: &Path, body: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn g61_gabber_declared_check_and_release_only_journeys() {
+    use crate::factory_worker_check;
+    let mut env = TestEnvGuard::temp_home();
+    let manifest = "apps/dm/emails/package.json";
+    let source = "apps/dm/emails/maizzle.config.ts";
+    let package = fixture(&mut env, &[
+        ("package.json", "{}".into()),
+        ("playwright.config.ts", "export default {};".into()),
+        (manifest, r#"{"scripts":{"check":"test -f maizzle.config.ts"}}"#.into()),
+        (source, "export default {version: 1}".into()),
+    ], &[(source, "export default {version: 2}".into())], &[]);
+    let close = serde_json::json!({"action": "close", "id": ID, "reason": "fixture delivery"});
+    let held = call(&package.worker, close.clone()).await;
+    let check = ["package-check", manifest].map(str::to_owned);
+    let prescribed = held.split(" -- ").skip(1).any(|args| args.starts_with(&format!("package-check {manifest}")));
+    let package_failure = if !crate::gates::codes_in(&held).contains(&"G-61") || !prescribed {
+        Some(held)
+    } else {
+        assert!(factory_worker_check::allowed_args(&check));
+        factory_worker_check::execute_at(&package.cas_dir, &check, &package.worker_path, Path::new("unused-cargo")).unwrap();
+        let parked = call(&package.worker, close.clone()).await;
+        let store = open_task_store(&package.cas_dir).unwrap();
+        let task = store.get(ID).unwrap();
+        assert_eq!(task.status, cas_types::TaskStatus::AwaitingMerge, "{parked}");
+        assert!(task.deliverables.test_receipts.iter().any(|receipt| {
+            receipt.tested_head == package.head && receipt.widened.as_ref().is_some_and(|proof| {
+                proof["runner"] == "package-check" && proof["scope"]["DeclaredCheck"] == manifest
+            })
+        }));
+        None
+    };
+
+    let mut failures = Vec::new();
+    for (id, spec, marker, guard) in [
+        ("publish", "tests/journeys/publish.spec.ts", "staging_only", "if (!process.env.STAGING) throw Error();"),
+        ("checkout", "tests/journeys/checkout.spec.ts", "paid", "if (!process.env.PAYMENT_TOKEN) throw Error();"),
+    ] {
+        let registry = format!("journeys:\n- id: {id}\n  status: live\n  spec: {spec}\n  worker_check: {marker}\n");
+        let test = |extra: &str| format!("import {{ test }} from '@playwright/test';\ntest('complete', () => {{ {guard} {extra} }});\n");
+        let delivery = fixture(&mut env, &[
+            ("package.json", "{}".into()),
+            ("playwright.config.ts", "export default { webServer: { command: 'npm run preview' } };".into()),
+            ("docs/qa/journeys.yaml", registry),
+            (spec, test("")),
+        ], &[(spec, test("void 1;"))], &[]);
+        let parked = call(&delivery.worker, close.clone()).await;
+        let store = open_task_store(&delivery.cas_dir).unwrap();
+        if store.get(ID).unwrap().status != cas_types::TaskStatus::AwaitingMerge {
+            failures.push((id, parked));
+            continue;
+        }
+        assert!(!crate::gates::codes_in(&parked).contains(&"G-61"));
+        let impact = store.get_execution_state(ID).unwrap().unwrap();
+        assert_eq!(impact["qa_impact"]["g61_deferred_journeys"], serde_json::json!([
+            {"id": id, "spec": spec, "reason": marker}
+        ]));
+    }
+    assert!(package_failure.is_none() && failures.is_empty(), "Maizzle: {package_failure:?}; journeys: {failures:?}");
+}
+
 /// GH #2380, #2369, #2355, #2362, #2378, a named JavaScript and a named Rust
 /// selection that run zero tests, an explicit Rust harness, and a locally
 /// served journey, each through `task action=close`.

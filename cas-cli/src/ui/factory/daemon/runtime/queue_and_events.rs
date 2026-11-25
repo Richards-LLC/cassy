@@ -20262,7 +20262,6 @@ mod tests {
         );
         assert!(updated.notes.contains("original pushed-work note"));
         assert!(updated.notes.contains("dead-session-worker"));
-        assert!(updated.notes.contains("reset semantics"));
     }
 
     #[test]

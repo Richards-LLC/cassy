@@ -2579,10 +2579,6 @@ impl GhStub {
     ) -> (ScopedFactoryEnv<'a>, std::path::PathBuf) {
         let gh = dir.join("gh");
         let log = dir.join("gh.log");
-        // `gh pr view 2546` knows PR #2546 (head factory/test-agent); every
-        // other PR lookup fails like an unknown PR. `repo view` follows an
-        // origin rename unless the failure marker is present. Status POSTs
-        // succeed. Every call is logged.
         cas::test_paths::warm_stub(
             &gh,
             r#"#!/bin/sh
@@ -2594,6 +2590,12 @@ if [ "$1" = "repo" ] && [ "$2" = "view" ] && [ "$3" = "acme/gabber" ]; then
 fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "2546" ]; then
   printf '{"headRefName":"factory/test-agent","headRefOid":"%s"}' "$CAS_TEST_GH_HEAD"
+  exit 0
+fi
+if [ "$#" -eq 6 ] && [ "$1" = "api" ] && [ "$2" = "graphql" ] && [ "$3" = "-f" ] &&
+   [ "$4" = 'query=query($id0: ID!) { n0: node(id: $id0) { ...pr } } fragment pr on PullRequest { number url headRefName headRefOid headRepository { name } headRepositoryOwner { login } }' ] &&
+   [ "$5" = "-f" ] && [ "$6" = "id0=PR_kw" ]; then
+  printf '{"data":{"n0":{"number":2546,"url":"https://github.com/acme/gabber/pull/2546","headRefName":"factory/test-agent","headRefOid":"%s","headRepository":{"name":"gabber"},"headRepositoryOwner":{"login":"acme"}}}}' "$CAS_TEST_GH_HEAD"
   exit 0
 fi
 if [ "$1" = "api" ] && [ "$2" = "--method" ] && [ "$3" = "POST" ]; then
@@ -2709,6 +2711,7 @@ async fn raw_github_merges_with_status_lookup(lookup_fails: bool) {
         "gh pr merge 2546 --squash --delete-branch",
         "gh pr merge https://github.com/acme/gabber/pull/2546 --merge",
         "gh api -X PUT repos/acme/gabber/pulls/2546/merge -f merge_method=squash",
+        "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_kw\"}) { clientMutationId } }'",
         // Named by branch, or the checked-out branch's PR (auto-merge too).
         "gh pr merge factory/test-agent --rebase",
         "gh pr merge --auto --squash",
@@ -2728,9 +2731,7 @@ async fn raw_github_merges_with_status_lookup(lookup_fails: bool) {
         );
     }
 
-    // A GraphQL merge by node id is refused while a round is open, naming
-    // the open rounds, rather than waved through.
-    let command = "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_kw\"}) { clientMutationId } }'";
+    let command = "gh api graphql -f query='mutation($id: ID! = \"PR_kw\") { mergePullRequest(input: {pullRequestId: $id}) { clientMutationId } }'";
     let refusal = cas::qa_pass::github_merge_refusal(&cas_dir, &repo, command)
         .unwrap_or_else(|| panic!("unmapped merge allowed: {command}"));
     assert!(

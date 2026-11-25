@@ -13829,6 +13829,12 @@ printf '}'
         let graphql_variables = concat!("gh api graphql -f query='mutation($pr: ID!) { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }' -F pr=PR_fixture");
         let graphql_input = concat!("gh api graphql -f query='mutation($input: MergePullRequestInput!) { mergePull", "Request(input: $input) { clientMutationId } }' -F 'input[pullRequestId]=PR_fixture'");
         let graphql_json = concat!("gh api graphql --input - <<< '{\"query\":\"mutation($input: MergePullRequestInput!) { mergePull", "Request(input: $input) { clientMutationId } }\",\"variables\":{\"input\":{\"pullRequestId\":\"PR_fixture\"}}}'");
+        let graphql_default = concat!("gh api graphql -f query='mutation($pr: ID! = \"PR_fixture\") { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }'");
+        let graphql_object_default = concat!("gh api graphql --input - <<< '{\"query\":\"mutation($input: MergePullRequestInput! = {pullRequestId: \\\"PR_fixture\\\"}) { mergePull", "Request(input: $input) { clientMutationId } }\"}'");
+        let graphql_unresolved = concat!("gh api graphql -f query='mutation($pr: ID!) { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }'");
+        let opaque_body = repo.path().join("opaque-merge.json");
+        std::fs::write(&opaque_body, graphql_json.split('\'').nth(1).unwrap()).unwrap();
+        let graphql_opaque = format!("gh api graphql --input {}", shell_words::quote(opaque_body.to_str().unwrap()));
         let graphql_multi = concat!("/fixture-only/gh api graphql -f query='mutation { a: mergePull", "Request(input: {pullRequestId: \"PR_other\"}) { clientMutationId } b: mergePull", "Request(input: {pullRequestId: \"PR_missing\"}) { clientMutationId } c: mergePull", "Request(input: {pullRequestId: \"PR_fixture\"}) { clientMutationId } }'");
         let graphql_wrapped = format!("bash -c {}", shell_words::quote(&graphql.replace("gh api", "/fixture-only/gh api")));
         let graphql_enqueue = concat!("/fixture-only/gh api graphql -f query='mutation { enqueuePull", "Request(input: {pullRequestId: \"PR_fixture\"}) { clientMutationId } }'");
@@ -13846,6 +13852,20 @@ printf '}'
         authorize(&first);
         run("worker", &command, Some("PR_VERIFIER_REJECTED"));
         run("worker", graphql, Some("PR_VERIFIER_REJECTED"));
+        let defaulted = probe("worker", graphql_default);
+        let object_defaulted = probe("worker", graphql_object_default);
+        let supplied = probe("worker", &format!("{graphql_default} -F pr=PR_other"));
+        let lookup_failure = |command: &str| {
+            let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = logs.clone();
+            let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+                .with_max_level(tracing::Level::WARN).with_writer(move || Capture(sink.clone())).finish();
+            let (denial, reads) = tracing::subscriber::with_default(subscriber, || probe("worker", command));
+            let warnings = String::from_utf8_lossy(&logs.lock().unwrap()).matches("PR_VERIFIER_LOOKUP_FAILED").count();
+            (denial.is_none(), reads, warnings)
+        };
+        let unresolved = lookup_failure(graphql_unresolved);
+        let opaque = lookup_failure(&graphql_opaque);
         let multi_denial = denial_for("worker", graphql_multi);
         let (wrapped_denial, wrapped_reads) = probe("worker", &graphql_wrapped);
         let (enqueue_denial, enqueue_reads) = probe("worker", graphql_enqueue);
@@ -13928,6 +13948,10 @@ printf '}'
         registry.upsert(non_repository.path()).unwrap();
         let broken_discovery_failures = discovery_failures();
 
+        assert_eq!(
+            (rejected(defaulted.0), defaulted.1, rejected(object_defaulted.0), object_defaulted.1, supplied.0.is_none(), supplied.1, unresolved, opaque),
+            (true, 1, true, 1, true, 1, (true, 0, 1), (true, 0, 1)),
+        );
         assert_eq!(
             (rejected(multi_denial), rejected(wrapped_denial), rejected(enqueue_denial), rejected(large_denial), recorded_fork_denial.is_none(), repaired_fork_denial.is_none(), approved_wrapped.is_none(), wrapped_reads, enqueue_reads, approved_wrapped_reads, empty_discovery_failures, broken_discovery_failures),
             (true, true, true, true, true, true, true, 1, 1, 1, 0, 1),

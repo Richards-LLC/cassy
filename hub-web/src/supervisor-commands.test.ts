@@ -282,6 +282,9 @@ describe("supervisor slash commands", () => {
         const refusal = new Error("Studio iPad");
         lease.reject(refusal);
         await vi.waitFor(() => expect(document.querySelector('[role="status"]')?.textContent).toBe(refusal.message));
+        anchor().onclick = () => replacement.show(anchor());
+        anchor().click();
+        expect(anchor().getAttribute("aria-expanded")).toBe("true");
         expect(input.value).toBe("/reload-cassy");
         expect(controller.draft).toBe("/reload-cassy");
         expect(send).not.toHaveBeenCalled();

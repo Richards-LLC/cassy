@@ -4633,6 +4633,12 @@ async fn proxy_machine_socket<R: SessionReadModel>(
 #[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
 enum LeaseRefusal {
     Unauthorized,
+    #[serde(rename = "unauthorized")]
+    UnauthorizedWithReason {
+        reason: &'static str,
+        retryable: bool,
+        server_time: i64,
+    },
     ScopeDenied { required_scope: &'static str, message: String },
     LeaseUnavailable,
 }
@@ -4899,12 +4905,11 @@ fn unauthorized_for(error: &anyhow::Error) -> Response {
     };
     let mut response = (
         StatusCode::UNAUTHORIZED,
-        Json(serde_json::json!({
-            "error": "unauthorized",
-            "reason": refusal.code(),
-            "retryable": refusal.retryable(),
-            "server_time": chrono::Utc::now().timestamp(),
-        })),
+        Json(LeaseRefusal::UnauthorizedWithReason {
+            reason: refusal.code(),
+            retryable: refusal.retryable(),
+            server_time: chrono::Utc::now().timestamp(),
+        }),
     )
         .into_response();
     if let Ok(value) = HeaderValue::from_str(&format!(

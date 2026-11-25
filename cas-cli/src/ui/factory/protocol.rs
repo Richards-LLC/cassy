@@ -23,6 +23,7 @@ pub const COMMANDER_EARLIER_SESSIONS_LIMIT: usize = 30;
 
 /// Independently negotiable daemon protocol features.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ProtocolCapability {
     /// Local framed Unix GUI control only; never advertised by WS/relay.
@@ -711,15 +712,27 @@ pub enum PaneSizeAuthority {
     Viewer,
 }
 
-/// Messages sent from daemon to TUI client
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum DaemonMessage {
-    VerifierLaunched { dispatch_id: String },
-    ReexecResult { receipt: super::daemon::reexec::ReexecReceipt },
-    /// Local-only response. An acknowledgement exists only after both tasks drain.
-    BindingIntake {
-        reply: super::daemon::runtime::violet_intake::IntakeReply,
-    },
+macro_rules! daemon_message {
+    ($(#[$welcome_attr:meta])* Welcome { $($fields:tt)* }, $($other:tt)*) => {
+        #[doc = "Messages sent from daemon to TUI client"]
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        pub enum DaemonMessage {
+            $(#[$welcome_attr])*
+            Welcome { $($fields)* },
+            $($other)*
+        }
+
+        #[cfg(test)]
+        #[allow(dead_code)]
+        #[derive(schemars::JsonSchema)]
+        #[schemars(deny_unknown_fields)]
+        pub(crate) enum DaemonWelcome {
+            Welcome { $($fields)* },
+        }
+    };
+}
+
+daemon_message! {
     /// Welcome message on attach with current state
     Welcome {
         /// Session name
@@ -740,6 +753,12 @@ pub enum DaemonMessage {
         pane_bootstrap: Vec<PaneBootstrap>,
     },
 
+    VerifierLaunched { dispatch_id: String },
+    ReexecResult { receipt: super::daemon::reexec::ReexecReceipt },
+    /// Local-only response. An acknowledgement exists only after both tasks drain.
+    BindingIntake {
+        reply: super::daemon::runtime::violet_intake::IntakeReply,
+    },
     SupervisorCommandReceipt { receipt: SupervisorCommandReceipt },
 
     /// A supervisor reply addressed to one authenticated Commander device.
@@ -980,6 +999,7 @@ pub struct SessionCardSummary {
 
 /// Snapshot of session state
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
 pub struct SessionState {
     /// Currently focused pane ID
     pub focused_pane: Option<String>,
@@ -996,6 +1016,7 @@ pub struct SessionState {
 
 /// Information about a single pane
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
 pub struct PaneInfo {
     /// Pane ID (also the name)
     pub id: String,
@@ -1017,6 +1038,7 @@ pub struct PaneInfo {
 
 /// Per-pane attach metadata. This deliberately contains no terminal content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(deny_unknown_fields))]
 pub struct PaneBootstrap {
     pub pane_id: String,
     pub epoch: u64,
@@ -1028,6 +1050,7 @@ pub struct PaneBootstrap {
 
 /// Kind of pane (matches cas_mux::PaneKind)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub enum PaneKind {
     /// Worker agent pane
     Worker,

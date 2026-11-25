@@ -13823,6 +13823,8 @@ printf '}'
         let graphql_keyword_variable = graphql_default.replace("$pr", "$mutation");
         let graphql_named = concat!("gh api graphql -f query='mutation mergePull", "Request($pr: ID! = \"PR_other\") { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }'");
         let graphql_object_default = concat!("gh api graphql --input - <<< '{\"query\":\"mutation($input: MergePullRequestInput! = {pullRequestId: \\\"PR_fixture\\\"}) { mergePull", "Request(input: $input) { clientMutationId } }\"}'");
+        let graphql_fragment_default = concat!("gh api graphql -f query='fragment Result on MergePullRequestPayload { clientMutationId } mutation($pr: ID = \"PR_fixture\") { mergePull", "Request(input: {pullRequestId: $pr}) { ...Result } }'");
+        let graphql_block_id = concat!("gh api graphql -f query='mutation { enqueuePull", "Request(input: {pullRequestId: \"\"\"PR_fixture\"\"\"}) { clientMutationId } }'");
         let graphql_unresolved = concat!("gh api graphql -f query='mutation($pr: ID!) { mergePull", "Request(input: {pullRequestId: $pr}) { clientMutationId } }'");
         let opaque_body = repo.path().join("opaque-merge.json");
         std::fs::write(&opaque_body, graphql_json.split('\'').nth(1).unwrap()).unwrap();
@@ -13840,6 +13842,10 @@ printf '}'
         run("supervisor", api, Some("PR_VERIFIER_PENDING"));
         verdict(&first, VerificationStatus::Rejected);
         let keyword_variable = probe("worker", &graphql_keyword_variable);
+        let unresolved_code = |denial: Option<String>| denial.is_some_and(|text| text.contains("PR_VERIFIER_UNRESOLVED"));
+        let fragment_default = probe("worker", graphql_fragment_default);
+        let block_id = probe("worker", graphql_block_id);
+        assert_eq!((unresolved_code(fragment_default.0), fragment_default.1, unresolved_code(block_id.0), block_id.1), (true, 0, true, 0));
         std::fs::write(&config, "[qa]\nindependent_pass = true\n").unwrap();
         run("supervisor", &command, Some("PR_VERIFIER_REJECTED"));
         let input_denial = denial_for("supervisor", graphql_input);

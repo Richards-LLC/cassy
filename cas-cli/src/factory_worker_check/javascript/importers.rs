@@ -17,7 +17,8 @@ pub(crate) fn related_specs(repo: &Path, path: &str) -> BTreeMap<&'static str, V
     for file in graph.reached(vec![target]) {
         let Some(relative) = file.strip_prefix(repo).ok().and_then(Path::to_str) else { continue };
         let runner = if node.contains(&file) { Some(super::NODE_RUNNER) }
-            else { unit.get(&file).copied().or_else(|| runs_playwright.contains(&file).then_some("playwright")) };
+            else { unit.get(&file).copied().or_else(|| runs_playwright.contains(&file).then_some("playwright"))
+                .or_else(|| super::runner_hint(repo, relative)) };
         if let Some(runner) = runner.filter(|runner| super::test_match(relative, Some(runner))) {
             tests.entry(runner).or_default().push(relative.to_owned());
         }

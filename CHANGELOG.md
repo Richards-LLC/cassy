@@ -7,6 +7,37 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.55.0] - 2026-11-25
+
+### Fixed — Developer Tooling
+
+- **Codex lane test probes each auth scenario once** — Removes a duplicate probe for recipes that share the same capability key.
+
+### Fixed — Violet replies
+
+- **A post Violet has no record of says to resend it** — When a reply's outcome was uncertain and Violet's lookup had no record of the request, Cassy answered `not_posted` with `retryable: false`, so supervisors registered a second reply intent. That `not_posted` (reason `request_not_found`) is now retryable: Violet has no record of this request for this caller, so resend with the same request ID and arguments (GH #1968).
+
+### Fixed — Developer tooling
+
+- **Stable reconcile coverage** — Removed a scheduler-dependent relay test; existing job-runtime tests still cover resubmit coalescing and reexec flushing.
+
+### Fixed — Pre-merge verification
+
+- **A stalled verifier no longer pins its dispatch** — Was: when a verifier's
+  thread stopped inside a host process that was still running, the expired
+  dispatch stayed Claimed and every merge retry was refused with "finish this
+  exact verdict". Now: past the deadline, an owning supervisor's retry releases
+  a Claimed dispatch whose verifier has neither a fresh heartbeat nor an active
+  verifier lane, and starts a replacement on the same dispatch.
+
+### Fixed — Install and Update
+
+- **Keep macOS privacy grants across Cassy updates** — The per-user installer and updater reuse a local signing identity without asking for your login password. If signing fails, Cassy warns and keeps the downloaded binary working.
+
+### Fixed — Commander
+
+- **Reload Cassy catches same-version rebuilds** — Commander offers Reload Cassy when the installed build differs from the supervisor's loaded build, even when both report the same version.
+
 ## [4.54.0] - 2026-11-24
 
 ### Fixed — Factory

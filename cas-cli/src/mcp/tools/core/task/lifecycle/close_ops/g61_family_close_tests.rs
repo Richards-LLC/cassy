@@ -142,13 +142,13 @@ async fn g61_gabber_declared_check_and_release_only_journeys() {
     use crate::factory_worker_check;
     let mut env = TestEnvGuard::temp_home();
     let manifest = "apps/dm/emails/package.json";
-    let source = "apps/dm/emails/maizzle.config.ts";
+    let source = "apps/dm/emails/order.vue";
     let package = fixture(&mut env, &[
         ("package.json", "{}".into()),
         ("playwright.config.ts", "export default {};".into()),
-        (manifest, r#"{"scripts":{"check":"test -f maizzle.config.ts"}}"#.into()),
-        (source, "export default {version: 1}".into()),
-    ], &[(source, "export default {version: 2}".into())], &[]);
+        (manifest, r#"{"scripts":{"check":"test -f order.vue"}}"#.into()),
+        (source, "<template>Draft order</template>".into()),
+    ], &[(source, "<template>Order ready</template>".into())], &[]);
     let close = serde_json::json!({"action": "close", "id": ID, "reason": "fixture delivery"});
     let held = call(&package.worker, close.clone()).await;
     let check = ["package-check", manifest].map(str::to_owned);
@@ -171,18 +171,23 @@ async fn g61_gabber_declared_check_and_release_only_journeys() {
     };
 
     let mut failures = Vec::new();
-    for (id, spec, marker, guard) in [
-        ("publish", "tests/journeys/publish.spec.ts", "staging_only", "if (!process.env.STAGING) throw Error();"),
-        ("checkout", "tests/journeys/checkout.spec.ts", "paid", "if (!process.env.PAYMENT_TOKEN) throw Error();"),
+    for (id, spec, marker, guard, fan_out) in [
+        ("publish", "tests/journeys/publish.spec.ts", "staging_only", "if (!process.env.STAGING) throw Error();", false),
+        ("checkout", "tests/journeys/checkout.spec.ts", "paid", "if (!process.env.PAYMENT_TOKEN) throw Error();", false),
+        ("translation", "tests/journeys/translation.spec.ts", "staging_only", "if (!process.env.STAGING) throw Error();", true),
     ] {
         let registry = format!("journeys:\n- id: {id}\n  status: live\n  spec: {spec}\n  worker_check: {marker}\n");
-        let test = |extra: &str| format!("import {{ test }} from '@playwright/test';\ntest('complete', () => {{ {guard} {extra} }});\n");
+        let data = "tests/journeys/locale.json";
+        let imports = if fan_out { "import messages from './locale.json';\n" } else { "" };
+        let test = |extra: &str| format!("import {{ test }} from '@playwright/test';\n{imports}test('complete', () => {{ {guard} {extra} }});\n");
+        let changed = if fan_out { (data, r#"{"hello":"Hi","bye":"Bye"}"#.into()) } else { (spec, test("void 1;")) };
         let delivery = fixture(&mut env, &[
             ("package.json", "{}".into()),
             ("playwright.config.ts", "export default { webServer: { command: 'npm run preview' } };".into()),
             ("docs/qa/journeys.yaml", registry),
+            (data, r#"{"hello":"Hi"}"#.into()),
             (spec, test("")),
-        ], &[(spec, test("void 1;"))], &[]);
+        ], &[changed], &[]);
         let parked = call(&delivery.worker, close.clone()).await;
         let store = open_task_store(&delivery.cas_dir).unwrap();
         if store.get(ID).unwrap().status != cas_types::TaskStatus::AwaitingMerge {

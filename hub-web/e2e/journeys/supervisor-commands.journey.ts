@@ -222,7 +222,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       });
     });
     test("HUB-J27 reload Claude's Cassy server and read its replacement process", journeyPart, async ({ page, journey }) => {
-      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const, mcp_version: "9.99.1", installed_version: "9.99.2" })) };
+      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const, mcp_version: "9.99.1", installed_version: "9.99.2", mcp_reload_needed: true })) };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
       const mutations = () => hub.frames.filter(frame => frame.kind === "SupervisorCommand");
       const versionOnRow = (version: string | RegExp) => page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true })
@@ -247,6 +247,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         // A phone now shows the conversation; the list row behind it keeps the old version.
         await expect(versionOnRow("9.99.1")).toHaveCount(1);
         machine.sessions[0]!.mcp_version = "9.99.2";
+        machine.sessions[0]!.mcp_reload_needed = false;
         (machine.sessions[0] as { mcp_loaded_at?: string }).mcp_loaded_at = "2026-11-23T22:44:00Z";
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
         await expect(toast(page, "Cassy reloaded: PID 2202")).toBeVisible();

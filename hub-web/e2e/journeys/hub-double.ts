@@ -199,15 +199,6 @@ type InstallationRow = { machine: string; device_id: string; credential_id: stri
 const { hash, verifyInstallation } = runtime;
 const fingerprint = (key: JsonWebKey) => hash(JSON.stringify({ crv: key.crv, kty: key.kty, x: key.x, y: key.y }));
 
-function leaseSummary(callerDeviceId: string, controller: { id: string; label: string } | null) {
-  return {
-    controller_device_id: controller?.id ?? null,
-    controller_label: controller?.label ?? null,
-    expires_at: controller ? "2099-01-01T00:00:00Z" : null,
-    held_by_me: controller?.id === callerDeviceId,
-  };
-}
-
 export class HubDouble {
   readonly sends: SentMessage[] = [];
   readonly exchanges: Array<Record<string, unknown>> = [];
@@ -355,6 +346,15 @@ export class HubDouble {
 
   private now(): number { return this.options.time?.now() ?? runtime.now(); }
   private stamp(offset = 0): string { return new Date(this.now() + offset).toISOString(); }
+  private leaseSummary(callerDeviceId: string, controller: { id: string; label: string } | null) {
+    return {
+      controller_device_id: controller?.id ?? null,
+      controller_label: controller?.label ?? null,
+      expires_at: controller ? this.stamp(30_000) : null,
+      held_by_me: controller?.id === callerDeviceId,
+    };
+  }
+
   private delay(callback: () => void, ms: number): void {
     if (this.options.time) this.options.time.delay(callback, ms);
     else setTimeout(callback, ms);
@@ -1219,10 +1219,10 @@ export class HubDouble {
           await gate.wait;
         }
         const currentHolder = this.leaseHolders.get(session);
-        if (currentHolder) return route.fulfill({ json: leaseSummary(callerDeviceId, { id: "other-journey-device", label: currentHolder }) });
+        if (currentHolder) return route.fulfill({ json: this.leaseSummary(callerDeviceId, { id: "other-journey-device", label: currentHolder }) });
       }
       const controller = this.releasedLeases.has(session) ? null : { id: callerDeviceId, label: active?.device_label ?? "Journey browser" };
-      return route.fulfill({ json: leaseSummary(callerDeviceId, controller) });
+      return route.fulfill({ json: this.leaseSummary(callerDeviceId, controller) });
     }
     if (path.endsWith("/status")) {
       const session = decodeURIComponent(path.split("/")[3] ?? "");

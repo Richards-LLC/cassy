@@ -146,7 +146,11 @@ pub(crate) fn mismatch_brief(artifact_id: &str) -> String {
 pub(crate) async fn publish_test_review(root: &Path, task_id: &str, supervisor_id: &str) -> String {
     use rmcp::handler::server::wrapper::Parameters;
 
-    let path = root.parent().unwrap().join("whole-flow-review.md");
+    let config = crate::config::Config::load(root).unwrap();
+    let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let [task_dir, _] = crate::config::factory_task_artifact_dirs(root, &base, task_id);
+    std::fs::create_dir_all(&task_dir).unwrap();
+    let path = task_dir.join("whole-flow-review.md");
     std::fs::write(&path, "| Actor | Operation | Design | Observed |\n| --- | --- | --- | --- |\n| Owner | Abort | Allowed | Unreachable |\n\n## Mismatches\n- Abort is unreachable.\n").unwrap();
     let supervisor = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
     supervisor.set_agent_id_for_testing(supervisor_id.into());

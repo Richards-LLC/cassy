@@ -2279,7 +2279,9 @@ async fn premerge_approval_of_a_no_code_spike_covers_the_artifacts_it_reviewed_g
             "action": "close", "id": id, "reason": "Report accepted",
         })).await;
         let closed = f.task(id).status == TaskStatus::Closed;
-        if closed == (case == "republished") || case == "republished" && !response.contains("G-70") {
+        if closed == (case == "republished")
+            || case == "republished" && (!response.contains("G-70") || response.contains("supervisor_override=true"))
+        {
             wrong.push(format!("{case}: closed={closed}: {response}"));
         }
     }

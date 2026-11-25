@@ -935,6 +935,11 @@ fn published_train_closes_members_independently_cas_734b() {
     assert_eq!(tasks.get("cas-bound-report").unwrap().status, TaskStatus::Closed);
     assert!(matches!(applied.get("cas-revoked-report"), Some(CassyMergeClose::Held(_))), "{:?}", applied.get("cas-revoked-report"));
     assert_eq!(tasks.get("cas-revoked-report").unwrap().status, TaskStatus::AwaitingMerge);
+    assert!(matches!(applied.get("cas-revised-report"), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
+    assert_eq!(
+        cas_store::get_verification_dispatch(&root, &reviews["cas-revised-report"]).unwrap().state,
+        cas_types::VerificationDispatchState::Invalidated,
+    );
 }
 
 /// cas-692a7: cas-23a6 shipped in a release holding an approved, receipt-less

@@ -2704,7 +2704,12 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
             if !notices.iter().any(|row| row.prompt.contains("verifier_dispatch_report_proof_missing:")) {
                 wrong.push(format!("{case}: missing recovery code in {} notice(s)", notices.len()));
             }
-            assert!(cas_store::get_verification_for_dispatch(&f.cas_dir(), &unrecorded.as_ref().unwrap().id).unwrap().is_none());
+            let legacy_id = &unrecorded.as_ref().unwrap().id;
+            assert_eq!(
+                cas_store::get_verification_dispatch(&f.cas_dir(), legacy_id).unwrap().state,
+                cas_types::VerificationDispatchState::Invalidated,
+            );
+            assert!(cas_store::get_verification_for_dispatch(&f.cas_dir(), legacy_id).unwrap().is_none());
         }
         let request = serde_json::json!({"action": "close", "id": id, "reason": "Report published"});
         let pending = call(&f.worker, request.clone()).await;

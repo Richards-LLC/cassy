@@ -312,9 +312,7 @@ pub(super) struct LaunchError {
 /// is the classification; the message text after it is never searched.
 pub(super) fn retry_for_code(message: &str) -> Retry {
     match refusal_code(message) {
-        PROOF_DRIFT_CODE
-        | REPORT_PROOF_MISSING_CODE
-        | "verifier_factory_scope"
+        "verifier_factory_scope"
         | "verifier_factory_task_terminal"
         | "verifier_factory_owner"
         | "verifier_factory_unsupported"
@@ -593,16 +591,16 @@ pub(crate) fn launch_with_preparation(
             let code = refusal_code(&error);
             if matches!(code, PROOF_DRIFT_CODE | REPORT_PROOF_MISSING_CODE) {
                 let retired = cas_store::invalidate_verification_dispatch_for_proof_drift(&worker.cas_root, &live.id);
-                let retry = retry_call(&worker.cas_root, &live);
-                let recovery = if code == REPORT_PROOF_MISSING_CODE {
-                    format!("Reconnect or restart the Cassy MCP session that requested the review so it uses the installed binary, then retry {retry}.")
-                } else {
-                    format!("Retry {retry} to request a new review of the current report.")
-                };
                 let detail = match retired {
-                    Ok(_) => format!(
-                        "Automatic verifier stopped: {error}. This dispatch was retired. {recovery}"
-                    ),
+                    Ok(_) => {
+                        let retry = retry_call(&worker.cas_root, &live);
+                        let recovery = if code == REPORT_PROOF_MISSING_CODE {
+                            format!("Reconnect or restart the Cassy MCP session that requested the review so it uses the installed binary, then retry {retry}.")
+                        } else {
+                            format!("Retry {retry} to request a new review of the current report.")
+                        };
+                        format!("Automatic verifier stopped: {error}. This dispatch was retired. {recovery}")
+                    }
                     Err(retire) => format!("Automatic verifier stopped: {error}. Retiring this dispatch failed: {retire}. Inspect it before retrying."),
                 };
                 if let Err(notice) = attention(&worker, &live, &detail) {

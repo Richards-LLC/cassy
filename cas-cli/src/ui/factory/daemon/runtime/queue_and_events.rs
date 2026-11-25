@@ -16267,6 +16267,10 @@ mod tests {
     /// that brief, so the worker has it before it can start the task.
     #[tokio::test]
     async fn ct2_p3_spawn_message_carries_the_supervisor_brief() {
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+            LIFECYCLE_SOURCE_PREFIX, VERIFICATION_DISPATCH_SOURCE_PREFIX,
+            emit_verification_dispatch_handoff,
+        };
         use super::super::lifecycle::worker_attention_tests::record_bound_rejection;
 
         let _env = crate::test_support::TestEnvGuard::temp_home();
@@ -16355,8 +16359,10 @@ mod tests {
         assert_eq!(cursor.dispatch_review_artifact.as_deref(), Some(review.as_str()));
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 1, "startup, registration and head selection must reuse the assignment");
-        let row = &rows[0];
+        let worker_rows = rows.iter().filter(|row| row.target == worker.name).collect::<Vec<_>>();
+        assert_eq!(worker_rows.len(), 1, "worker assignment must be reused: {rows:?}");
+        assert!(rows.iter().any(|row| row.target == "supervisor" && row.source.starts_with(LIFECYCLE_SOURCE_PREFIX)), "{rows:?}");
+        let row = worker_rows[0];
         assert_eq!(row.id, assignment_id);
         assert!(row.prompt.contains(&review), "{}", row.prompt);
         assert!(crate::prompt_revalidation::assignment_stale_task(
@@ -16366,7 +16372,8 @@ mod tests {
         queue.mark_transport_delivered(row.id).unwrap();
         let repair_brief = crate::mcp::tools::core::task::repeat_review::mismatch_brief(&review);
         crate::task_assignment::enqueue_queued(&cas_dir, &task, cursor.dispatch_revision, true, &repair_brief).unwrap();
-        assert!(queue.peek_all(10).unwrap().is_empty(), "a handed-off startup must not create another turn");
+        assert!(queue.peek_all(10).unwrap().iter().all(|row| row.target != worker.name),
+            "a handed-off startup must not create another worker turn");
         // pin: the header tells the worker the brief must be read before it starts.
         assert!(prompt.contains("read it before you start"), "{prompt}");
         assert!(
@@ -16383,12 +16390,13 @@ mod tests {
         assert!(prompt.contains("Rule references required for rule-177"), "{prompt}");
         // pin: Rule-driven sites: is the machine-readable receipt field name.
         assert!(prompt.contains("Rule-driven sites:"), "{prompt}");
-        crate::mcp::tools::core::task::lifecycle::supervisor_push::emit_verification_dispatch_handoff(
+        emit_verification_dispatch_handoff(
             &cas_dir, queue.as_ref(), "vd-focus", &task.id, "supervisor",
             chrono::Utc::now() + chrono::Duration::minutes(10), &worker.name, None, None, None,
         ).unwrap();
         let handoff = queue.peek_all(10).unwrap().into_iter()
-            .find(|row| row.target == "supervisor").unwrap();
+            .find(|row| row.source == format!("{VERIFICATION_DISPATCH_SOURCE_PREFIX}vd-focus")).unwrap();
+        assert_eq!(handoff.target, "supervisor");
         assert!(handoff.prompt.contains(focus), "{}", handoff.prompt);
         assert_eq!(super::latest_spawn_brief("no brief here"), None);
     }

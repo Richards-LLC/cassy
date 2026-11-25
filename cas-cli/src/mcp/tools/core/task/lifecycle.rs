@@ -2614,7 +2614,7 @@ impl CasCore {
     }
 
     pub(crate) async fn task_start_for_queue(
-        &self, req: TaskStartRequest, principal: crate::worker_task_queue::QueueStartPrincipal,
+        &self, req: TaskStartRequest, principal: crate::worker_task_queue::QueueStartPrincipal<'_>,
     ) -> Result<CallToolResult, McpError> {
         self.start_task_and_relaunch_sandbox(req, Some(principal)).await
     }
@@ -2624,7 +2624,7 @@ impl CasCore {
     /// worker through the recycle path; the relaunch regenerates the profile
     /// for its current tasks and resumes this one.
     async fn start_task_and_relaunch_sandbox(
-        &self, req: TaskStartRequest, principal: Option<crate::worker_task_queue::QueueStartPrincipal>,
+        &self, req: TaskStartRequest, principal: Option<crate::worker_task_queue::QueueStartPrincipal<'_>>,
     ) -> Result<CallToolResult, McpError> {
         let worker = principal.as_ref().map(|principal| principal.agent().clone());
         let task_id = req.id.clone();
@@ -2652,7 +2652,7 @@ impl CasCore {
 
     // gate-audit[force]: bypass G-15 Starts despite an actual peer claim; peer_notes carries the successful tag.
     async fn start_task_with_principal(
-        &self, req: TaskStartRequest, principal: Option<crate::worker_task_queue::QueueStartPrincipal>,
+        &self, req: TaskStartRequest, mut principal: Option<crate::worker_task_queue::QueueStartPrincipal<'_>>,
     ) -> Result<CallToolResult, McpError> {
         let mut queued_start = principal.is_some();
         let agent_id = match principal.as_ref() {
@@ -2700,11 +2700,6 @@ impl CasCore {
                     crate::gates::tag("G-09", "The worker has a reserved queue task; resolve or start that task before starting another")));
             }
         }
-        if queued_start {
-            let worker = worker.as_ref().ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS,
-                crate::gates::tag("G-09", "Queued start requires its registered worker")))?;
-            crate::worker_task_queue::ensure_owned_queue_checkout(&self.cas_root, worker, Some(&req.id))?;
-        }
         let task_store = self.open_task_store()?;
 
         if queue_enabled && let Some(worker) = worker.as_ref() {
@@ -2747,6 +2742,62 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+
+        let resolve_declared_repo = |task: &Task| {
+            task.deliverables.work_target.as_ref()
+                .map(|target| super::repo_context::resolve_repo_context(&self.cas_root, target))
+                .transpose()
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))
+        };
+        let resuming_awaiting_merge = task.status == TaskStatus::AwaitingMerge;
+        let (parked_repo_context, live_conflict) = if resuming_awaiting_merge && !task.deliverables.merge_conflicted {
+            let context = resolve_declared_repo(&task)?;
+            let conflict = context.as_ref().and_then(|context| {
+                let tip = task.deliverables.factory_branch_anchor.as_deref()
+                    .or(task.deliverables.parked_branch.as_deref())?;
+                parked_tip_target_conflicts(&context.repo_root, &context.target_branch, tip)
+            });
+            if conflict.is_none() {
+                // gate[G-05 start]: Clean AwaitingMerge task cannot be restarted by worker
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    close_ops::gate_text::awaiting_merge_start_refusal(
+                        &req.id,
+                        self.supervisor_guidance_prefix().unwrap_or(""),
+                    ),
+                ));
+            }
+            (context, conflict)
+        } else {
+            (None, None)
+        };
+
+        let claim_error = |error| super::repeat_review::lease_claim_error(error, |error| Self::error(
+            ErrorCode::INTERNAL_ERROR,
+            format!("Failed to claim task before start: {error}"),
+        ));
+        let repair_review = if !task.is_terminal() {
+            agents.preview_task_claim(&task.id, &agent_id).map_err(claim_error)?
+        } else {
+            None
+        };
+        let _queue_lock = if queued_start {
+            let worker = worker.as_ref().ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS,
+                crate::gates::tag("G-09", "Queued start requires its registered worker")))?;
+            let artifact_id = repair_review.as_deref();
+            let lock = if task.status != TaskStatus::Open {
+                None
+            } else if let Some(principal) = principal.as_mut() {
+                principal.persist_review(artifact_id)?;
+                None
+            } else {
+                Some(crate::worker_task_queue::checkpoint_reserved_start_review(
+                    &self.cas_root, worker, &req.id, artifact_id,
+                )?)
+            };
+            crate::worker_task_queue::ensure_owned_queue_checkout(&self.cas_root, worker, Some(&req.id))?;
+            lock
+        } else { None };
 
         crate::task_assignment::ensure_review_assignment(
             task.review_dispatch_id.as_deref(),
@@ -2791,17 +2842,10 @@ impl CasCore {
             ));
         }
 
-        let declared_repo_context = task
-            .deliverables
-            .work_target
-            .as_ref()
-            .map(|target| super::repo_context::resolve_repo_context(&self.cas_root, target))
-            .transpose()
-            .map_err(|message| McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(message),
-                data: None,
-            })?;
+        let declared_repo_context = match parked_repo_context {
+            Some(context) => Some(context),
+            None => resolve_declared_repo(&task)?,
+        };
 
         // Artifact-only work does not own the shared repository checkout.
         // Keep branch checks and start boundaries for isolated worker trees.
@@ -2893,23 +2937,7 @@ impl CasCore {
                 crate::gates::tag("G-09", "Queued task needs a declared work target before its branch can be allocated")));
         }
 
-        // cas-a844/cas-5054: a genuinely conflicted parked branch is unfinished
-        // work, so its assigned worker may resume it. A clean AwaitingMerge
-        // task remains worker-complete and must stay parked for the supervisor.
-        let resuming_awaiting_merge = task.status == TaskStatus::AwaitingMerge;
         if resuming_awaiting_merge {
-            // cas-2bdf: only a close retry set the flag, so a merge-queue
-            // conflict dequeue or a moved target left the owner refused until
-            // the supervisor ran request_changes. Measure the parked tip
-            // against the target now; a clean tip still stays parked.
-            let live_conflict = (!task.deliverables.merge_conflicted)
-                .then(|| declared_repo_context.as_ref())
-                .flatten()
-                .and_then(|context| {
-                    let tip = task.deliverables.factory_branch_anchor.as_deref()
-                        .or(task.deliverables.parked_branch.as_deref())?;
-                    parked_tip_target_conflicts(&context.repo_root, &context.target_branch, tip)
-                });
             if let Some((target_ref, paths)) = live_conflict.as_ref() {
                 task.notes = format!(
                     "{}{}[{}] ✅ DECISION parked tip conflicts with {target_ref} in {}; owner resumes for a conflict-only repair (cas-2bdf). Merge the target into the branch rather than rebasing: prior test receipts stay valid when the resolution touches only CHANGELOG.md or generated hub-web/dist files",
@@ -2918,15 +2946,6 @@ impl CasCore {
                     chrono::Utc::now().format("%Y-%m-%d %H:%M"),
                     paths.join(", "),
                 );
-            } else if !task.deliverables.merge_conflicted {
-                // gate[G-05 start]: Clean AwaitingMerge task cannot be restarted by worker
-                return Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    close_ops::gate_text::awaiting_merge_start_refusal(
-                        &req.id,
-                        self.supervisor_guidance_prefix().unwrap_or(""),
-                    ),
-                ));
             }
 
             let now = chrono::Utc::now();
@@ -2997,7 +3016,6 @@ impl CasCore {
             .get(&agent_id)
             .map(|a| a.role == cas_types::AgentRole::Worker)
             .unwrap_or(false);
-
         // Anchors identify prior work; they must not bypass the foreign-commit
         // check when an Open task resumes after review.
         let mut factory_branch_start = None;
@@ -3732,10 +3750,7 @@ impl CasCore {
                 ErrorCode::INVALID_PARAMS,
                 crate::gates::tag("G-16", format!("Cannot start task: local lease refused: {refused:?}")),
             )),
-            Err(error) => return Err(Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to claim task before start: {error}"),
-            )),
+            Err(error) => return Err(claim_error(error)),
         };
         // A delayed synchronous release now sees this lease under the same
         // fence. Never expose the Cloud-first/local-later publication gap.
@@ -4193,6 +4208,7 @@ impl CasCore {
             ));
         }
 
+        let repair_brief = repair_review.as_deref().map(super::repeat_review::mismatch_brief).unwrap_or_default();
         if brief {
             // Keep scope, resume state and recent evidence within 2000 bytes.
             // Complete fields remain available through show/notes full or pages.
@@ -4235,7 +4251,7 @@ impl CasCore {
             let durable_recall = self.related_recall_context(
                 &task_recall_query(&task.title, &task.labels, &task.description), Some(&task.id), false,
             ).unwrap_or_default();
-            let context = format!("{peer_notes}{advisory}{predicted_impact}{durable_recall}{cited_issues}");
+            let context = format!("{peer_notes}{repair_brief}{advisory}{predicted_impact}{durable_recall}{cited_issues}");
             let context = cas_store::task_note_markers::neutralize_new_markers(&context, None);
             let read_saved = || task_store.get(&task.id).map_err(|error| {
                 Self::error(
@@ -4308,7 +4324,7 @@ impl CasCore {
             // Reserve peer ownership warnings before budgeting bulky guidance.
             // Remote assignees and peer holds must stay visible at task start.
             let prefix = format!(
-                "Started task: {} - {}\nDelivery mode: {}{}{}{}",
+                "Started task: {} - {}\nDelivery mode: {}{}{}{}{repair_brief}",
                 task.id,
                 clipping.excerpt(&task.title, 60),
                 task.delivery_mode,
@@ -4343,7 +4359,7 @@ impl CasCore {
         };
 
         Ok(Self::success(format!(
-            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            "Started task: {} - {}\nDelivery mode: {}{}{}{repair_brief}{}{}{}{}{}{}{}{}{}{}{}{}",
             req.id,
             task.title,
             task.delivery_mode,

@@ -777,6 +777,7 @@ fn review(
     // the owner, who would otherwise never see this daemon-recorded verdict.
     // A refusal holds either kind until the supervisor records the verdict.
     if let Some(held) = held
+        && !verdict.structured_content.as_ref().is_some_and(|data| data["repeat_review_held"].as_bool() == Some(true))
         && (refused || candidate_for_dispatch(&core.cas_root, dispatch)?.is_none())
     {
         attention(core, dispatch, &held)?;

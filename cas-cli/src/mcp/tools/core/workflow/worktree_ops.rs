@@ -4098,6 +4098,11 @@ impl CasCore {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_started_task_merge_source(&self, repo: &Path, task: &cas_types::Task, branch: &str) -> Result<bool, McpError> {
+        self.started_task_merge_source(repo, Some(task), branch).map(|source| source.is_some())
+    }
+
     /// An active task can rebind before parking. Its recorded start is the
     /// source authority; a historical worker lane is only an identity alias.
     fn started_task_merge_source(
@@ -4501,22 +4506,29 @@ impl CasCore {
         error: &crate::worktree::WorktreeError,
         worktree: &cas_types::Worktree,
         target_tip: Option<&str>,
-    ) -> String {
+    ) -> Result<String, McpError> {
         use crate::worktree::{GitError, WorktreeError};
         let paths = match error {
             WorktreeError::Git(GitError::MergeConflictPaths(paths)) => paths.clone(),
             WorktreeError::Git(GitError::MergeConflict) => vec!["not reported by Git".into()],
-            _ => return String::new(),
+            _ => return Ok(String::new()),
         };
         let Some(task) = task.filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge)
-        else { return String::new(); };
-        let Some(target_tip) = target_tip else { return String::new(); };
+        else { return Ok(String::new()); };
+        let Some(target_tip) = target_tip else { return Ok(String::new()); };
         let actor = self.get_agent_id().unwrap_or_else(|_| "cassy".into());
         match crate::mcp::tools::core::task::lifecycle::parked_conflicts::return_to_worker(
             &self.cas_root, task, &worktree.parent_branch, target_tip, &paths, &actor,
         ) {
-            Ok(detail) => format!("\n{detail}"),
-            Err(error) => format!("\nCassy could not return task {} to its worker ({error}); run task action=request_changes id={}.", task.id, task.id),
+            Ok(detail) => Ok(format!("\n{detail}")),
+            Err(error) => {
+                if let Some(hold) = error.downcast_ref::<McpError>()
+                    .filter(|hold| crate::mcp::tools::core::task::repeat_review::is_repair_hold(hold))
+                {
+                    return Err(hold.clone());
+                }
+                Ok(format!("\nCassy could not return task {} to its worker ({error}); run task action=request_changes id={}.", task.id, task.id))
+            }
         }
     }
 
@@ -5277,7 +5289,7 @@ impl CasCore {
                 let error = crate::worktree::WorktreeError::Git(crate::worktree::GitError::MergeConflictPaths(paths));
                 let recovery = self.return_conflicted_parked_delivery(
                     scoped_task.as_deref(), &error, &worktree, Some(&target_tip),
-                );
+                )?;
                 let mut error = worktree_merge_mcp_error(
                     error, &worktree.branch, &worktree.parent_branch,
                 );
@@ -6254,7 +6266,7 @@ impl CasCore {
                     }
                     let recovery = self.return_conflicted_parked_delivery(
                         scoped_task.as_deref(), &error, &worktree, attempted_target_tip.as_deref(),
-                    );
+                    )?;
                     let mut error = worktree_merge_mcp_error(
                         error,
                         &worktree.branch,

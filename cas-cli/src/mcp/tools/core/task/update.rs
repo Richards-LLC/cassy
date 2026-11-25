@@ -361,6 +361,11 @@ pub(crate) fn normalize_assignee_update_value(raw: &str) -> Option<String> {
     }
 }
 
+fn assignment_agent<'a>(agents: &'a [cas_types::Agent], assignee: &str) -> Option<(&'a cas_types::Agent, bool)> {
+    agents.iter().find(|agent| agent.name.eq_ignore_ascii_case(assignee)).map(|agent| (agent, true))
+        .or_else(|| agents.iter().find(|agent| agent.id.eq_ignore_ascii_case(assignee)).map(|agent| (agent, false)))
+}
+
 /// True when any caller identity facet matches the stored owner (after trim).
 pub(crate) fn caller_matches_epic_owner(
     owner: &str,
@@ -829,13 +834,7 @@ impl CasCore {
         };
         // Prefer display names, then normalize session IDs just as task mine
         // resolves worker identity. Unknown names remain valid for pre-spawn use.
-        let by_name = agents
-            .iter()
-            .find(|agent| agent.name.eq_ignore_ascii_case(assignee));
-        let worker = by_name.or_else(|| {
-            agents.iter().find(|agent| agent.id.eq_ignore_ascii_case(assignee))
-        });
-        let Some(worker) = worker else {
+        let Some((worker, by_name)) = assignment_agent(&agents, assignee) else {
             warnings.push(format!(
                 "⚠️ No registered factory agent found for assignee \
                  '{assignee}'. Verify the worker name with \
@@ -847,7 +846,7 @@ impl CasCore {
             return Ok(assignee.to_string());
         };
         let worker_name = &worker.name;
-        if by_name.is_none() {
+        if !by_name {
             warnings.push(format!(
                 "⚠️ Assignee '{assignee}' is a session ID. \
                  Normalized to display name '{worker_name}' so \
@@ -1045,6 +1044,23 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        let assignment_changes = req.assignee.as_deref().is_some_and(|raw| {
+                let Some(assignee) = normalize_assignee_update_value(raw) else { return task.assignee.is_some() };
+                if let Some((agents, next)) = self.open_agent_store().ok().and_then(|store| {
+                    let agents = store.list(None).ok()?;
+                    let next = assignment_agent(&agents, &assignee)?.0.clone();
+                    Some((store, next))
+                }) {
+                    return !super::task_assignee_matches_agent(agents.as_ref(), task.assignee.as_deref(), &next);
+                }
+                task.assignee.as_deref() != Some(assignee.as_str())
+            });
+        let status_reentry = req.status.as_deref().and_then(|value| value.parse::<TaskStatus>().ok())
+            .is_some_and(|status| status != task.status && (status == TaskStatus::InProgress
+                || status == TaskStatus::Open && task.assignee.is_some()));
+        let repair_review = if assignment_changes || status_reentry || proof_scope_fix {
+            super::repeat_review::admit_repair(&self.cas_root, &task.id)?
+        } else { super::repeat_review::RepairAdmission::default() };
         let review_dispatch_update = req.review_dispatch_id.as_deref()
             .map(|value| self.normalize_review_dispatch_id(Some(value))).transpose()?;
         self.ensure_review_assignee(
@@ -2277,7 +2293,7 @@ impl CasCore {
 
                     // cas-2f4d: a new assignment is staffing, so a frozen train
                     // refuses it here, on the path MCP and Commander share.
-                    if task.assignee.as_deref() != Some(canonical_assignee.as_str()) {
+                    if assignment_changes {
                         crate::epic_design_review::ensure_staffing_allowed(&self.cas_root, &task.id)
                             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
                     }
@@ -2287,12 +2303,16 @@ impl CasCore {
                     if let Some(prior) = task
                         .assignee
                         .clone()
-                        .filter(|prior| *prior != canonical_assignee)
+                        .filter(|_| assignment_changes)
                     {
                         task.deliverables
                             .record_handoff_branch(&format!("factory/{prior}"));
                     }
                     task.assignee = Some(canonical_assignee);
+                    if repair_review.artifact_id.is_some() {
+                        task.notes.push_str(&repair_review.brief());
+                        changes.push("notes");
+                    }
                     task.deliverables.split_takeover = split_takeover.clone();
                     if let Some(audit) = assignee_override_audit.take() {
                         if !task.notes.is_empty() {

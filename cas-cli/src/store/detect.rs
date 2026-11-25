@@ -671,7 +671,11 @@ pub fn open_entity_store(cas_dir: &Path) -> Result<Arc<dyn EntityStore>> {
 
 /// Open the agent store for multi-agent coordination
 pub fn open_agent_store(cas_dir: &Path) -> Result<Arc<dyn AgentStore>> {
-    let store = SqliteAgentStore::open(cas_dir)?;
+    let root = cas_dir.to_path_buf();
+    let store = SqliteAgentStore::open(cas_dir)?.with_lease_review(move |task_id, rejected_at| {
+        crate::mcp::tools::core::task::repeat_review::verified_review_artifact(&root, task_id, rejected_at)
+            .map_err(|error| cas_store::StoreError::Other(format!("Could not inspect whole-flow review for {task_id}: {error}")))
+    });
     store.init()?;
     Ok(Arc::new(store))
 }

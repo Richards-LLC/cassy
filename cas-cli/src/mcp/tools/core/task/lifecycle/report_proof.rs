@@ -23,7 +23,7 @@ pub(crate) struct ReportApproval {
 pub(crate) enum ReportGate {
     Exempt,
     Bound(Box<ReportApproval>),
-    Held,
+    Held(ReportProof),
     Mint { proof: ReportProof, stale: Option<String> },
 }
 
@@ -34,9 +34,9 @@ impl ReportGate {
 
     pub(crate) fn proof_to_record(&self) -> Option<String> {
         match self {
-            Self::Mint { proof, .. } => serde_json::to_string(proof).ok(),
+            Self::Mint { proof, .. } | Self::Held(proof) => serde_json::to_string(proof).ok(),
             Self::Bound(approval) => serde_json::to_string(&approval.proof).ok(),
-            Self::Exempt | Self::Held => None,
+            Self::Exempt => None,
         }
     }
 
@@ -107,12 +107,6 @@ pub(crate) fn is_report(task: &Task) -> bool {
         && (task.task_type == TaskType::Spike || !task.demo_statement.trim().is_empty())
 }
 
-pub(crate) fn verification_on(config: &crate::config::Config) -> bool {
-    use crate::harness_policy::{supervisor_harness_from_env, verification_policy, worker_harness_from_env};
-    config.verification_enabled()
-        && verification_policy(supervisor_harness_from_env(), worker_harness_from_env()).task_required()
-}
-
 fn connection(root: &Path) -> Result<Connection, String> {
     cas_store::SqliteVerificationStore::open(root).map_err(|error| error.to_string())?;
     let conn = Connection::open(root.join("cas.db")).map_err(|error| error.to_string())?;
@@ -171,7 +165,7 @@ pub(crate) fn read_report_verdict(
         return Ok(ReportGate::Mint { proof, stale });
     }
     if active {
-        return Ok(ReportGate::Held);
+        return Ok(ReportGate::Held(proof));
     }
     if dispatch.state != VerificationDispatchState::Resolved {
         return Ok(ReportGate::Mint { proof, stale: None });

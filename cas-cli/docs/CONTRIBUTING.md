@@ -1549,7 +1549,10 @@ latest dispatch carrying `reviewed_proof` (migration m302) each make it
 covered. The gate returns Bound, carrying the dispatch and verdict it read, only for
 the latest dispatch, resolved, with an Approved non-legacy verdict whose
 recorded proof equals the current one; it holds on an active dispatch with an
-equal proof and asks for a new review otherwise. The gate only reads, so
+equal proof, carrying that proof so a replacement for an expired dispatch
+records it too, and asks for a new review otherwise. It follows the project's
+verification setting whatever the worker harness, and a close replayed on a
+Closed or Cancelled task returns before it. The gate only reads, so
 release preview calls it on a read-only connection (`read_report_verdict`): a
 dispatch whose recorded proof differs, or an active one that recorded none, is
 returned with Mint and retired by close, pre-merge preparation and the release
@@ -1565,8 +1568,8 @@ still bind it and no other writer edited the reference
 (`ReportGate::recheck`); merge admission applies the same check in
 `Approval::validate_for_merge`. The automatic verifier is handed the recorded
 reference and artifacts; a recorded artifact that is revoked, missing from the
-committed list, listed with another digest or downloaded with a checksum
-mismatch, or a report dispatch that recorded no proof, stops the launch with
+committed list, listed or fetched with another digest or downloaded with a
+checksum or size mismatch, or a report dispatch that recorded no proof, stops the launch with
 `verifier_dispatch_proof_drift`, retires the dispatch and names the retry that
 mints a new one, while a fetch error retries the same dispatch. A revocation
 Cloud reports during a fetch is recorded on the receiving machine, so the next

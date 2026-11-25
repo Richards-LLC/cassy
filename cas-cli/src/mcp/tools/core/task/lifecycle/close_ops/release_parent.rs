@@ -158,7 +158,7 @@ impl CasCore {
             None,
             None,
             super::super::report_proof::require_report_verdict(
-                &self.cas_root, super::super::report_proof::verification_on(&self.load_config()), task, task,
+                &self.cas_root, self.load_config().verification_enabled(), task, task,
             )?
                 .retire_stale(&self.cas_root)?
                 .proof_to_record()

@@ -1344,19 +1344,20 @@ impl CasCore {
         let config = self.load_config();
         let fast_lane =
             crate::fast_lane::owns_review(&self.cas_root, task, repo, Some((source, target)));
-        use crate::mcp::tools::core::task::lifecycle::report_proof::{ReportGate, require_report_verdict, verification_on};
+        use crate::mcp::tools::core::task::lifecycle::report_proof::{ReportGate, require_report_verdict};
         let report = if task.task_type == cas_types::TaskType::Epic {
             ReportGate::Exempt
         } else {
-            require_report_verdict(&self.cas_root, verification_on(&config), &current, task)
+            require_report_verdict(&self.cas_root, config.verification_enabled(), &current, task)
                 .and_then(|gate| gate.retire_stale(&self.cas_root))
                 .map_err(|message| fail(crate::gates::tag("G-68", message)))?
         };
         if task.task_type == cas_types::TaskType::Epic
             || (task.depth == cas_types::TaskDepth::Light && !fast_lane && !report.covered())
             || !config.verification_enabled()
-            || !verification_policy(supervisor_harness_from_env(), worker_harness_from_env())
-                .task_required()
+            || (!report.covered()
+                && !verification_policy(supervisor_harness_from_env(), worker_harness_from_env())
+                    .task_required())
         {
             return Ok(None);
         }

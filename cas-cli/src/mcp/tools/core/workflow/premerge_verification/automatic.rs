@@ -29,7 +29,7 @@ pub(crate) fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatc
         "{PROOF_DRIFT_CODE}: artifact {id} no longer matches the proof recorded on dispatch {}", dispatch.id
     );
     let mut reviewed = task.clone();
-    let inventory: Vec<String> = match recorded.as_ref() {
+    let inventory = match recorded.as_ref() {
         Some(proof) => {
             reviewed.external_ref = proof.external_ref.clone();
             if let Some((id, _)) = proof.artifacts.iter().find(|(id, sha256)| {
@@ -37,27 +37,31 @@ pub(crate) fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatc
             }) {
                 return Err(drift(id));
             }
-            proof.artifacts.iter().map(|(id, _)| id.clone()).collect()
+            proof.artifacts.clone()
         }
         None if crate::mcp::tools::core::task::lifecycle::report_proof::is_report(task) => {
             return Err(format!("{PROOF_DRIFT_CODE}: dispatch {} records no proof of the report it reviews", dispatch.id));
         }
-        None => committed.into_iter().map(|artifact| artifact.id).collect(),
+        None => committed.into_iter().map(|artifact| (artifact.id, artifact.sha256)).collect(),
     };
     let task = &reviewed;
     let mut artifacts = Vec::new();
-    for id in inventory {
+    for (id, sha256) in inventory {
         let (record, path) = crate::artifacts::proof::fetch_task(&core.cas_root, &task.id, &id)
             .map_err(|error| {
                 let drifted = error.downcast_ref::<crate::artifacts::ArtifactRevoked>().is_some()
-                    || error.downcast_ref::<crate::artifacts::slack::PostError>()
-                        .is_some_and(|download| download.code == "artifact_checksum_mismatch");
+                    || error.downcast_ref::<crate::artifacts::slack::PostError>().is_some_and(|download| {
+                        matches!(download.code.as_str(), "artifact_checksum_mismatch" | "artifact_size_mismatch")
+                    });
                 if recorded.is_some() && drifted {
                     drift(&id)
                 } else {
                     format!("Verifier artifact {id} unavailable: {error:#}")
                 }
             })?;
+        if recorded.is_some() && (record.id != id || record.sha256 != sha256) {
+            return Err(drift(&id));
+        }
         artifacts.push(serde_json::json!({
             "task_id":record.task_id, "artifact_id":record.id, "path":path, "sha256":record.sha256,
         }));

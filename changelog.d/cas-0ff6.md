@@ -19,7 +19,9 @@
   locally, so that new review leaves the artifact out. The approval is checked
   again at the final write of close, `task update status=closed` and release
   apply and at merge admission, so a report edited, republished or revoked
-  while one of them runs is refused; a release preview changes nothing. An
+  while one of them runs is refused; a release preview changes nothing. The
+  review is required whenever the project has verification on, including on
+  an OpenCode lane. An
   unreadable inventory, dispatch or verdict refuses with G-68. `supervisor_override` and the shipped-timeout
   waiver no longer close a report: a supervisor records a verdict on the
   dispatch instead. Negative-result, evidence-only and decision closes, the

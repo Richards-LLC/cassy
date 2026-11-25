@@ -706,7 +706,7 @@ pub(crate) fn reconcile_members(
     let tasks = read_tasks(root)?;
     let receipts = read_receipts(root, &inventory.scope.project_id)?;
     let review = ReleaseClose::prepare(root, repo, inventory)?;
-    let verification_on = report_proof::verification_on(&crate::config::Config::load(root).unwrap_or_default());
+    let verification_on = crate::config::Config::load(root).unwrap_or_default().verification_enabled();
     let ids: std::collections::BTreeSet<_> = inventory.deliveries.iter().map(|d| d.task_id.clone())
         .chain(inventory.exceptions.iter().map(|e| e.task_id.clone()))
         .chain(inventory.scope.included_task_ids.iter().cloned())

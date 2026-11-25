@@ -2485,9 +2485,9 @@ impl CasCore {
             let closing = new_status == TaskStatus::Closed && task.status != TaskStatus::Closed;
             let verification = self.load_config();
             if closing {
-                use super::lifecycle::report_proof::{ReportGate, require_report_verdict, verification_on};
+                use super::lifecycle::report_proof::{ReportGate, require_report_verdict};
                 closing_report = match require_report_verdict(
-                    &self.cas_root, verification_on(&verification), &stored_task, &task,
+                    &self.cas_root, verification.verification_enabled(), &stored_task, &task,
                 ) {
                     Ok(gate @ (ReportGate::Exempt | ReportGate::Bound(_))) => gate,
                     Ok(_) => return Ok(Self::tool_error(crate::gates::tag("G-68", format!(

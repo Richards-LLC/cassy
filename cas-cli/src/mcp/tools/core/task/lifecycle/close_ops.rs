@@ -8386,6 +8386,7 @@ impl CasCore {
         let policy = verification_policy(supervisor_harness_from_env(), worker_harness_from_env());
         let report_gate = if negative_result_receipt.is_none() && evidence_only_receipt.is_none()
             && task.task_type != TaskType::Gate
+            && !matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled)
         {
             let mut effective = task.clone();
             let _ = prepare_no_code_close_metadata(
@@ -8394,7 +8395,7 @@ impl CasCore {
                 inline_external_ref.as_deref(),
             );
             match super::report_proof::require_report_verdict(
-                &self.cas_root, verification_configured && policy.task_required(), &close_snapshot, &effective,
+                &self.cas_root, verification_configured, &close_snapshot, &effective,
             ).and_then(|gate| gate.retire_stale(&self.cas_root)) {
                 Ok(gate) => gate,
                 Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-68", message))),
@@ -10469,15 +10470,16 @@ impl CasCore {
             .unwrap_or(false)
             && std::env::var("CAS_FACTORY_MODE").is_ok();
         let verification_enabled = verification_configured
-            && if task.task_type == TaskType::Epic {
-                if is_supervisor_from_env() {
-                    policy.epic_required()
+            && (report_covered
+                || if task.task_type == TaskType::Epic {
+                    if is_supervisor_from_env() {
+                        policy.epic_required()
+                    } else {
+                        true
+                    }
                 } else {
-                    true
-                }
-            } else {
-                policy.task_required()
-            };
+                    policy.task_required()
+                });
 
         // Classify before orphan recovery: losing the implementer's session
         // cannot waive an enforcement delivery's own adversarial review.

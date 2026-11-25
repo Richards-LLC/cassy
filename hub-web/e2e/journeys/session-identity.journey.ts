@@ -631,7 +631,7 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
   const machine = atlas();
   const endedSession = (name: string, offset: number) => {
     const at = journeyStamp(offset);
-    return { name, started_at: journeyStamp(offset - 60_000), supervisor: name, project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: false, workers: [], liveness: "stale_metadata" as const, last_activity: "Session ended", last_activity_at: at, ended: { at, reason: "prompt_input_exit", workers_stopped: [], orphans: [] } };
+    return { name, started_at: journeyStamp(offset - 60_000), supervisor: name, project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: false, workers: [], liveness: "stale_metadata" as const, last_activity: "Session ended", last_activity_at: at, ended: { at, reason: "prompt_input_exit", workers_stopped: [], worker_states: [], orphans: [], unverified: [] } };
   };
   machine.sessions = [{ ...machine.sessions[1]!, project: "github.com/acme/studio", project_name: "Studio", harness: "codex", account_email: "operator@example.test", machine_online: true, workers: ["worker-one"], last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000) }, {
     name: "golden-jaguar-44", supervisor: "ready-cobra-72", project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: true, workers: [], liveness: "live", last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000),

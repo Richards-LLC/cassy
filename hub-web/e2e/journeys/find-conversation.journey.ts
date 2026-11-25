@@ -855,7 +855,7 @@ for (const width of [1280, 390]) {
       await expect(composer(page)).toBeFocused();
     });
     machine.sessions[1]!.liveness = "stale_metadata";
-    session.ended = { at: journeyStamp(), reason: "prompt_input_exit", workers_stopped: ["worker-a", "worker-b"], orphans: ["worker-c"], unverified: [] };
+    session.ended = { at: journeyStamp(), reason: "prompt_input_exit", workers_stopped: ["worker-a", "worker-b"], worker_states: ["worker-a: stopped", "worker-b: stopped", "worker-c: still running; tasks retained"], orphans: ["worker-c"], unverified: [] };
     session.liveness = "stale_metadata";
     session.workers = ["worker-c"];
     // cas-c095: the hub's events for a deliberate exit, then a crash elsewhere

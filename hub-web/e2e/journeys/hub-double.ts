@@ -7,6 +7,7 @@
 // src/pairing-relay.ts. Evidence label: "real-bundle, protocol-double".
 import type { Page, Route, WebSocketRoute } from "@playwright/test";
 import { runtime } from "./hub-double-runtime";
+import { assertHubWire } from "./hub-wire";
 export const LATEST_RELEASE_URL = "https://api.github.com/repos/Richards-LLC/cassy/releases/latest";
 
 export const RELAY = "https://petra-stella-cloud.vercel.app";
@@ -22,7 +23,7 @@ export type Session = {
   epic_id?: string | null;
   ws_port?: number | null;
   liveness: "live" | "stale_metadata";
-  ended?: import("../../src/types").SessionEndOutcome & { worker_states?: string[] };
+  ended?: Required<import("../../src/types").SessionEndOutcome> & { worker_states: string[] };
   started_at?: string;
   dismissed?: boolean;
   dormant?: boolean;
@@ -203,6 +204,19 @@ type LeaseHolder = { id: string; label: string; expiresAt: string };
 const { hash, verifyInstallation } = runtime;
 const fingerprint = (key: JsonWebKey) => hash(JSON.stringify({ crv: key.crv, kty: key.kty, x: key.x, y: key.y }));
 
+function fulfillWire(route: Route, schema: Parameters<typeof assertHubWire>[0], response: NonNullable<Parameters<Route["fulfill"]>[0]> & { json: unknown }): Promise<void> {
+  const json = JSON.parse(JSON.stringify(response.json));
+  assertHubWire(schema, json);
+  return route.fulfill({ ...response, json });
+}
+
+function sendSessionFrame(socket: WebSocketRoute, message: Record<string, unknown>): void {
+  const frame = JSON.stringify(message);
+  if ("Welcome" in message) assertHubWire("DaemonWelcome", JSON.parse(frame));
+  if ("SupervisorCommandReceipt" in message) assertHubWire("SupervisorCommandReceipt", JSON.parse(frame).SupervisorCommandReceipt?.receipt);
+  socket.send(frame);
+}
+
 export class HubDouble {
   readonly sends: SentMessage[] = [];
   readonly exchanges: Array<Record<string, unknown>> = [];
@@ -378,36 +392,20 @@ export class HubDouble {
     return [...this.catalogFetches.values()].reduce((sum, count) => sum + count, 0);
   }
 
-  /**
-   * The machine's session list changed (cas-9772): announce it on its event
-   * stream, as the hub does, and resolve once the page has fetched the
-   * catalog again. Commander refetches the catalog on every machine event
-   * (connection.ts consumeEvents) with no deadline; waiting for the 5 s
-   * heartbeat instead, whose fetch aborts after 3 s, is what timed out on a
-   * loaded CI host. A heartbeat fetch that lands first resolves this too.
-   */
   async announceCatalog(machineId: string, change: { added?: string[]; removed?: string[] } = {}): Promise<void> {
     const before = this.catalogFetchCount(machineId);
-    const added = (change.added ?? []).filter(Boolean);
-    for (const session of added) await this.emitMachineEvent(machineId, "session_added", session);
-    const synthetic = (change.removed ?? []).map(session => ({ kind: "pane_removed", session }));
-    if (!added.length && !synthetic.length) synthetic.push({ kind: "session_added", session: "" });
-    for (const event of synthetic) {
-      const data = JSON.stringify({ sequence: 0, revision: 0, ...event, pane_id: null, at: this.stamp() });
-      await this.page.evaluate(
-        ([host, data]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number }).__journeyMachineEvent(host, data),
-        [`${machineId}.test`, data] as const,
-      );
-    }
+    for (const session of change.added ?? []) if (session) await this.emitMachineEvent(machineId, "session_added", session);
+    for (const session of change.removed ?? []) if (session) await this.emitMachineEvent(machineId, "session_removed", session);
     await this.waitFor(() => this.catalogFetchCount(machineId) > before);
   }
 
-  private async emitMachineEvent(machineId: string, kind: "session_added" | "fleet_changed", session: string): Promise<void> {
+  private emitMachineEvent(machineId: string, kind: "session_added" | "session_removed" | "fleet_changed", session: string): Promise<number> {
     const sequence = (this.eventSequences.get(machineId) ?? 0) + 1;
     this.eventSequences.set(machineId, sequence);
     const event = { sequence, revision: 0, kind, session, pane_id: null, at: this.stamp() };
+    assertHubWire("MachineEvent", event);
     const frame = `id: ${sequence}.${event.revision}\nevent: ${kind.replaceAll("_", "")}\ndata: ${JSON.stringify(event)}\n\n`;
-    await this.page.evaluate(
+    return this.page.evaluate(
       ([host, data]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string, framed: boolean) => number }).__journeyMachineEvent(host, data, true),
       [`${machineId}.test`, frame] as const,
     );
@@ -810,7 +808,7 @@ export class HubDouble {
     const ws = this.sockets.get(session);
     if (!ws) throw new Error(`hub double: no socket open for ${session}`);
     if (this.stalledSockets.has(ws)) return;
-    ws.send(JSON.stringify(message));
+    sendSessionFrame(ws, message);
   }
 
   /** Acknowledge the latest send and answer it as the supervisor. */
@@ -1030,10 +1028,10 @@ export class HubDouble {
     const secret = route.request().headers()["authorization"]?.replace(/^DPoP /, "");
     if (secret && this.installationSecrets.has(secret) && !active) {
       this.staleInstallationRefusals.push(path);
-      return route.fulfill({ status: 401, json: { reason: "unknown_credential", retryable: false } });
+      return this.unauthorizedFor(route, "unknown_credential", false);
     }
     if (active && this.expiredInstallationSecrets.has(active.credential) && path !== "/v1/auth/refresh") {
-      return route.fulfill({ status: 401, json: { reason: "expired", retryable: false } });
+      return this.unauthorizedFor(route, "expired", false);
     }
     if (path === "/v1/auth/refresh" && active) {
       this.installationRefreshes++;
@@ -1061,11 +1059,7 @@ export class HubDouble {
       refusal.count -= 1;
       this.refusedProofs.push({ machine: machineId, path, reason: refusal.reason });
       this.observed();
-      return route.fulfill({
-        status: 401,
-        headers: { "www-authenticate": `DPoP error="${refusal.retryable ? "invalid_dpop_proof" : "invalid_token"}", error_description="${refusal.reason}"` },
-        json: { error: "unauthorized", reason: refusal.reason, retryable: refusal.retryable, server_time: Math.floor(this.now() / 1000) },
-      });
+      return this.unauthorizedFor(route, refusal.reason, refusal.retryable);
     }
     if (path === "/v1/usage" && method === "POST") {
       this.usagePosts.push({ machine: machineId, entries: (route.request().postDataJSON() as { entries: HubDouble["usagePosts"][number]["entries"] }).entries });
@@ -1112,7 +1106,7 @@ export class HubDouble {
       const index = sessions.findIndex((candidate) => candidate.name === session);
       if (index < 0) return route.fulfill({ status: 404 });
       sessions.splice(index, 1);
-      return route.fulfill({ json: { session, outcome: "ended" } });
+      return fulfillWire(route, "EndSessionReceipt", { json: { session, outcome: "ended" } });
     }
     if (path === "/v1/sessions") {
       this.tickBooting(machineId);
@@ -1127,7 +1121,7 @@ export class HubDouble {
       }));
       const sessions = catalog.filter(session => !session.ended && session.liveness === "live" && session.ws_port !== null && session.supervisor.trim());
       const stopped_sessions = catalog.filter(session => session.ended || session.liveness === "stale_metadata");
-      await route.fulfill({ json: { schema_version: 1, freshness_threshold_secs: 30, sessions, stopped_sessions } });
+      await fulfillWire(route, "SessionsResponse", { json: { schema_version: 1, freshness_threshold_secs: 30, sessions, stopped_sessions } });
       // Counted once the page has the answer, so a waiter that resumes on it
       // never races the response it is waiting for.
       this.catalogFetches.set(machineId, (this.catalogFetches.get(machineId) ?? 0) + 1);
@@ -1221,10 +1215,13 @@ export class HubDouble {
       const callerDeviceId = active?.device_id ?? "journey-device";
       if (method === "POST") {
         const force = (route.request().postDataJSON() as { force?: boolean } | null)?.force === true;
-        if (force && !(active?.scopes ?? this.scopesFor(machineId)).includes("hub-admin")) {
-          this.leaseTakes.push({ machine: machineId, session, force, status: 401 });
+        const scopes = active?.scopes ?? this.scopesFor(machineId);
+        if (!scopes.includes(force ? "hub-admin" : "pane-input")) {
+          const status = force ? 401 : 403;
+          this.leaseTakes.push({ machine: machineId, session, force, status });
           this.observed();
-          return route.fulfill({ status: 401, json: { error: "unauthorized" } });
+          const json = force ? { error: "unauthorized" } : { error: "scope_denied", required_scope: "pane:input", message: "This device was paired without terminal typing. Pair this device again with pane:input to type in the terminal." };
+          return fulfillWire(route, "LeaseRefusal", { status, json });
         }
         const holder = this.activeLease(session);
         const heldElsewhere = holder && holder.id !== callerDeviceId;
@@ -1237,7 +1234,7 @@ export class HubDouble {
           gate.started();
           await gate.wait;
         }
-        if (status === 409) return route.fulfill({ status, json: { error: "lease_unavailable" } });
+        if (status === 409) return fulfillWire(route, "LeaseRefusal", { status, json: { error: "lease_unavailable" } });
         this.grantLease(session, callerDeviceId, active?.device_label ?? "Journey browser");
       } else if (method === "DELETE") {
         // Match the authenticated hub's idempotent cleanup contract, including
@@ -1252,7 +1249,7 @@ export class HubDouble {
           await gate.wait;
         }
       }
-      return route.fulfill({ json: this.leaseSummary(callerDeviceId, session) });
+      return fulfillWire(route, "LeaseSummary", { json: this.leaseSummary(callerDeviceId, session) });
     }
     if (path.endsWith("/status")) {
       const session = decodeURIComponent(path.split("/")[3] ?? "");
@@ -1397,6 +1394,14 @@ export class HubDouble {
     return route.fulfill({ status: 404, json: { error: "unknown relay path" } });
   }
 
+  private unauthorizedFor(route: Route, reason: string, retryable: boolean): Promise<void> {
+    return fulfillWire(route, "LeaseRefusal", {
+      status: 401,
+      headers: { "www-authenticate": `DPoP error="${retryable ? "invalid_dpop_proof" : "invalid_token"}", error_description="${reason}"` },
+      json: { error: "unauthorized", reason, retryable, server_time: Math.floor(this.now() / 1000) },
+    });
+  }
+
   private socket(ws: WebSocketRoute): void {
     const session = decodeURIComponent(new URL(ws.url()).pathname.split("/")[3] ?? "");
     const machineId = this.machineIdFor(new URL(ws.url()));
@@ -1432,7 +1437,7 @@ export class HubDouble {
       }
       this.handleSessionFrame(machineId, session, ws, message, pages);
     });
-    const welcome = () => ws.send(JSON.stringify(this.welcomeFor(session)));
+    const welcome = () => sendSessionFrame(ws, this.welcomeFor(session));
     this.welcomeWhenReady(session, welcome);
     this.attaches.push(session);
     this.observed();
@@ -1441,7 +1446,13 @@ export class HubDouble {
   private welcomeFor(session: string): Record<string, unknown> {
     return {
       Welcome: {
-        state: { panes: [{ id: "supervisor", kind: "Supervisor", title: session, focused: true, exited: false }], cols: 100, rows: 28 },
+        session_name: session,
+        state: {
+          focused_pane: "supervisor",
+          panes: [{ id: "supervisor", kind: "Supervisor", title: session, focused: true, exited: false, input_bytes_received: 0, input_bytes_written: 0 }],
+          epic_id: null, epic_title: null, cols: 100, rows: 28,
+        },
+        scrollback: null,
         protocol_version: 3,
         capabilities: ["conversation_history", "paged_scrollback", ...(this.options.commands?.includes(session) ? ["supervisor_commands"] : []), ...(this.options.work?.[session] ? ["work_events", ...(this.options.work[session]!.live === false ? [] : ["work_events_live"])] : [])],
         // cas-f285: the pane's rows are paged, not replayed as bytes.
@@ -1489,7 +1500,7 @@ export class HubDouble {
         // The session's frames go to this socket from now on, as the hub's
         // per-session viewer does.
         this.sockets.set(session, channel(session));
-        const welcome = () => ws.send(JSON.stringify({ channel: `pty:${session}`, message: this.welcomeFor(session) }));
+        const welcome = () => sendSessionFrame(channel(session), this.welcomeFor(session));
         this.welcomeWhenReady(session, welcome);
         this.attaches.push(session);
         this.observed();
@@ -1530,7 +1541,7 @@ export class HubDouble {
       const row = this.sessionsFor(machineId).find((candidate) => candidate.name === session);
       if (request.command === "standby" && request.confirmed && row) {
         row.standby = true;
-        ws.send(JSON.stringify({ SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "standby", phase: "observed", detail: "Standby", output: "", interactive: false } } }));
+        sendSessionFrame(ws, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "standby", phase: "observed", detail: "Standby", output: "", interactive: false } } });
       }
     }
     if (message.SendMessage) {

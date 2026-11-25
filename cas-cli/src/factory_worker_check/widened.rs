@@ -364,11 +364,24 @@ pub(super) fn invalidate_runner(cas_root: &Path, repo: &Path, head: &str, scope:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::tools::core::task::lifecycle::close_ops::widened_park_refusals_for_test;
+
+    fn command_args(plan: &str) -> Vec<String> {
+        plan.split_once(" -- ").unwrap().1.split_whitespace().map(String::from).collect()
+    }
+
+    fn has_g61(refusals: &[String]) -> bool {
+        refusals.iter().any(|refusal| crate::gates::codes_in(refusal).contains(&"G-61"))
+    }
 
     #[test]
     fn gh2482_visual_qa_delivery_selects_runnable_node_proof() {
-        let repo = tempfile::tempdir().unwrap();
-        let repo = repo.path().canonicalize().unwrap();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.remove("CAS_SESSION_ID");
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().canonicalize().unwrap().join("worktrees/incident");
+        std::fs::write(root.path().join("config.toml"), "[factory]\nepic_base_branch='not-fetched'\n").unwrap();
         let paths = [
             "Cargo.lock",
             "cas-cli/Cargo.toml",
@@ -417,7 +430,11 @@ mod tests {
         ].concat()).unwrap();
         write("package.json", "{}");
         write("hub-web/package.json", "{}");
-        write("scripts/visual-qa.test.mjs", "import test from 'node:test'; import './visual-qa.mjs'; import '../cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs'; test('capture', () => {});");
+        let specs = ["scripts/visual-qa-enter-transition.test.mjs", "scripts/visual-qa-readiness.test.mjs", "scripts/visual-qa.test.mjs"];
+        for spec in specs {
+            let builtin = if spec == specs[0] { "" } else { "import '../cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs';\n" };
+            write(spec, &format!("import test from 'node:test';\nimport './visual-qa.mjs';\n{builtin}test('capture', () => {{}});\n"));
+        }
         write("hub-web/preview/visual-qa.test.ts", "import { test } from 'vitest'; import '../../scripts/visual-qa.mjs'; test('preview', () => {});");
         git(&["init", "-q", "-b", "main"]);
         git(&["add", "."]);
@@ -436,36 +453,65 @@ mod tests {
         let (tests, scopes) = stability::requirements(&repo, &head, &base, &paths, None).unwrap();
         assert!(tests.is_empty());
         assert_eq!(scopes, [Scope::Related(packaged.into()), Scope::Related(entry.into())]);
-        for helper in [packaged, entry] {
-            assert_eq!(javascript::related_specs(&repo, helper), BTreeMap::from([("node", vec!["scripts/visual-qa.test.mjs".into()])]));
-        }
-        let passing = PassingTests::new(Path::new("/cas"), &repo, &head);
+        let passing = PassingTests::new(root.path(), &repo, &head);
         let plans = commands(&passing, &paths, &scopes, &Default::default());
-        assert_eq!(plans.iter().map(|plan| javascript::invocation(&plan.split_once(" -- ").unwrap().1.split_whitespace().map(String::from).collect::<Vec<_>>()).unwrap()).collect::<Vec<_>>(), [
-            javascript::Invocation { runner: "node", config: None, files: vec!["scripts/visual-qa.test.mjs".into()], whole_file: true },
-        ]);
-        let unknown = "scripts/unknown.mjs";
-        write(unknown, "export const value = 1;");
-        for spec in ["test-opencode-slack-policy.mjs", "test-verified-web-tests.mjs", "test-walk-kit.mjs", "subproject/test-owned.mjs"] {
-            write(&format!("scripts/{spec}"), "import { test } from 'node:test';\ntest('works', () => {});");
+        assert_eq!(plans.len(), 1, "{plans:?}");
+        let args = command_args(&plans[0]);
+        assert_eq!(javascript::invocation(&args).unwrap(), javascript::Invocation {
+            runner: "node", config: None, files: specs.map(String::from).to_vec(), whole_file: true,
+        });
+        let refusals = || widened_park_refusals_for_test(root.path(), &repo, "cas-0304", &paths, &head, &base);
+        assert!(has_g61(&refusals()));
+        javascript::execute(root.path(), &args, &repo, &[]).unwrap();
+        let held = refusals();
+        assert!(!has_g61(&held), "{held:?}");
+    }
+
+    #[test]
+    fn gh2482_standalone_node_fallback_runs_and_proves_park() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.remove("CAS_SESSION_ID");
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().canonicalize().unwrap().join("worktrees/standalone");
+        std::fs::create_dir_all(repo.join("scripts/subproject")).unwrap();
+        let git = |args: &[&str]| super::git(&repo, &[
+            &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"], args,
+        ].concat()).unwrap();
+        let spec = "scripts/standalone.test.mjs";
+        for (path, text) in [
+            (spec, "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { fileURLToPath } from 'node:url';\ntest('runs beside its module', () => assert.equal(process.cwd() + '/', fileURLToPath(new URL('.', import.meta.url))));\n"),
+            ("scripts/subproject/package.json", "{}"),
+            ("scripts/subproject/foreign.test.mjs", "import test from 'node:test';\ntest('foreign', () => { throw 0; });\n"),
+        ] {
+            std::fs::write(repo.join(path), text).unwrap();
         }
-        write("scripts/subproject/package.json", "{}");
-        let scopes = [scope(&repo, unknown)];
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        let paths = ["scripts/undocumented.json", "scripts/unknown.mjs"].map(String::from);
+        std::fs::write(repo.join(&paths[0]), "{}").unwrap();
+        std::fs::write(repo.join(&paths[1]), "export const value = 1;").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "unknown inputs"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let (tests, scopes) = stability::requirements(&repo, &head, &base, &paths, None).unwrap();
+        assert!(tests.is_empty());
         assert_eq!(scopes, [Scope::Package("scripts".into())]);
-        for fixture in paths.iter().filter(|path| path.starts_with("scripts/visual-qa-fixtures/")) {
-            assert_eq!(scope(&repo, fixture), scopes[0]);
-        }
-        assert_eq!(javascript::node_specs(&repo, &repo.join("scripts")), [
-            repo.join("scripts/test-opencode-slack-policy.mjs"), repo.join("scripts/test-verified-web-tests.mjs"),
-            repo.join("scripts/test-walk-kit.mjs"), repo.join("scripts/visual-qa.test.mjs"),
-        ]);
-        for input in [unknown, "scripts/undocumented.json"] {
-            let runs = commands(&passing, &[input.into()], &scopes, &Default::default());
-            let args = runs[0].split_once(" -- ").unwrap().1.split_whitespace().map(String::from).collect::<Vec<_>>();
-            let run = javascript::invocation(&args).unwrap();
-            assert_eq!((run.runner, run.whole_file), ("node", true));
-            assert_eq!(run.files, ["scripts/test-opencode-slack-policy.mjs", "scripts/test-verified-web-tests.mjs", "scripts/test-walk-kit.mjs", "scripts/visual-qa.test.mjs"]);
-        }
+        assert_eq!(scope(&repo, &paths[0]), scopes[0]);
+        let passing = PassingTests::new(root.path(), &repo, &head);
+        let plans = commands(&passing, &paths, &scopes, &Default::default());
+        assert_eq!(plans.len(), 1, "{plans:?}");
+        let args = command_args(&plans[0]);
+        assert_eq!(javascript::invocation(&args).unwrap(), javascript::Invocation {
+            runner: "node", config: None, files: vec![spec.into()], whole_file: true,
+        });
+        let refusals = || widened_park_refusals_for_test(root.path(), &repo, "cas-48cea", &paths, &head, &base);
+        assert!(has_g61(&refusals()));
+        javascript::execute(root.path(), &args, &repo, &[]).unwrap();
+        let held = refusals();
+        assert!(!has_g61(&held), "{held:?}");
     }
 
     #[test]

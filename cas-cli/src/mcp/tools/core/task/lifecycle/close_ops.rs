@@ -24,6 +24,18 @@ pub(crate) use rebased_delivery::same_patch_set as rebased_delivery_has_same_pat
 pub(crate) use super::qa_dispatch::freshest_target_ref;
 mod epic_verdict_cache;
 mod receipt_scope;
+#[cfg(test)]
+pub(crate) fn widened_park_refusals_for_test(
+    cas_root: &std::path::Path,
+    repo: &std::path::Path,
+    task_id: &str,
+    paths: &[String],
+    head: &str,
+    base: &str,
+) -> Vec<String> {
+    let task = cas_types::Task::new(task_id.into(), "widened proof fixture".into());
+    receipt_scope::park_refusals(cas_root, repo, &task, paths, head, base, None)
+}
 mod doc_fragment_gate;
 mod merge_queue_proof;
 mod verified_delivery;

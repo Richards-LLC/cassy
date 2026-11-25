@@ -1116,6 +1116,62 @@ async fn park_requires_an_ac_checklist_and_an_approved_narrowing_gh_2401() {
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
 }
 
+#[tokio::test]
+async fn park_requires_red_first_evidence_gh_2422() {
+    use crate::factory_worker_check::{record_rust_failure_for_tests, record_rust_pass_for_tests};
+
+    let mut env = TestEnvGuard::temp_home();
+    for (methodology, record_red, gate, status) in [
+        (Some("test-first"), false, Some("G-170"), TaskStatus::InProgress),
+        (Some("test-first"), true, None, TaskStatus::AwaitingMerge),
+        (None, false, None, TaskStatus::AwaitingMerge),
+    ] {
+        let fixture = fixture_with_gear(
+            &mut env,
+            "pub fn turn() -> u8 { 1 }\n#[test]\nfn regression() { assert_eq!(turn(), 2); }\n",
+            "pub fn turn() -> u8 { 2 }\n#[test]\nfn regression() { assert_eq!(2, turn()); }\n",
+        );
+        let cas_dir = fixture.cas_dir();
+        let checkout = &fixture.worker_path;
+        let base = git(checkout, &["rev-parse", "main"]);
+        let tip = git(checkout, &["rev-parse", "HEAD"]);
+        let mut task = fixture.task();
+        task.execution_note = methodology.map(str::to_owned);
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            assignee: WORKER.into(),
+            branch: LANE.into(),
+            base_sha: base.clone(),
+            work_target: task.deliverables.work_target.clone().unwrap(),
+        });
+        open_task_store(&cas_dir).unwrap().update(&task).unwrap();
+
+        let name = "gear::regression";
+        if record_red {
+            git(checkout, &["checkout", "-q", "--detach", &base]);
+            record_rust_failure_for_tests(&cas_dir, checkout, &base, ID, "widget", name);
+            git(checkout, &["checkout", "-q", LANE]);
+        }
+        record_rust_pass_for_tests(
+            &cas_dir, checkout, &tip, "widget", &format!("test(={name})"),
+            Some(stability::Proof {
+                runner: "nextest".into(),
+                tests: vec![stability::Identity::exact("crates/widget/src/gear.rs", name)],
+                consecutive_passes: stability::REQUIRED_PASSES,
+                elapsed_ms: 0,
+                inactive: Vec::new(),
+            }),
+        );
+        let reply = call(&fixture.worker, serde_json::json!({
+            "action": "close", "id": ID, "reason": "gear turns",
+        })).await;
+        assert_eq!(
+            (crate::gates::codes_in(&reply).as_slice(), fixture.task().status),
+            (gate.as_slice(), status),
+            "{methodology:?}, red={record_red}: {reply}",
+        );
+    }
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
     hex::encode(sha2::Sha256::digest(bytes))

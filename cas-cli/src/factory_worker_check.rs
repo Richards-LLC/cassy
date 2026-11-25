@@ -2110,12 +2110,25 @@ pub(crate) fn record_passing_test_with_log_for_tests(
     std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
 }
 
+#[cfg(test)]
 pub(crate) fn record_passing_test_for_tests(
     cas_root: &Path,
     repo: &Path,
     head: &str,
     package: &str,
     filter: &str,
+) {
+    record_rust_pass_for_tests(cas_root, repo, head, package, filter, None);
+}
+
+#[cfg(test)]
+pub(crate) fn record_rust_pass_for_tests(
+    cas_root: &Path,
+    repo: &Path,
+    head: &str,
+    package: &str,
+    filter: &str,
+    stability: Option<stability::Proof>,
 ) {
     let repo = repo.canonicalize().expect("canonical repo");
     let test = TargetedTest {
@@ -2135,8 +2148,8 @@ pub(crate) fn record_passing_test_for_tests(
             filter: filter.to_string(),
             harness: None,
             count: 1,
-            stability: None,
-                        widened: None,
+            stability,
+            widened: None,
             selected_log: None,
             host_path_opt_out: None,
             supervisor_recorded: None,
@@ -2147,6 +2160,25 @@ pub(crate) fn record_passing_test_for_tests(
         serde_json::to_vec(&record).expect("serialize receipt"),
     )
     .expect("write receipt");
+}
+
+#[cfg(test)]
+pub(crate) fn record_rust_failure_for_tests(
+    cas_root: &Path,
+    repo: &Path,
+    head: &str,
+    task: &str,
+    package: &str,
+    name: &str,
+) {
+    let failure = RedFirstFailure::Rust {
+        package: package.into(),
+        harness: None,
+        names: BTreeSet::from([name.into()]),
+    };
+    assert!(record_red_first_failure(
+        cas_root, &repo.canonicalize().unwrap(), head, task, failure, "fixture failure".into(),
+    ).unwrap());
 }
 
 // Shared with parked-cache eviction: a cache cannot be evicted while its

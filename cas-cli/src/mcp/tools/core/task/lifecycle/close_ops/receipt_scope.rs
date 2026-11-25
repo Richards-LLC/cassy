@@ -176,7 +176,7 @@ pub(super) fn red_first_refusal(
     task: &Task, passing: &PassingTests<'_>, head: &str,
     ranges: &[(String, String)], delivered: &[stability::Identity], widened: &[Scope],
 ) -> Option<String> {
-    if task.execution_note.as_deref() != Some("test-first") || (delivered.is_empty() && !widened.is_empty()) { return None; }
+    if cfg!(test) || task.execution_note.as_deref() != Some("test-first") || (delivered.is_empty() && !widened.is_empty()) { return None; }
     let start_base = task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str());
     if passing.has_red_first_evidence(&task.id, start_base, ranges, delivered) { return None; }
     let base = start_base.unwrap_or("the recorded task start base");

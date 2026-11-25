@@ -1165,6 +1165,7 @@ async fn park_requires_red_first_evidence_gh_2422() {
         ("node subtest regression", Some("test-first"), Some(("HEAD^", &node[..])), true),
         ("node subtest aborted", Some("test-first"), Some(("HEAD^", &node[..])), false),
         ("node subtest hook failure", Some("test-first"), Some(("HEAD^", &node[..])), false),
+        ("node suite failure under a test", Some("test-first"), Some(("HEAD^", &node[..])), false),
         ("node inactive regression", Some("test-first"), Some(("HEAD^", &node[..])), false),
         ("node dynamic regression", Some("test-first"), Some(("HEAD^", &node[..])), true),
         ("captured outer Nextest failure", Some("test-first"), Some(("HEAD^", &outer[..])), false),
@@ -1175,7 +1176,6 @@ async fn park_requires_red_first_evidence_gh_2422() {
         ("parameterized Rust failure", Some("test-first"), Some(("HEAD^", &versioned[..])), true),
         ("test at tip", Some("test-first"), Some(("HEAD", &nextest[..])), false),
         ("receipt without red evidence", Some("test-first"), None, false),
-        ("receipt with red at base", Some("test-first"), Some(("main", &nextest[..])), true),
         ("receipt exact retry", Some("test-first"), Some(("main", &nextest[..])), true),
         ("receipt ordinary task", None, None, true),
     ] {
@@ -1262,6 +1262,10 @@ async fn park_requires_red_first_evidence_gh_2422() {
                     "test('gear node regression', async t => { t.beforeEach(() => { throw Error('setup'); }); await t.test('inner', () => {}); });\n",
                     "test('gear node regression', async t => { await t.test('inner', () => {}); });\n",
                 ),
+                "node suite failure under a test" => (
+                    "import { describe } from 'node:test';\ntest('gear node regression', async () => { describe('inner', () => { throw Error('suite body'); }); });\n",
+                    "test('gear node regression', () => {});\n",
+                ),
                 "node dynamic regression" => (
                     "test(`gear ${'node'} regression`, () => { throw Error('gear is stuck'); });\n",
                     "test(`gear ${'node'} regression`, () => {});\n",
@@ -1313,7 +1317,7 @@ async fn park_requires_red_first_evidence_gh_2422() {
                 .any(|entry| entry.file_name().to_string_lossy().contains("-red-"));
             if written != !matches!(case, "node file setup failure" | "node before hook failure" | "node abort signal" |
                 "captured nested Nextest failure" | "node subtest aborted" | "node subtest hook failure" | "nextest leak failure" |
-                "compile failure of the library at base") {
+                "compile failure of the library at base" | "node suite failure under a test") {
                 violations.push(format!("{case}: unexpected red receipt presence {written}"));
             }
             if checkout == &linked {

@@ -1038,6 +1038,18 @@ When Cassy's automatic verifier approves a saved no-code or no-delivery close, C
 
 When Violet's lookup has no record of a post for this caller (`not_posted` with reason `request_not_found`), Cassy resends it once on its own after a closed connection. Otherwise the error is retryable and says to resend with the same request ID and arguments.
 
+A no-code spike's or demo's report is its deliverable. One gate runs before every exemption on close, `task update status=closed`, pre-merge review and release close: the report closes or merges only on an approved independent verdict whose dispatch recorded the proof reference and every committed artifact's id and SHA-256, and only while that record still equals the report. The verifier is handed the recorded proof, and a changed or revoked report retires the stale dispatch so the next attempt requests a new review. The final write and merge admission check the approval again, and a release preview only reads.
+
+Replies to cross-machine peer supervisors use the incoming peer message's inbox ID. A local supervisor notice is not a peer reply target; omit `in_reply_to` to send a new message.
+
+Before fixing a test-first task, run its failing test through the capped worker runner at the task's start base or on a red checkpoint commit. Cassy also accepts a capped `cargo check --tests` failure at the start base. Park checks that record alongside the passing proof for the fix.
+
+**Repeated verification rejections (G-172).** After two rejected verdicts across the task's lifetime, Cassy holds further repairs, reassignments, and new starts. An independent reviewer publishes a Markdown artifact on the task with an Actor, Operation, Design, and Observed matrix, followed by a Mismatches section listing every discrepancy. A live supervisor links the review with the decision note `whole-flow review: <artifact-id>`. Cassy verifies the published bytes and includes the review in the next repair brief. A later rejection requires a fresh review.
+
+At the same threshold, Cassy detaches the task from its release train, retargets it to the integration branch without discarding its recorded source, and notifies the supervisor. The daemon recovers a missed notice. To keep it on the train, record `keep release train: <train-id>: <reason>` as a supervisor decision before the threshold is reached. Keeping the task on the train does not waive review.
+
+When a peer replaces a stale worker, Cassy syncs the reset and the new delivery binding to the train owner. An earlier park no longer hides the new assignee and branch.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.
@@ -1229,6 +1241,10 @@ Before a worker parks a delivery it runs the `cas-no-comments` skill on its own 
 - **Stable macOS identity on install and update** — Previously, a new Cassy build could ask again for granted privacy permissions. Now per-user installs reuse an automatically created local signing identity in a separate keychain, without a login password or Apple Developer account. If signing fails, Cassy keeps the installed binary and warns that macOS may ask for access again.
 
 - Commander offers Reload Cassy when the installed build differs from the supervisor's loaded version or commit.
+
+The `cas-update` shell helper honors `NO_COLOR` and uses contrasting status and warning marks on light and dark terminals. The install path appears on its own indented line below the target label.
+
+On a Codex supervisor, the typed `/reload-cassy` confirmation keeps its focused action through session list updates. After confirmation, Commander prevents a duplicate send while taking pane control. A successful request clears the matching command draft; a refusal keeps it and identifies the current controller when available. Back and the header toggle dismiss the header confirmation without sending it.
 
 ## Authoritative Sources
 

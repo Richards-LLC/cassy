@@ -40,8 +40,10 @@ impl SqliteAgentStore {
                 Ok((Self::lease_from_row(row)?, row.get::<_, Option<String>>(9)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        let now = Utc::now();
         Ok(rows
             .into_iter()
+            .filter(|(lease, _)| lease.expires_at > now)
             .filter_map(|(lease, assignee)| {
                 let token = assignee.as_deref()?.trim();
                 if token.is_empty() {
@@ -64,21 +66,42 @@ impl SqliteAgentStore {
             .collect())
     }
 
-    pub(crate) fn lease_try_claim(
+    pub(super) fn lease_claim(
         &self,
         task_id: &str,
         agent_id: &str,
-        duration_secs: i64,
-        reason: Option<&str>,
-    ) -> Result<ClaimResult> {
-        crate::shared_db::with_write_retry(|| {
+        write: Option<(i64, Option<&str>)>,
+    ) -> Result<(ClaimResult, Option<String>)> {
+        let attempt = |review| crate::shared_db::with_write_retry(|| {
+            self.lease_claim_attempt(task_id, agent_id, write, review)
+        });
+        match attempt(None) {
+            Err(StoreError::RepeatReviewRequired { task_id, rejection_id, rejected_at, count }) => {
+                if let Some(verify) = &self.lease_review
+                    && let Some(artifact) = verify(&task_id, rejected_at)?
+                {
+                    return attempt(Some((&rejection_id, &artifact)));
+                }
+                Err(StoreError::RepeatReviewRequired { task_id, rejection_id, rejected_at, count })
+            }
+            result => result,
+        }
+    }
+
+    fn lease_claim_attempt(
+        &self,
+        task_id: &str,
+        agent_id: &str,
+        write: Option<(i64, Option<&str>)>,
+        review: Option<(&str, &str)>,
+    ) -> Result<(ClaimResult, Option<String>)> {
         let conn = self.lock_conn()?;
-        let tx = ImmediateTx::new(&conn)?;
+        let tx = write.map(|_| ImmediateTx::new(&conn)).transpose()?;
+        let snapshot = tx.as_deref().unwrap_or(&conn);
         let now = Utc::now();
-        let expires_at = now + chrono::Duration::seconds(duration_secs);
 
         // Check if task is already claimed with an active, non-expired lease
-        let existing: Option<(String, String, String, i64)> = tx
+        let existing: Option<(String, String, String, i64)> = snapshot
             .query_row(
                 "SELECT agent_id, status, expires_at, epoch FROM task_leases WHERE task_id = ?",
                 params![task_id],
@@ -93,19 +116,16 @@ impl SqliteAgentStore {
             )
             .optional()?;
 
-        let new_epoch: u64;
-        if let Some((held_by, status, expires_str, current_epoch)) = existing {
-            if status == "active" {
-                if let Some(expires) = Self::parse_datetime(&expires_str) {
-                    if expires > now {
-                        // Lease is still valid - check if worker can take over from supervisor
-                        let takeover_reason = if held_by == agent_id {
-                            None
-                        } else {
-                            // Worker taking over from its supervisor, or a recycled
-                            // worker reclaiming from its own dead predecessor session
-                            // (same name, holder retired).
-                            tx.query_row(
+        let mut takeover = None;
+        let new_epoch = if let Some((held_by, status, expires_str, current_epoch)) = existing {
+            if status == "active"
+                && let Some(expires) = Self::parse_datetime(&expires_str)
+                && expires > now
+            {
+                let takeover_reason = if held_by == agent_id {
+                    None
+                } else {
+                    snapshot.query_row(
                                 "SELECT CASE
                                    WHEN (SELECT parent_id FROM agents WHERE id = ?1) = ?2
                                      THEN 'worker_takeover'
@@ -116,96 +136,71 @@ impl SqliteAgentStore {
                                        AND old.status IN ('stale', 'shutdown'))
                                      THEN 'recycled_worker_reclaim'
                                    END",
-                                params![agent_id, &held_by],
-                                |row| row.get::<_, Option<String>>(0),
-                            )?
-                        };
-                        let can_takeover = takeover_reason.is_some();
-
-                        if can_takeover {
-                            // Worker taking over from supervisor - release supervisor's lease
-                            tx.execute(
-                                "UPDATE agents SET active_tasks = MAX(0, active_tasks - 1) WHERE id = ?",
-                                params![&held_by],
-                            )?;
-                            // Log transfer event
-                            Self::log_lease_event(
-                                &tx,
-                                task_id,
-                                &held_by,
-                                "transferred",
-                                current_epoch as u64,
-                                Some(&format!(
-                                    r#"{{"to_agent":"{agent_id}","reason":"{}"}}"#,
-                                    takeover_reason.as_deref().unwrap_or("worker_takeover")
-                                )),
-                                Some(agent_id),
-                                None,
-                            )?;
-                            // Fall through to update lease for worker
-                        } else {
-                            // Not a supervisor takeover - cannot claim
-                            return Ok(ClaimResult::AlreadyClaimed {
-                                task_id: task_id.to_string(),
-                                held_by,
-                                user_id: None,
-                                expires_at: expires,
-                            });
-                        }
-                    }
-                }
+                        params![agent_id, &held_by],
+                        |row| row.get::<_, Option<String>>(0),
+                    )?
+                };
+                let Some(takeover_reason) = takeover_reason else {
+                    return Ok((ClaimResult::AlreadyClaimed {
+                        task_id: task_id.to_owned(), held_by, user_id: None, expires_at: expires,
+                    }, None));
+                };
+                takeover = Some((held_by, current_epoch as u64, takeover_reason));
             }
-            // Lease exists but is expired/released/revoked - update it with incremented epoch
-            new_epoch = (current_epoch as u64) + 1;
-            tx.execute(
-                "UPDATE task_leases SET agent_id = ?, status = 'active', acquired_at = ?,
-                 expires_at = ?, renewed_at = ?, renewal_count = 0, epoch = ?, claim_reason = ?
-                 WHERE task_id = ?",
-                params![
-                    agent_id,
-                    now.to_rfc3339(),
-                    expires_at.to_rfc3339(),
-                    now.to_rfc3339(),
-                    new_epoch as i64,
-                    reason,
-                    task_id,
-                ],
-            )?;
+            (current_epoch as u64) + 1
         } else {
-            // No existing lease - create new one with epoch 1
-            new_epoch = 1;
+            1
+        };
+
+        let artifact = if snapshot.table_exists(None, "verifications")?
+            && let Some((rejection_id, rejected_at, count)) =
+                crate::verification_store::latest_repeated_rejection_with_conn(snapshot, task_id)?
+        {
+            let Some((_, artifact)) = review.filter(|(approved, _)| *approved == rejection_id.as_str()) else {
+                return Err(StoreError::RepeatReviewRequired {
+                    task_id: task_id.to_owned(), rejection_id, rejected_at, count,
+                });
+            };
+            Some(artifact.to_owned())
+        } else {
+            None
+        };
+
+        let (duration_secs, reason) = write.unwrap_or_default();
+        let expires_at = now + chrono::Duration::seconds(duration_secs);
+        let lease = TaskLease {
+            task_id: task_id.to_owned(), agent_id: agent_id.to_owned(), status: LeaseStatus::Active,
+            acquired_at: now, expires_at, renewed_at: now, renewal_count: 0, epoch: new_epoch,
+            claim_reason: reason.map(str::to_owned),
+        };
+        let Some(tx) = tx else { return Ok((ClaimResult::Success(lease), artifact)) };
+        if let Some((held_by, current_epoch, takeover_reason)) = takeover {
             tx.execute(
-                "INSERT INTO task_leases (task_id, agent_id, status, acquired_at, expires_at,
-                 renewed_at, renewal_count, epoch, claim_reason)
-                 VALUES (?, ?, 'active', ?, ?, ?, 0, 1, ?)",
-                params![
-                    task_id,
-                    agent_id,
-                    now.to_rfc3339(),
-                    expires_at.to_rfc3339(),
-                    now.to_rfc3339(),
-                    reason,
-                ],
+                "UPDATE agents SET active_tasks = MAX(0, active_tasks - 1) WHERE id = ?",
+                params![&held_by],
+            )?;
+            Self::log_lease_event(
+                &tx, task_id, &held_by, "transferred", current_epoch,
+                Some(&format!(r#"{{"to_agent":"{agent_id}","reason":"{takeover_reason}"}}"#)),
+                Some(agent_id), None,
             )?;
         }
 
-        // Update agent's active task count
+        tx.execute(
+            "INSERT INTO task_leases (task_id, agent_id, status, acquired_at, expires_at,
+             renewed_at, renewal_count, epoch, claim_reason)
+             VALUES (?, ?, 'active', ?, ?, ?, 0, ?, ?)
+             ON CONFLICT(task_id) DO UPDATE SET agent_id = excluded.agent_id, status = 'active',
+             acquired_at = excluded.acquired_at, expires_at = excluded.expires_at,
+             renewed_at = excluded.renewed_at, renewal_count = 0, epoch = excluded.epoch,
+             claim_reason = excluded.claim_reason",
+            params![task_id, agent_id, now.to_rfc3339(), expires_at.to_rfc3339(),
+                now.to_rfc3339(), new_epoch as i64, reason],
+        )?;
         tx.execute(
             "UPDATE agents SET active_tasks = active_tasks + 1 WHERE id = ?",
             params![agent_id],
         )?;
-
-        let lease = TaskLease {
-            task_id: task_id.to_string(),
-            agent_id: agent_id.to_string(),
-            status: LeaseStatus::Active,
-            acquired_at: now,
-            expires_at,
-            renewed_at: now,
-            renewal_count: 0,
-            epoch: new_epoch,
-            claim_reason: reason.map(|s| s.to_string()),
-        };
 
         // Log the claim event
         let details = reason.map(|r| format!(r#"{{"reason":"{r}"}}"#));
@@ -221,8 +216,7 @@ impl SqliteAgentStore {
         )?;
 
         tx.commit()?;
-        Ok(ClaimResult::Success(lease))
-        }) // with_write_retry
+        Ok((ClaimResult::Success(lease), artifact))
     }
     pub(crate) fn lease_release_lease(&self, task_id: &str, agent_id: &str) -> Result<()> {
         crate::shared_db::with_write_retry(|| {

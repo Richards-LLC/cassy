@@ -2,6 +2,8 @@
 
 use thiserror::Error;
 
+pub const REPEAT_REVIEW_RULE_ID: &str = "repeat_review_required";
+
 #[derive(Error, Debug)]
 pub enum StoreError {
     #[error("not initialized")]
@@ -64,6 +66,14 @@ pub enum StoreError {
 
     #[error("premerge_repair_requires_new_commit: automatic repair for {dispatch_id} needs a new provable source commit")]
     PremergeRepairRequiresNewCommit { dispatch_id: String },
+
+    #[error("Whole-flow review required for {task_id}: {count} all-time verifier rejections [G-172]")]
+    RepeatReviewRequired {
+        task_id: String,
+        rejection_id: String,
+        rejected_at: chrono::DateTime<chrono::Utc>,
+        count: u64,
+    },
 
     /// A verifier handoff was refused because its dispatch is not the exact
     /// pending dispatch owned by the issuer. Not a parse failure.

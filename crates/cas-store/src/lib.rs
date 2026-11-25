@@ -101,7 +101,7 @@ pub mod mock;
 mod worktree_lease_test;
 
 // Re-export error types
-pub use error::{Result, StoreError};
+pub use error::{REPEAT_REVIEW_RULE_ID, Result, StoreError};
 
 pub use trace_archive::{
     ArchivedTrace, ArchivedTraceRecord, DEFAULT_TRACE_ARCHIVE_MAX_BYTES, RecordingArchive,
@@ -131,7 +131,7 @@ pub use accepted_proposal_store::{
 pub use artifact_store::{
     ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, ARTIFACT_REVOCATION_SCHEMA_STATEMENTS,
     ArtifactRevocation, NewArtifact, PublishedArtifact,
-    SqliteArtifactStore, looks_like_signed_upload_url,
+    SqliteArtifactStore, list_task_artifacts_with_conn, looks_like_signed_upload_url,
 };
 pub use code_index_purge::{
     BatchedWrites, CODE_WRITE_DEFAULT_BATCH, CODE_WRITE_MAX_BATCH, CodeIndexPurgeStats,
@@ -253,13 +253,15 @@ pub use loop_store::{LOOP_SCHEMA, LoopStore, SqliteLoopStore};
 // Verification store for task quality gates
 pub use verification_store::{
     IssuedVerifierCapability, ParentDependencyUpdate, ProofScopeCorrectionOutcome,
-    REQUEST_CHANGES_AUDIT_PREFIX, RequestChangesBoundary, RequestChangesOutcome,
+    REPEAT_REVIEW_REQUIRED, REQUEST_CHANGES_AUDIT_PREFIX, RequestChangesBoundary, RequestChangesOutcome,
     SqliteVerificationStore, TaskReopenLifecycleOutbox,
-    VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT, VERIFICATION_DURATION_SOURCE_STATEMENT,
+    VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT, VERIFICATION_DISPATCH_REVIEWED_PROOF_STATEMENT,
+    VERIFICATION_DURATION_SOURCE_STATEMENT,
     VERIFICATION_SCHEMA, VERIFICATION_ISSUE_TRIAGE_STATEMENT,
     VERIFICATION_STATUS_DETAIL_STATEMENT, VERIFICATION_STATUS_NORMALIZE_STATEMENT,
     VerificationStore, add_system_verification, add_verification_with_conn,
     adopt_orphaned_verification_dispatches, adopt_retired_verification_dispatch, bind_server_verifier_handoff,
+    create_verification_dispatch_reviewing_with_conn, verification_dispatch_reviewed_proof_with_conn,
     bind_server_verifier_handoff_and_register_child, bind_verifier_capability, issue_and_bind_server_verifier_handoff,
     cancel_unbound_server_verifier_handoff, claim_verification_dispatch,
     claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,
@@ -272,14 +274,17 @@ pub use verification_store::{
     extend_verification_dispatch_deadline,
     get_latest_verification_dispatch, get_latest_verification_dispatch_with_conn,
     get_verification_dispatch, get_verification_dispatch_with_conn, get_verification_for_dispatch,
+    get_verification_for_dispatch_with_conn,
     has_active_verification_dispatch, import_peer_premerge_verification, verification_dispatch_is_stale, inspect_bound_server_verifier_handoff,
     inspect_verifier_capability, invalidate_verification_dispatch_and_reopen_task_exact,
-    invalidate_verification_dispatch_for_new_cycle, release_failed_verifier_dispatch,
+    invalidate_verification_dispatch_for_new_cycle, invalidate_verification_dispatch_for_proof_drift,
+    release_failed_verifier_dispatch,
     AUTOMATIC_PREMERGE_OWNER_KEY, recover_expired_dead_verifier_dispatch,
     invalidate_verification_dispatch_for_repository_drift, issue_server_verifier_handoff,
     issue_server_verifier_handoff_with_secret, issue_verifier_capability,
     reopen_closed_task_atomic, reopen_terminal_task_atomic, request_changes_audit_note,
     request_changes_for_parked_delivery, request_changes_for_parked_delivery_with_merge_sources,
+    request_changes_for_observed_delivery, request_changes_for_reviewed_delivery,
     auto_return_premerge_rejection,
     resolve_verification_dispatch_for_add,
     resolve_verification_dispatch_for_add_with_conn, resolve_verification_dispatch_with_conn,

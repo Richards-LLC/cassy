@@ -320,14 +320,20 @@ pub fn clear_pending_observed_delivery_merge(
     let _wait = crate::wait_budget::bound_waits_for(observed_merge_wait_budget());
     crate::shared_db::with_write_retry(|| {
         let conn = open(root)?;
-        conn.execute(
-            "DELETE FROM pending_observed_delivery_merges
-             WHERE task_id = ?1 AND source_branch = ?2 AND target_branch = ?3
-               AND source_commit_sha = ?4",
-            params![task_id, source_branch, target_branch, source_commit_sha],
-        )?;
-        Ok(())
+        clear_pending_observed_delivery_merge_with_conn(&conn, task_id, source_branch, target_branch, source_commit_sha)
     })
+}
+
+pub(crate) fn clear_pending_observed_delivery_merge_with_conn(
+    conn: &Connection, task_id: &str, source_branch: &str, target_branch: &str, source_commit_sha: &str,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM pending_observed_delivery_merges
+         WHERE task_id = ?1 AND source_branch = ?2 AND target_branch = ?3
+           AND source_commit_sha = ?4",
+        params![task_id, source_branch, target_branch, source_commit_sha],
+    )?;
+    Ok(())
 }
 
 fn open(root: &Path) -> Result<Connection> {

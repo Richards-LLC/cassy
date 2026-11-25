@@ -1049,12 +1049,8 @@ pub(crate) fn paths(
     window: &TaskCommitReceiptWindow,
     receipt: Option<&str>,
 ) -> Option<Vec<String>> {
-    let receipt = receipt
-        .map(|receipt| resolve_task_commit_receipt_sha(repo, receipt))
-        .transpose()
-        .ok()?;
-    let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
-    paths_from_ranges(repo, ranges)
+    let ranges = range_bounds(repo, target, window, receipt)?;
+    paths_from_ranges(repo, ranges.iter().map(|(base, tip)| (base.as_str(), tip.as_str())))
 }
 
 /// cas-2a65: the (base, tip) bounds of the same task-attributed delivery
@@ -1085,15 +1081,15 @@ pub(super) fn identified_paths(
     window: &TaskCommitReceiptWindow,
 ) -> Option<Vec<String>> {
     let selection = task_delivery_selection(repo, target, window, None, false)?;
-    paths_from_ranges(repo, selection.ranges)
+    paths_from_ranges(repo, selection.ranges.iter().map(|range| (range.base.as_str(), range.tip.as_str())))
 }
 
-fn paths_from_ranges(repo: &Path, ranges: Vec<DeliveryRange>) -> Option<Vec<String>> {
+pub(super) fn paths_from_ranges<'a>(repo: &Path, ranges: impl IntoIterator<Item = (&'a str, &'a str)>) -> Option<Vec<String>> {
     let mut paths = Vec::new();
-    for range in ranges {
+    for (base, tip) in ranges {
         let changed = git_text(
             repo,
-            &["diff", "--name-only", &range.base, &range.tip, "--"],
+            &["diff", "--name-only", base, tip, "--"],
         )?;
         paths.extend(
             changed

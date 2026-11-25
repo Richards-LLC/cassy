@@ -275,6 +275,7 @@ mod m298_artifact_revocations;
 mod m299_tasks_review_dispatch;
 mod m300_tasks_priority_created_index;
 mod m301_history_epochs_build;
+mod m302_verification_dispatch_reviewed_proof;
 pub(crate) use m262_tasks_normalize_proof_targets::normalize_legacy_proof_targets;
 
 /// All migrations in order. IDs must be sequential and never reused.
@@ -587,6 +588,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m299_tasks_review_dispatch::MIGRATION,
     m300_tasks_priority_created_index::MIGRATION,
     m301_history_epochs_build::MIGRATION,
+    m302_verification_dispatch_reviewed_proof::MIGRATION,
 ];
 
 #[cfg(test)]

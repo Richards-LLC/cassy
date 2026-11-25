@@ -46,6 +46,9 @@ impl AgentStore for SqliteAgentStore {
         self.agent_get_by_cc_session_id(cc_session_id)
     }
 
+    fn preview_task_claim(&self, task_id: &str, agent_id: &str) -> Result<Option<String>> {
+        self.lease_claim(task_id, agent_id, None).map(|(_, artifact)| artifact)
+    }
     fn try_claim(
         &self,
         task_id: &str,
@@ -53,7 +56,8 @@ impl AgentStore for SqliteAgentStore {
         duration_secs: i64,
         reason: Option<&str>,
     ) -> Result<ClaimResult> {
-        self.lease_try_claim(task_id, agent_id, duration_secs, reason)
+        self.lease_claim(task_id, agent_id, Some((duration_secs, reason)))
+            .map(|(result, _)| result)
     }
     fn release_lease(&self, task_id: &str, agent_id: &str) -> Result<()> {
         self.lease_release_lease(task_id, agent_id)

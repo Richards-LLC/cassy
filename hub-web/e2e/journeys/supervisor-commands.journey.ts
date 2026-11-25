@@ -222,7 +222,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       });
     });
     test("HUB-J27 reload Claude's Cassy server and read its replacement process", journeyPart, async ({ page, journey }) => {
-      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const, mcp_version: "9.99.1", installed_version: "9.99.2" })) };
+      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const, mcp_version: "9.99.1", installed_version: "9.99.2", mcp_reload_needed: true })) };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
       const mutations = () => hub.frames.filter(frame => frame.kind === "SupervisorCommand");
       const versionOnRow = (version: string | RegExp) => page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true })
@@ -247,6 +247,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         // A phone now shows the conversation; the list row behind it keeps the old version.
         await expect(versionOnRow("9.99.1")).toHaveCount(1);
         machine.sessions[0]!.mcp_version = "9.99.2";
+        machine.sessions[0]!.mcp_reload_needed = false;
         (machine.sessions[0] as { mcp_loaded_at?: string }).mcp_loaded_at = "2026-11-23T22:44:00Z";
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { device_id: "journey-device", client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
         await expect(toast(page, "Cassy reloaded: PID 2202")).toBeVisible();
@@ -313,7 +314,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       });
     });
     test("HUB-J27 reload Cassy on a Codex supervisor only after confirming its restart", journeyPart, async ({ page, journey }) => {
-      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "codex" as const, mcp_version: "9.99.2", installed_version: "9.99.2", mcp_reload_needed: true })) };
+      const machine = { ...ATLAS, sessions: [{ ...ATLAS.sessions[0]!, harness: "codex" as const, mcp_version: "9.99.2", installed_version: "9.99.2", mcp_reload_needed: true, ws_port: 48101 }] };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
       const mutations = () => hub.frames.filter(frame => frame.kind === "SupervisorCommand");
       await journey.stage("The Codex card names the restart before anything is sent", async () => {
@@ -339,13 +340,78 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await captureReload(page, "codex-mismatch", viewport.width);
         expect(hub.sends).toHaveLength(0);
       });
-      await journey.stage("Typed /mcp on Codex asks for the same restart confirmation", async () => {
-        const input = composer(page);
-        await input.fill("/mcp");
-        await input.press("Enter");
-        await expect(page.locator('[data-command-confirm="mcp"]')).toBeVisible();
+      const reload = page.locator('[data-command-confirm="mcp"]');
+      if (phone) await journey.stage("Back and the header toggle dismiss a header confirmation", async () => {
+        const openReload = async () => { await openCommands(page); await commandButton(page, "mcp").click(); };
+        await openReload();
+        await expect(reload).toBeVisible();
+        await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
+        await expect(reload).toHaveCount(0);
+        await conversationRow(page).click();
+        await openReload();
+        await page.getByRole("button", { name: "More conversation actions", exact: true }).press("Enter");
+        await page.getByRole("button", { name: "Supervisor commands", exact: true }).click();
+        await expect(reload).toHaveCount(0);
         expect(mutations()).toHaveLength(1);
+      });
+      await journey.stage("Typed Reload Cassy keeps its focused action when the session list changes", async () => {
+        hub.releaseOwnLease(PELICAN);
+        await page.reload();
+        const input = composer(page);
+        await input.fill("/reload-cassy");
+        await expect(commandButton(page, "mcp")).toBeVisible();
+        await input.press("Enter");
+        await expect(reload).toBeVisible();
+        await page.keyboard.press("ArrowRight");
+        await expect(reload).toBeFocused();
+        const peer = { ...machine.sessions[0]!, name: "calm-wren-2", supervisor: "calm-wren-2", project_dir: "/projects/peer-project", workers: [], ws_port: 48102, started_at: journeyStamp(-30_000) };
+        machine.sessions.push(peer);
+        await hub.announceCatalog(machine.id, { added: [peer.name] });
+        const navigation = page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true });
+        const peerRow = navigation.getByRole("button", { name: /^peer-project on /, includeHidden: true });
+        await expect(peerRow).toHaveCount(1);
+        await expect(reload).toBeFocused();
+        await captureReload(page, "typed-confirm-after-catalog", viewport.width);
+        await reload.hover();
+        await page.mouse.down();
+        const arriving = { ...peer, name: "bright-robin-3", supervisor: "bright-robin-3", project_dir: "/projects/arriving-project", ws_port: 48103, started_at: journeyStamp(-10_000) };
+        machine.sessions.push(arriving);
+        await hub.announceCatalog(machine.id, { added: [arriving.name] });
+        await expect(navigation.getByRole("button", { name: /^arriving-project on /, includeHidden: true })).toHaveCount(1);
+        expect(mutations()).toHaveLength(1);
+        const leaseTake = hub.holdNextLeaseTake(PELICAN);
+        try {
+          await page.mouse.up();
+          await leaseTake.started;
+          const incoming = { ...peer, name: "settled-swift-4", supervisor: "settled-swift-4", project_dir: "/projects/incoming-project", ws_port: 48104, started_at: journeyStamp() };
+          machine.sessions.push(incoming);
+          await hub.announceCatalog(machine.id, { added: [incoming.name] });
+          await expect(navigation.getByRole("button", { name: /^incoming-project on /, includeHidden: true })).toHaveCount(1);
+        } finally {
+          leaseTake.release();
+        }
+        await expect.poll(() => mutations().length).toBe(2);
+        expect(mutations()[1].body).toMatchObject({ command: "mcp", confirmed: true });
+        await expect(input).toHaveValue("");
+        await expect(input).toBeFocused();
         expect(hub.sends).toHaveLength(0);
+      });
+      await journey.stage("A refused take names the pane controller without sending Reload", async () => {
+        hub.holdLease(PELICAN, "Studio iPad");
+        await page.reload();
+        const input = composer(page);
+        await expect(input).toHaveValue("");
+        await input.fill("/reload-cassy");
+        await expect(commandButton(page, "mcp")).toBeVisible();
+        await input.press("Enter");
+        await reload.click();
+        await expect(commandPalette(page).getByRole("status")).toContainText("Studio iPad");
+        await openCommands(page);
+        await expect(page.locator("#conversation-commands")).toHaveAttribute("aria-expanded", "true");
+        await expect(commandButton(page, "mcp")).toBeVisible();
+        await expect(input).toHaveValue("/reload-cassy");
+        expect(mutations()).toHaveLength(2);
+        await captureReload(page, "codex-refused-then-commands", viewport.width);
       });
     });
     test("HUB-J27 dismiss reload refusal and resolve a later observed receipt", journeyPart, async ({ page, journey }) => {
@@ -539,8 +605,13 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         hub.send(PELICAN, { Error: { client_ref: request.client_ref, message: "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again." } });
         await expect(receipt).toHaveAttribute("data-phase", "unconfirmed");
         const session = machine.sessions[0]!;
-        session.ended = { at: journeyStamp(), reason: "prompt_input_exit", workers_stopped: [...session.workers], orphans: [], unverified: [] };
+        const endedAt = journeyStamp();
+        session.ended = { at: endedAt, reason: "prompt_input_exit", workers_stopped: [...session.workers], worker_states: ["young-otter-14: tasks=unknown; dirty_files=unknown; unpushed_commits=unknown (registration unavailable); stopped; recovered_tasks=0"], orphans: [], unverified: [] };
         session.liveness = "stale_metadata"; session.workers = [];
+        session.ws_port = null;
+        session.machine_online = false;
+        session.last_activity_at = endedAt;
+        session.last_activity = "Session ended";
         await hub.announceCatalog(machine.id);
         await expect(conversationRow(page)).toHaveCount(0);
         await expect(composer(page)).toBeHidden();

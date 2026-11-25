@@ -354,7 +354,7 @@ pub(crate) fn is_action_envelope(body: &str) -> bool {
     let Some((tag, _)) = body.split_once('\n') else {
         return false;
     };
-    let valid_kind = ["blocker", "premerge_verification", "premerge_candidate_ready", "premerge_candidate_failed", "train_ready", "batch_close_hold", "epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "release_post_publish_failed", "release_closeout", "factory_binary_skew", "train_ci_red", "train_main_sync", "registration_outcome", "send_outcome"]
+    let valid_kind = ["blocker", "premerge_verification", "repeat-review-train-detached", "premerge_candidate_ready", "premerge_candidate_failed", "train_ready", "batch_close_hold", "epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "release_post_publish_failed", "release_closeout", "factory_binary_skew", "train_ci_red", "train_main_sync", "registration_outcome", "send_outcome"]
         .iter()
         .any(|kind| {
             tag.starts_with(&format!(

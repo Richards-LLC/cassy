@@ -42,6 +42,12 @@ export class DeferredRenderScheduler {
     this.owed = true;
   }
 
+  deferDuringGesture(): boolean {
+    if (this.gestureDepth === 0) return false;
+    this.defer();
+    return true;
+  }
+
   /** The page rebuilt for its own reasons, so nothing is owed any more. */
   settled(): void {
     this.owed = false;

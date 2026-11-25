@@ -150,6 +150,7 @@ impl CasService {
         if let Some(sent) = self.owned_message_send(sender, target, summary, message, in_reply_to,
             urgent, kind, blocker, attachment).await? { return Ok(Some(sent)); }
         let cas_root = self.inner.cas_root.clone();
+        let qualified = target.contains('@');
         let explicit_account_peer = target
             .get(..11)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("supervisor:"));
@@ -176,6 +177,15 @@ impl CasService {
                 .filter(|row| row.origin == Some(cas_store::QueueOrigin::Daemon))
                 .and_then(|row| peer_mailbox::parse_envelope(&row.prompt));
             let Some(envelope) = peer_row else {
+                if qualified {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "in_reply_to={row_id} does not name a delivered peer message; omit \
+                             in_reply_to to send a new message."
+                        ),
+                    ));
+                }
                 return Ok(None);
             };
             let addressed = target.eq_ignore_ascii_case(&envelope.sender_name)
@@ -319,7 +329,6 @@ impl CasService {
         }
 
         // A target naming a local agent stays local.
-        let qualified = target.contains('@');
         if !qualified {
             let local = crate::store::open_agent_store(&cas_root)
                 .ok()

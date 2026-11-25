@@ -253,6 +253,8 @@ struct Promotion {
 mod peer;
 mod carryover;
 mod automatic;
+#[cfg(test)]
+pub(crate) use automatic::{launch_with_preparation as launch_verifier_with, prompt as verifier_prompt};
 #[cfg(unix)]
 mod factory_launch;
 #[cfg(unix)]
@@ -987,6 +989,10 @@ impl Approval {
         {
             return Err(crate::gates::tag("G-104", "the exact candidate approval is no longer current"));
         }
+        let report = crate::mcp::tools::core::task::lifecycle::report_proof::require_report_verdict(root, true, task, task);
+        if !report.is_ok_and(|report| !report.covered() || report.approves(&self.dispatch_id, &self.verdict_id)) {
+            return Err(crate::gates::tag("G-104", "the approved report proof is no longer current"));
+        }
         self.candidate.validate(root, task).map_err(|error| crate::gates::tag("G-104", error))
     }
 
@@ -1340,11 +1346,20 @@ impl CasCore {
         let config = self.load_config();
         let fast_lane =
             crate::fast_lane::owns_review(&self.cas_root, task, repo, Some((source, target)));
+        use crate::mcp::tools::core::task::lifecycle::report_proof::{ReportGate, require_report_verdict};
+        let report = if task.task_type == cas_types::TaskType::Epic {
+            ReportGate::Exempt
+        } else {
+            require_report_verdict(&self.cas_root, config.verification_enabled(), &current, task)
+                .and_then(|gate| gate.retire_stale(&self.cas_root))
+                .map_err(|message| fail(crate::gates::tag("G-68", message)))?
+        };
         if task.task_type == cas_types::TaskType::Epic
-            || (task.depth == cas_types::TaskDepth::Light && !fast_lane)
+            || (task.depth == cas_types::TaskDepth::Light && !fast_lane && !report.covered())
             || !config.verification_enabled()
-            || !verification_policy(supervisor_harness_from_env(), worker_harness_from_env())
-                .task_required()
+            || (!report.covered()
+                && !verification_policy(supervisor_harness_from_env(), worker_harness_from_env())
+                    .task_required())
         {
             return Ok(None);
         }
@@ -1358,6 +1373,7 @@ impl CasCore {
                 .is_some();
         if !recorded
             && !fast_lane
+            && !report.covered()
             && review_tier::tier_for_delivery(task, repo)
                 .is_some_and(|tier| tier.tier == review_tier::VerificationTier::Mechanical)
         {
@@ -1365,6 +1381,7 @@ impl CasCore {
         }
         if !recorded
             && !fast_lane
+            && !report.covered()
             && !crate::rapid_response::verification_sampled(&task.id)
             && crate::rapid_response::active_for_task_at(&self.cas_root, task, None).is_some_and(
                 |window| {
@@ -1388,7 +1405,9 @@ impl CasCore {
         let repository = repo.canonicalize().map_err(|error| {
             fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
         })?;
-        if let Some(approval) = carryover::reuse(self, task, repo, source, target, &digest, latest.as_ref())? {
+        if !report.covered()
+            && let Some(approval) = carryover::reuse(self, task, repo, source, target, &digest, latest.as_ref())?
+        {
             return Ok(Some(approval));
         }
         let mut inherited_supervisor_call = None;
@@ -1400,7 +1419,12 @@ impl CasCore {
             let receipt = dispatch.receipt().map_err(fail)?;
             let verdict = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
                 .map_err(fail)?;
+            let unbound_report_approval = report.covered()
+                && verdict.as_ref().is_some_and(|verdict| {
+                    verdict.status == VerificationStatus::Approved && !report.approves(&dispatch.id, &verdict.id)
+                });
             if dispatch.state == cas_types::VerificationDispatchState::Resolved
+                && !unbound_report_approval
                 && candidate.repository == repository
                 && candidate.source_branch == source
                 && candidate.target_branch == target
@@ -1420,6 +1444,7 @@ impl CasCore {
                 }
             }
             if candidate.context_digest == digest
+                && !unbound_report_approval
                 && dispatch.state != cas_types::VerificationDispatchState::Invalidated
                 && candidate.repository == repository
                 && candidate.source_branch == source
@@ -1554,17 +1579,23 @@ impl CasCore {
         }
         let requester = self.get_agent_id()?;
         let owner = self.verification_dispatch_owner(&requester)?;
+        let boundary = cycle::boundary(&self.cas_root, task, candidate.proof.clone()).map_err(fail)?;
+        let reviewed_proof = report.proof_to_record();
+        let conn = rusqlite::Connection::open(self.cas_root.join("cas.db")).map_err(fail)?;
+        cas_store::shared_db::install_busy_handler(&conn).map_err(fail)?;
         // gate[N-12 notice]: Premerge candidate verification dispatch
-        let dispatch = cas_store::create_verification_dispatch_bound(
-            &self.cas_root,
+        let dispatch = cas_store::create_verification_dispatch_reviewing_with_conn(
+            &conn,
             &task.id,
             &requester,
             &owner,
-            &cycle::boundary(&self.cas_root, task, candidate.proof.clone()).map_err(fail)?,
+            &boundary,
+            reviewed_proof.as_deref(),
             chrono::Utc::now() + chrono::Duration::minutes(10),
             false,
         )
         .map_err(fail)?;
+        drop(conn);
         if self.emit_premerge_review_handoff(task, &dispatch)?.is_some() || automatic::owns(&self.cas_root, &cas_store::get_verification_dispatch(&self.cas_root, &dispatch.id).map_err(fail)?) {
             return Err(fail(format!(
                 "task {}: merge held on verification dispatch {}. Automatic verifier startup is scheduled. Approval continues the merge automatically; verdicts needing attention wake you. Do not spawn another verifier",

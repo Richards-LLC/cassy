@@ -1,6 +1,50 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import { COMMAND_ERROR_PREFIX, SlashCommands, SupervisorCommandSession, commandsForHarness, commandReceiptNode, updateCommandReceipts, type CommandReceipt } from "./supervisor-commands";
+import { sendsOnEnter } from "./supervisor-message";
+
+function commandComposer(harness: string | undefined, send: (message: unknown) => void, options: {
+  unavailable?: () => string | undefined;
+  control?: () => Promise<void>;
+  birth?: () => string;
+} = {}) {
+  let input: HTMLTextAreaElement;
+  let palette: SlashCommands | undefined;
+  let storedDraft = "";
+  const unavailable = options.unavailable ?? (() => undefined);
+  const session = new SupervisorCommandSession({
+    unavailable,
+    control: options.control ?? (async () => {}),
+    birth: options.birth,
+    send: message => {
+      send(message);
+      return true;
+    },
+    changed: () => palette?.reconcile(),
+    clearDraft: original => {
+      if (storedDraft === original) storedDraft = "";
+      if (input.value === original) input.value = "";
+    },
+    completed: origin => palette?.returnFocus(origin),
+  });
+  return {
+    session,
+    get draft() { return storedDraft; },
+    mount(next: HTMLTextAreaElement) {
+      input = next;
+      input.addEventListener("input", () => { storedDraft = input.value; });
+      palette = new SlashCommands(input, { harness: () => harness, unavailable, label: () => "test supervisor", session });
+      return palette;
+    },
+  };
+}
+
+function holdControl() {
+  let resolve!: () => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<void>((release, refuse) => { resolve = release; reject = refuse; });
+  return { promise, resolve, reject };
+}
 
 describe("supervisor slash commands", () => {
   it("offers Standby with one confirmation on every supported harness", () => {
@@ -14,20 +58,41 @@ describe("supervisor slash commands", () => {
     for (const [harness, typed] of [["claude", " /mcp \n"], ["claude", "/reload-cassy"], ["codex", "/mcp"], ["codex", " /reload-cassy\n"], ["grok", "/mcp"], ["other", "/mcp"], [undefined, "/mcp"]] as const) {
       document.body.innerHTML = '<section><textarea></textarea></section>';
       const input = document.querySelector("textarea")!;
-      const run = vi.fn().mockResolvedValue(undefined);
-      const commands = new SlashCommands(input, { harness: () => harness, unavailable: () => undefined, label: () => "test supervisor", run });
+      const run = vi.fn();
+      const commands = commandComposer(harness, run).mount(input);
       input.value = typed;
-      expect(commands.submit()).toBe(true);
+      const typeAndSubmit = () => {
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+        input.dispatchEvent(enter);
+        expect(enter.defaultPrevented).toBe(true);
+      };
+      typeAndSubmit();
       if (harness === "claude") {
         await Promise.resolve();
-        expect(run).toHaveBeenCalledWith("mcp", false);
+        expect(run).toHaveBeenCalledWith({ SupervisorCommand: { client_ref: expect.any(String), command: "mcp", confirmed: false } });
         await vi.waitFor(() => expect(input.value).toBe(""));
       } else if (harness === "codex") {
-        // cas-8c4f: a Codex reload restarts the supervisor, so it runs only after confirmation.
+        const panel = document.querySelector<HTMLElement>("#supervisor-command-palette")!;
+        const reload = () => panel.querySelector<HTMLButtonElement>('[data-command-confirm="mcp"]');
+        const expectConfirmation = () => {
+          expect(panel.querySelector('[role="alertdialog"]')?.closest("[hidden]")).toBeNull();
+          expect(reload()?.closest("[hidden]")).toBeNull();
+          expect(reload()?.disabled).toBe(false);
+        };
+        expectConfirmation();
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        expectConfirmation();
+        commands.sync();
+        expectConfirmation();
+        panel.querySelector<HTMLButtonElement>('[role="alertdialog"] button.secondary')!.click();
+        expect(panel.hidden).toBe(true);
         expect(run).not.toHaveBeenCalled();
-        document.querySelector<HTMLButtonElement>('[data-command-confirm="mcp"]')!.click();
+        typeAndSubmit();
+        reload()!.click();
         await Promise.resolve();
-        expect(run).toHaveBeenCalledWith("mcp", true);
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(run).toHaveBeenCalledWith({ SupervisorCommand: { client_ref: expect.any(String), command: "mcp", confirmed: true } });
         await vi.waitFor(() => expect(input.value).toBe(""));
       } else {
         expect(run).not.toHaveBeenCalled();
@@ -39,8 +104,8 @@ describe("supervisor slash commands", () => {
     // An alias needs its slash: "\\reload-cassy" is ordinary chat text.
     document.body.innerHTML = '<section><textarea></textarea></section>';
     const input = document.querySelector("textarea")!;
-    const run = vi.fn().mockResolvedValue(undefined);
-    const commands = new SlashCommands(input, { harness: () => "claude", unavailable: () => undefined, label: () => "test supervisor", run });
+    const run = vi.fn();
+    const commands = commandComposer("claude", run).mount(input);
     input.value = "\\reload-cassy";
     expect(commands.submit()).toBe(false);
     await Promise.resolve();
@@ -50,8 +115,9 @@ describe("supervisor slash commands", () => {
   it("filters command suggestions but submits only an exact supported command", async () => {
     document.body.innerHTML = '<section><textarea aria-label="Message"></textarea></section>';
     const input = document.querySelector("textarea")!;
-    const run = vi.fn().mockResolvedValue(undefined);
-    const commands = new SlashCommands(input, { harness: () => "codex", unavailable: () => undefined, label: () => "test supervisor", run });
+    const run = vi.fn();
+    const { mount, session } = commandComposer("codex", run);
+    const commands = mount(input);
     input.value = "/us"; input.dispatchEvent(new Event("input"));
     expect(document.querySelectorAll("[data-supervisor-command]")).toHaveLength(1);
     expect(document.querySelector("[data-supervisor-command]")?.textContent).toBeTruthy();
@@ -61,25 +127,62 @@ describe("supervisor slash commands", () => {
     expect(run).not.toHaveBeenCalled();
     document.querySelector<HTMLButtonElement>("[data-supervisor-command]")!.click();
     await Promise.resolve();
-    expect(run).toHaveBeenCalledWith("usage", false);
-    expect(input.value).toBe("");
-    expect(document.querySelector<HTMLElement>("#supervisor-command-palette")!.hidden).toBe(true);
+    expect(run).toHaveBeenCalledWith({ SupervisorCommand: { client_ref: expect.any(String), command: "usage", confirmed: false } });
+    await vi.waitFor(() => {
+      expect(input.value).toBe("");
+      expect(document.querySelector<HTMLElement>("#supervisor-command-palette")!.hidden).toBe(true);
+    });
+    const { client_ref } = run.mock.calls[0][0].SupervisorCommand;
+    const receipt = {
+      device_id: "journey-device", client_ref, command: "usage", phase: "observed", detail: "Usage displayed by the supervisor's harness.",
+      output: "• Model: gpt-6.1-sol (reasoning high)\n• Context window: 72% left\n› Ask Codex to do anything",
+      interactive: false,
+    } satisfies CommandReceipt & { device_id: string };
+    session.receive(receipt);
     run.mockClear();
     input.value = "/usage"; input.dispatchEvent(new Event("input"));
     const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
     input.dispatchEvent(enter);
     expect(enter.defaultPrevented).toBe(true);
     await Promise.resolve();
-    expect(run).toHaveBeenCalledWith("usage", false);
+    expect(run).toHaveBeenCalledWith({ SupervisorCommand: { client_ref: expect.any(String), command: "usage", confirmed: false } });
     expect(commandsForHarness("grok")).toEqual([]);
     commands.dispose();
+  });
+
+  it("sends an ordinary chat message with a command confirmation open", () => {
+    document.body.innerHTML = '<section><textarea></textarea></section>';
+    const input = document.querySelector("textarea")!;
+    const run = vi.fn();
+    const sendChat = vi.fn();
+    const commands = commandComposer("codex", run).mount(input);
+    input.onkeydown = event => {
+      if (event.defaultPrevented || !sendsOnEnter(event)) return;
+      event.preventDefault();
+      if (!commands.submit()) sendChat(input.value);
+    };
+    const pressEnter = (text: string) => {
+      input.focus();
+      input.value = text;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    };
+    try {
+      pressEnter("/reload-cassy");
+      expect(document.querySelector('[data-command-confirm="mcp"]')).not.toBeNull();
+      pressEnter("Continue with the review.");
+      expect(sendChat.mock.calls).toEqual([["Continue with the review."]]);
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      commands.dispose();
+    }
   });
 
   it("lets pasted paths and unsupported slash text reach the normal composer send", () => {
     document.body.innerHTML = '<section><textarea aria-label="Message"></textarea></section>';
     const input = document.querySelector("textarea")!;
     const run = vi.fn();
-    const commands = new SlashCommands(input, { harness: () => "codex", unavailable: () => "No command control", label: () => "test supervisor", run });
+    const commands = commandComposer("codex", run, { unavailable: () => "No command control" }).mount(input);
     for (const text of ["/home/pippenz/notes.md", "/mnt/notes.md review this", "/shell whoami", "/usage-report", "//usage", " /usage"]) {
       input.value = text; input.dispatchEvent(new Event("input"));
       const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
@@ -96,22 +199,24 @@ describe("supervisor slash commands", () => {
   it("requires a separate destructive confirmation naming the supervisor", async () => {
     document.body.innerHTML = '<section><textarea></textarea></section>';
     const input = document.querySelector("textarea")!;
-    const run = vi.fn().mockResolvedValue(undefined);
-    const commands = new SlashCommands(input, { harness: () => "claude", unavailable: () => undefined, label: () => "test supervisor", run });
+    const run = vi.fn();
+    const commands = commandComposer("claude", run).mount(input);
     input.value = "/clear";
     commands.submit();
     expect(run).not.toHaveBeenCalled();
     const confirm = document.querySelector<HTMLButtonElement>("[data-command-confirm]")!;
     expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain("test supervisor");
     confirm.click(); await Promise.resolve();
-    expect(run).toHaveBeenCalledWith("clear", true);
+    expect(run).toHaveBeenCalledWith({ SupervisorCommand: { client_ref: expect.any(String), command: "clear", confirmed: true } });
+    await vi.waitFor(() => expect(input.value).toBe(""));
+    commands.dispose();
   });
 
   it("runs the confirmation by keyboard: Cancel first, arrows rove, Tab stays inside, Esc returns to the composer (cas-c009)", () => {
     document.body.innerHTML = '<section><textarea></textarea></section>';
     const input = document.querySelector("textarea")!;
-    const run = vi.fn().mockResolvedValue(undefined);
-    const commands = new SlashCommands(input, { harness: () => "claude", unavailable: () => undefined, label: () => "test supervisor", run });
+    const run = vi.fn();
+    const commands = commandComposer("claude", run).mount(input);
     const key = (key: string, shiftKey = false) => {
       const event = new KeyboardEvent("keydown", { key, shiftKey, bubbles: true, cancelable: true });
       document.activeElement!.dispatchEvent(event);
@@ -133,6 +238,116 @@ describe("supervisor slash commands", () => {
     expect(document.activeElement).toBe(input);
     expect(run).not.toHaveBeenCalled();
     commands.dispose();
+  });
+
+  it.each(["confirming", "sending", "refused", "outside press", "Commands toggle", "Escape", "pre-confirm Cancel"])("reconciles reload through %s", async scenario => {
+    const lease = holdControl();
+    const send = vi.fn();
+    const controller = commandComposer("codex", send, { control: () => lease.promise });
+    const fromHeader = !["confirming", "sending", "refused"].includes(scenario);
+    const textarea = () => {
+      document.body.innerHTML = '<button id="conversation-commands"></button><section><textarea></textarea></section>';
+      const input = document.querySelector("textarea")!;
+      input.value = "/reload-cassy";
+      return input;
+    };
+    const panel = () => document.querySelector<HTMLElement>("#supervisor-command-palette")!;
+    const anchor = () => document.querySelector<HTMLButtonElement>("#conversation-commands")!;
+    const confirm = () => document.querySelector<HTMLButtonElement>('[data-command-confirm="mcp"]')!;
+    const first = textarea();
+    const original = controller.mount(first);
+    first.dispatchEvent(new Event("input"));
+    if (fromHeader) {
+      original.show(anchor());
+      panel().querySelector<HTMLButtonElement>('[data-supervisor-command="mcp"]')!.click();
+    } else original.submit();
+    confirm().focus();
+    if (scenario === "pre-confirm Cancel") {
+      panel().querySelector<HTMLButtonElement>('[role="alertdialog"] button.secondary')!.click();
+    } else if (scenario !== "confirming") confirm().click();
+    original.dispose();
+    const input = textarea();
+    const replacement = controller.mount(input);
+    try {
+      if (scenario === "confirming") {
+        expect(document.activeElement).toBe(confirm());
+        expect(confirm().disabled).toBe(false);
+        return;
+      }
+      if (scenario !== "pre-confirm Cancel") {
+        expect(confirm().disabled).toBe(true);
+        expect(replacement.submit()).toBe(true);
+      }
+      if (scenario === "refused") {
+        const refusal = new Error("Studio iPad");
+        lease.reject(refusal);
+        await vi.waitFor(() => expect(document.querySelector('[role="status"]')?.textContent).toBe(refusal.message));
+        anchor().onclick = () => replacement.show(anchor());
+        anchor().click();
+        expect(anchor().getAttribute("aria-expanded")).toBe("true");
+        expect(input.value).toBe("/reload-cassy");
+        expect(controller.draft).toBe("/reload-cassy");
+        expect(send).not.toHaveBeenCalled();
+        return;
+      }
+      if (scenario === "outside press") document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      if (scenario === "Commands toggle") replacement.show(anchor());
+      if (scenario === "Escape") panel().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      lease.resolve();
+      await lease.promise;
+      if (scenario === "pre-confirm Cancel") expect(send).not.toHaveBeenCalled();
+      else expect(send.mock.calls).toEqual([[{ SupervisorCommand: { client_ref: expect.any(String), command: "mcp", confirmed: true } }]]);
+      if (scenario === "sending") {
+        await vi.waitFor(() => expect(input.value).toBe(""));
+        expect(controller.draft).toBe("");
+        expect(document.activeElement).toBe(input);
+      }
+    } finally {
+      replacement.dispose();
+    }
+  });
+
+  it("dismisses the header confirmation by re-click or outside press and removes the body panel on dispose", () => {
+    document.body.innerHTML = '<button id="conversation-commands"></button><section><textarea></textarea></section>';
+    const anchor = document.querySelector<HTMLButtonElement>("#conversation-commands")!;
+    const send = vi.fn();
+    const { mount, session } = commandComposer("codex", send);
+    const palette = mount(document.querySelector("textarea")!);
+    const confirmFromHeader = () => {
+      palette.show(anchor);
+      document.querySelector<HTMLButtonElement>('[data-supervisor-command="mcp"]')!.click();
+      expect(document.querySelector("body > #supervisor-command-palette [role=alertdialog]")).not.toBeNull();
+    };
+    confirmFromHeader();
+    palette.show(anchor);
+    expect(session.intent).toBeUndefined();
+    confirmFromHeader();
+    document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    expect(session.intent).toBeUndefined();
+    confirmFromHeader();
+    palette.dispose();
+    expect(document.querySelector("#supervisor-command-palette")).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("drops a sending intent on a new session birth before any frame is sent", async () => {
+    const lease = holdControl();
+    const send = vi.fn();
+    let birth = "first";
+    document.body.innerHTML = '<section><textarea></textarea></section>';
+    const controller = commandComposer("claude", send, { control: () => lease.promise, birth: () => birth });
+    const input = document.querySelector("textarea")!;
+    const palette = controller.mount(input);
+    input.value = "/mcp";
+    palette.submit();
+    birth = "replacement";
+    palette.reconcile();
+    expect(controller.session.intent).toBeUndefined();
+    lease.resolve();
+    await lease.promise;
+    expect(send).not.toHaveBeenCalled();
+    expect(input.value).toBe("/mcp");
+    palette.dispose();
   });
 
   it("keeps submission separate from execution and allows only Close for uncertain Usage", async () => {

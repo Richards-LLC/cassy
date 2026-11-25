@@ -439,6 +439,14 @@ mod tests {
         javascript::execute(root.path(), &args, &repo, &[]).unwrap();
         let held = refusals();
         assert!(!has_g61(&held), "{held:?}");
+
+        let helper = "scripts/test-helpers.mjs";
+        write(helper, "export const label = 'capture';\n");
+        git(&["add", helper]);
+        git(&["commit", "-qm", "plain helper delivery"]);
+        let helper_head = git(&["rev-parse", "HEAD"]);
+        assert_eq!(stability::requirements(&repo, &helper_head, &head, &[helper.into()], None).unwrap(),
+            (vec![], vec![]));
     }
 
     #[test]

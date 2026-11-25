@@ -2902,7 +2902,7 @@ pub fn auto_return_premerge_rejection(
 
 pub const REPEAT_REVIEW_REQUIRED: &str = "repeat_review_admission_required";
 
-fn latest_repeated_rejection_with_conn(conn: &Connection, task_id: &str) -> Result<Option<(String, DateTime<Utc>, u64)>> {
+pub(crate) fn latest_repeated_rejection_with_conn(conn: &Connection, task_id: &str) -> Result<Option<(String, DateTime<Utc>, u64)>> {
     let mut query = conn.prepare_cached(
         "SELECT id, created_at, COUNT(*) OVER () FROM verifications WHERE task_id = ?1 AND status = 'rejected'
          ORDER BY created_at DESC, rowid DESC LIMIT 1",
@@ -4491,9 +4491,27 @@ mod tests {
         tasks.update(&returned).unwrap();
         let next = create_verification_dispatch(dir.path(), &task.id, "worker", "owner",
             Utc::now() + Duration::minutes(10)).unwrap();
+        let cas_types::ClaimResult::Success(existing) = agents.try_claim(&task.id, &owner.id, 600, None).unwrap() else {
+            panic!("expected a lease before the second rejection");
+        };
         verdict.id = "next".into();
         verdict.dispatch_id = Some(next.id.clone());
         record(&verdict, &next);
+        assert_eq!(agents.preview_task_claim(&task.id, &owner.id).unwrap(), None);
+        assert!(matches!(agents.try_claim(&task.id, &owner.id, 600, None).unwrap(),
+            cas_types::ClaimResult::AlreadyClaimed { held_by, .. } if held_by == owner.id));
+        assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().epoch, existing.epoch);
+        agents.release_lease(&task.id, &owner.id).unwrap();
+        let history = agents.get_lease_history(&task.id, None).unwrap().len();
+        for refusal in [
+            agents.preview_task_claim(&task.id, &owner.id).unwrap_err(),
+            agents.try_claim(&task.id, &owner.id, 600, None).unwrap_err(),
+        ] {
+            assert!(matches!(refusal, StoreError::RepeatReviewRequired { rejection_id, count: 2, .. }
+                if rejection_id == verdict.id));
+        }
+        assert_eq!(agents.get_lease_history(&task.id, None).unwrap().len(), history);
+        assert!(agents.get_lease(&task.id).unwrap().is_none());
         assert!(grant("owner", &next.id, &"b".repeat(40)).is_none());
         assert_eq!(tasks.get(&task.id).unwrap().deliverables.premerge_repair, Some(receipt));
         // Explicit supervisor request-changes creates a new manual work cycle.

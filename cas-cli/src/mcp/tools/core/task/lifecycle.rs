@@ -2772,22 +2772,19 @@ impl CasCore {
             (None, None)
         };
 
-        let repeat_admission = if !task.is_terminal()
-            && !(task.status == TaskStatus::InProgress
-                && agents.get(&agent_id).ok().is_some_and(|caller|
-                    super::task_assignee_matches_agent(agents.as_ref(), task.assignee.as_deref(), &caller))
-                && agents.get_lease(&task.id).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
-                    .is_some_and(|lease| lease.agent_id == agent_id && lease.status == cas_types::LeaseStatus::Active
-                        && lease.expires_at > chrono::Utc::now()))
-        {
-            super::repeat_review::admit_repair(&self.cas_root, &task.id)?
+        let claim_error = |error| super::repeat_review::lease_claim_error(error, |error| Self::error(
+            ErrorCode::INTERNAL_ERROR,
+            format!("Failed to claim task before start: {error}"),
+        ));
+        let repair_review = if !task.is_terminal() {
+            agents.preview_task_claim(&task.id, &agent_id).map_err(claim_error)?
         } else {
-            super::repeat_review::RepairAdmission::default()
+            None
         };
         let _queue_lock = if queued_start {
             let worker = worker.as_ref().ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS,
                 crate::gates::tag("G-09", "Queued start requires its registered worker")))?;
-            let artifact_id = repeat_admission.artifact_id.as_deref();
+            let artifact_id = repair_review.as_deref();
             let lock = if task.status != TaskStatus::Open {
                 None
             } else if let Some(principal) = principal.as_mut() {
@@ -3753,10 +3750,7 @@ impl CasCore {
                 ErrorCode::INVALID_PARAMS,
                 crate::gates::tag("G-16", format!("Cannot start task: local lease refused: {refused:?}")),
             )),
-            Err(error) => return Err(Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to claim task before start: {error}"),
-            )),
+            Err(error) => return Err(claim_error(error)),
         };
         // A delayed synchronous release now sees this lease under the same
         // fence. Never expose the Cloud-first/local-later publication gap.
@@ -4214,7 +4208,7 @@ impl CasCore {
             ));
         }
 
-        let repair_brief = repeat_admission.brief();
+        let repair_brief = repair_review.as_deref().map(super::repeat_review::mismatch_brief).unwrap_or_default();
         if brief {
             // Keep scope, resume state and recent evidence within 2000 bytes.
             // Complete fields remain available through show/notes full or pages.

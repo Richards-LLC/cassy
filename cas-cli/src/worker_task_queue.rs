@@ -6,6 +6,7 @@ use cas_types::{Agent, AgentRole, TaskStatus, TaskType};
 use fs2::FileExt;
 use rmcp::{ErrorData as McpError, model::ErrorCode};
 
+use crate::mcp::tools::core::task::repeat_review::{is_repair_hold, lease_claim_error};
 use crate::{mcp::CasCore, mcp::tools::TaskStartRequest};
 
 pub(crate) fn conversation_generation(worker: &Agent) -> String {
@@ -196,8 +197,10 @@ fn persist_start_review(
     queues: &SqliteWorkerTaskQueueStore, worker: &Agent, queue: &mut WorkerTaskQueue,
     artifact_id: Option<&str>,
 ) -> Result<(), McpError> {
-    if queue.dispatch_review_artifact.as_deref() != artifact_id {
-        queue.dispatch_review_artifact = artifact_id.map(str::to_owned);
+    if let Some(artifact_id) = artifact_id
+        && queue.dispatch_review_artifact.as_deref() != Some(artifact_id)
+    {
+        queue.dispatch_review_artifact = Some(artifact_id.to_owned());
         let session = worker.factory_session.as_deref().expect("validated session");
         queues.save(session, &worker.name, queue).map_err(error)?;
     }
@@ -768,18 +771,18 @@ impl CasCore {
                 None
             };
             queue.context_reset_request = None;
-            if let Some(id) = &selected {
-                crate::mcp::tools::core::task::repeat_review::admit_repair(&self.cas_root, id)?;
-            }
-            queues
-                .save(session, &worker.name, &mut queue)
-                .map_err(error)?;
             selected
         };
-        let Some(id) = selected else { return Ok(None) };
-        if retrying && tasks.get(&id).is_ok_and(|task| task.status == TaskStatus::Open) {
-            crate::mcp::tools::core::task::repeat_review::admit_repair(&self.cas_root, &id)?;
+        let artifact_id = selected.as_deref()
+            .map(|id| agents.preview_task_claim(id, &worker.id))
+            .transpose().map_err(|cause| lease_claim_error(cause, error))?.flatten();
+        if retrying {
+            persist_start_review(&queues, &worker, &mut queue, artifact_id.as_deref())?;
+        } else {
+            queue.dispatch_review_artifact = artifact_id;
+            queues.save(session, &worker.name, &mut queue).map_err(error)?;
         }
+        let Some(id) = selected else { return Ok(None) };
         let selected_task = match tasks.get(&id) {
             Ok(task) => Some(task),
             Err(cas_store::StoreError::NotFound(_) | cas_store::StoreError::TaskNotFound(_)) => {
@@ -868,7 +871,7 @@ impl CasCore {
                     i64::from(self.load_config().lease().default_duration_mins) * 60,
                     Some("Queued task start reservation"),
                 )
-                .map_err(error)?
+                .map_err(|cause| lease_claim_error(cause, error))?
             {
                 cas_types::ClaimResult::Success(lease) => reserved_epoch = Some(lease.epoch),
                 cas_types::ClaimResult::AlreadyClaimed { held_by, .. } if held_by == worker.id => {}
@@ -972,6 +975,7 @@ impl CasCore {
                     .map_err(error)?;
                 Ok(Some(format!("Task queue started {id} for {}", worker.name)))
             }
+            Err(cause) if is_repair_hold(&cause) => Err(cause),
             Err(cause) => {
                 let note = format!("Task queue deferred {id}: {}", cause.message);
                 if queue.notes.last() != Some(&note) {

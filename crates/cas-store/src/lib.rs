@@ -101,7 +101,7 @@ pub mod mock;
 mod worktree_lease_test;
 
 // Re-export error types
-pub use error::{Result, StoreError};
+pub use error::{REPEAT_REVIEW_RULE_ID, Result, StoreError};
 
 pub use trace_archive::{
     ArchivedTrace, ArchivedTraceRecord, DEFAULT_TRACE_ARCHIVE_MAX_BYTES, RecordingArchive,

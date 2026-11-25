@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use cas_store::{REPEAT_REVIEW_REQUIRED, RequestChangesOutcome, SqliteVerificationStore, StoreError, TaskStore, VerificationStore, request_changes_for_reviewed_delivery};
+use cas_store::{REPEAT_REVIEW_REQUIRED, REPEAT_REVIEW_RULE_ID, RequestChangesOutcome, SqliteVerificationStore, StoreError, TaskStore, VerificationStore, request_changes_for_reviewed_delivery};
 use cas_types::{Event, EventEntityType, EventType};
 use rmcp::ErrorData as McpError;
 use rmcp::model::ErrorCode;
@@ -9,7 +9,6 @@ use super::release_train;
 
 const REVIEW_NOTE: &str = "whole-flow review:";
 const KEEP_NOTE: &str = "keep release train:";
-const REPAIR_HOLD_RULE: &str = "repeat_review_required";
 
 fn latest_repeated_rejection(root: &Path, task_id: &str) -> anyhow::Result<Option<(String, chrono::DateTime<chrono::Utc>, u64)>> {
     Ok(SqliteVerificationStore::open(root)?.latest_repeated_rejection(task_id)?)
@@ -34,12 +33,20 @@ fn repeat_review_refusal(task_id: &str, rejection_id: Option<&str>, count: Optio
         message: crate::gates::tag("G-172", format!(
             "Whole-flow review required for {task_id}: {count} all-time verifier rejections. Have an independent reviewer publish a Markdown review from the task's artifacts directory: a table with Actor, Operation, Design and Observed columns that compares every actor and operation against the design, followed by a Mismatches heading and a list of every mismatch. Publish it with `{prefix}artifact action=publish task_id={task_id} path=<file>`. A supervisor then links it with `{prefix}task action=notes id={task_id} note_type=decision notes=\"{REVIEW_NOTE} <artifact-id>\"`. Retry with a repair brief covering the full mismatch list."
         )).into(),
-        data: Some(serde_json::json!({"rule_id":REPAIR_HOLD_RULE, "task_id":task_id, "rejection_id":rejection_id})),
+        data: Some(serde_json::json!({"rule_id":REPEAT_REVIEW_RULE_ID, "task_id":task_id, "rejection_id":rejection_id})),
     }
 }
 
 pub(crate) fn is_repair_hold(error: &McpError) -> bool {
-    error.data.as_ref().and_then(|data| data.get("rule_id")).and_then(|rule| rule.as_str()) == Some(REPAIR_HOLD_RULE)
+    error.data.as_ref().and_then(|data| data.get("rule_id")).and_then(|rule| rule.as_str()) == Some(REPEAT_REVIEW_RULE_ID)
+}
+
+pub(crate) fn lease_claim_error(error: StoreError, fallback: impl FnOnce(StoreError) -> McpError) -> McpError {
+    match error {
+        StoreError::RepeatReviewRequired { task_id, rejection_id, count, .. } =>
+            repeat_review_refusal(&task_id, Some(&rejection_id), Some(count)),
+        other => fallback(other),
+    }
 }
 
 pub(crate) fn require_review(root: &Path, task_id: &str) -> Result<Option<String>, McpError> {
@@ -71,17 +78,25 @@ pub(crate) fn admit_repair(root: &Path, task_id: &str) -> Result<RepairAdmission
     let Some((rejection, rejected_at, count)) = latest_repeated_rejection(root, task_id).map_err(internal)? else {
         return Ok(RepairAdmission::default());
     };
-    let events = task_events(root, task_id).map_err(internal)?;
+    let artifact_id = verified_review_artifact(root, task_id, rejected_at).map_err(internal)?;
+    if artifact_id.is_some() {
+        return Ok(RepairAdmission { reviewed_rejection: Some(rejection), artifact_id });
+    }
+    Err(repeat_review_refusal(task_id, Some(&rejection), Some(count)))
+}
+
+pub(crate) fn verified_review_artifact(root: &Path, task_id: &str, rejected_at: chrono::DateTime<chrono::Utc>) -> anyhow::Result<Option<String>> {
+    let events = task_events(root, task_id)?;
     for id in supervisor_decisions(&events).filter_map(|note| note.trim().strip_prefix(REVIEW_NOTE).map(str::trim)) {
         if let Ok(artifact) = crate::artifacts::lookup_metadata(root, Some(task_id), id)
             && chrono::DateTime::parse_from_rfc3339(&artifact.created_at).is_ok_and(|created| created >= rejected_at)
             && let Ok(markdown) = crate::artifacts::proof::read_verified_text(root, &artifact, 256 * 1024)
             && is_whole_flow_review(&markdown)
         {
-            return Ok(RepairAdmission { reviewed_rejection: Some(rejection), artifact_id: Some(id.to_owned()) });
+            return Ok(Some(id.to_owned()));
         }
     }
-    Err(repeat_review_refusal(task_id, Some(&rejection), Some(count)))
+    Ok(None)
 }
 
 fn is_whole_flow_review(markdown: &str) -> bool {

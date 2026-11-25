@@ -3558,12 +3558,13 @@ pub(super) mod worker_attention_tests {
         let mut task = cas_types::Task::new("cas-late-run".into(), "parked delivery".into());
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.assignee = Some("late-worker".into());
-        task.deliverables.factory_branch_anchor = Some("1111aaaa".into());
+        let head_sha = "1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa";
+        task.deliverables.factory_branch_anchor = Some(head_sha.into());
         task_store.add(&task).unwrap();
         let eject = |run| enqueue_merge_queue_ejection_relay(
             &cas_dir, "cas-late-run", "late-worker", 556, run,
             "queue-exit:2026-11-05T23:30:00Z", Some("Fast Validation"),
-            MergeQueueExit { head_sha: "1111aaaa", group_mate_failed: false },
+            MergeQueueExit { head_sha, group_mate_failed: false },
         );
         let first = eject(None);
         assert!(matches!(first, WorkerAttentionRelayOutcome::Persisted { .. }));
@@ -3580,7 +3581,7 @@ pub(super) mod worker_attention_tests {
         assert_ne!(late, first);
         assert_eq!(eject(Some(601)), late);
         let repaired = task_store.get(&task.id).unwrap();
-        assert_eq!(repaired.notes.matches("merge-queue-repair run=601 head=1111aaaa").count(), 1);
+        assert_eq!(repaired.notes.matches(&format!("merge-queue-repair run=601 head={head_sha}")).count(), 1);
         let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
         assert_eq!(rows.iter().filter(|row| row.target == "supervisor"
             && row.prompt.contains(&format!("notification_id=\"{notification_id}\""))).count(), 1);
@@ -3601,7 +3602,8 @@ pub(super) mod worker_attention_tests {
         let mut task = cas_types::Task::new("cas-2373-eject".into(), "Parked delivery".into());
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.assignee = Some(worker.name.clone());
-        task.deliverables.factory_branch_anchor = Some("1111aaaa".into());
+        let head_sha = "1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa";
+        task.deliverables.factory_branch_anchor = Some(head_sha.into());
         tasks.add(&task).unwrap();
         record_bound_rejection(&root, &task.id, "ver-first");
         record_bound_rejection(&root, &task.id, "ver-second");
@@ -3609,7 +3611,7 @@ pub(super) mod worker_attention_tests {
         let outcome = enqueue_merge_queue_ejection_relay(
             &root, &task.id, &worker.name, 556, Some(601),
             "queue-exit:2026-11-05T23:30:00Z", Some("Fast Validation"),
-            MergeQueueExit { head_sha: "1111aaaa", group_mate_failed: false },
+            MergeQueueExit { head_sha, group_mate_failed: false },
         );
         assert!(matches!(outcome, WorkerAttentionRelayOutcome::Persisted { .. }));
         assert_eq!(tasks.get(&task.id).unwrap().status, cas_types::TaskStatus::AwaitingMerge);

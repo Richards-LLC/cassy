@@ -584,6 +584,8 @@ async fn repeat_rejection_holds_automatic_conflict_return_gh2373() {
         &f.cas_dir(), &parked, "main", &"a".repeat(40), &["feature.rs".into()], "cassy-conflict-preflight",
     ).unwrap_err();
     assert!(crate::gates::codes_in(&refusal.to_string()).contains(&"G-170"), "{refusal:?}");
+    let typed = refusal.downcast_ref::<McpError>().expect("typed repeat-review hold");
+    assert_eq!(typed.data.as_ref().unwrap()["rule_id"], "repeat_review_required");
     let held = f.task(id);
     assert_eq!(held.status, TaskStatus::AwaitingMerge);
     assert_eq!(held.deliverables.factory_branch_anchor, parked.deliverables.factory_branch_anchor);

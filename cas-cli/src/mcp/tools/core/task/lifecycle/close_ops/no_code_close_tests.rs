@@ -474,8 +474,8 @@ async fn repeat_review_every_entry_refuses_g172_gh2373() {
     f.put(&predecessor);
     let core = CasCore::with_daemon(f.cas_dir(), None, None);
     core.set_agent_id_for_testing("nocode-supervisor-session".into());
-    core.configure_worker_task_queue(WORKER, Some(vec![id.into()]), None).await.unwrap();
     reject_repeat_review_gh2373(&f, id, "A stale queue can claim the successor").await;
+    core.configure_worker_task_queue(WORKER, Some(vec![id.into()]), None).await.unwrap();
     predecessor.status = TaskStatus::AwaitingMerge;
     f.put(&predecessor);
     open_agent_store(&f.cas_dir()).unwrap().register(&Agent::new_with_role(

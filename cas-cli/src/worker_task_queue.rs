@@ -377,7 +377,6 @@ impl CasCore {
                 let task = tasks.get(id).map_err(error)?;
                 crate::task_assignment::ensure_review_assignment(task.review_dispatch_id.as_deref(), Some(worker.role))
                     .map_err(error)?;
-                crate::mcp::tools::core::task::repeat_review::admit_repair(&self.cas_root, id)?;
             }
             for id in &ids {
                 if id.trim().is_empty() || !unique.insert(id.clone()) {

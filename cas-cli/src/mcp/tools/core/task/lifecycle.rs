@@ -2743,8 +2743,36 @@ impl CasCore {
             data: None,
         })?;
 
+        let resolve_declared_repo = |task: &Task| {
+            task.deliverables.work_target.as_ref()
+                .map(|target| super::repo_context::resolve_repo_context(&self.cas_root, target))
+                .transpose()
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))
+        };
+        let resuming_awaiting_merge = task.status == TaskStatus::AwaitingMerge;
+        let (parked_repo_context, live_conflict) = if resuming_awaiting_merge && !task.deliverables.merge_conflicted {
+            let context = resolve_declared_repo(&task)?;
+            let conflict = context.as_ref().and_then(|context| {
+                let tip = task.deliverables.factory_branch_anchor.as_deref()
+                    .or(task.deliverables.parked_branch.as_deref())?;
+                parked_tip_target_conflicts(&context.repo_root, &context.target_branch, tip)
+            });
+            if conflict.is_none() {
+                // gate[G-05 start]: Clean AwaitingMerge task cannot be restarted by worker
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    close_ops::gate_text::awaiting_merge_start_refusal(
+                        &req.id,
+                        self.supervisor_guidance_prefix().unwrap_or(""),
+                    ),
+                ));
+            }
+            (context, conflict)
+        } else {
+            (None, None)
+        };
+
         let repeat_admission = if !task.is_terminal()
-            && (task.status != TaskStatus::AwaitingMerge || task.deliverables.merge_conflicted)
             && !(task.status == TaskStatus::InProgress
                 && agents.get(&agent_id).ok().is_some_and(|caller|
                     super::task_assignee_matches_agent(agents.as_ref(), task.assignee.as_deref(), &caller))
@@ -2817,17 +2845,10 @@ impl CasCore {
             ));
         }
 
-        let declared_repo_context = task
-            .deliverables
-            .work_target
-            .as_ref()
-            .map(|target| super::repo_context::resolve_repo_context(&self.cas_root, target))
-            .transpose()
-            .map_err(|message| McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(message),
-                data: None,
-            })?;
+        let declared_repo_context = match parked_repo_context {
+            Some(context) => Some(context),
+            None => resolve_declared_repo(&task)?,
+        };
 
         // Artifact-only work does not own the shared repository checkout.
         // Keep branch checks and start boundaries for isolated worker trees.
@@ -2919,23 +2940,7 @@ impl CasCore {
                 crate::gates::tag("G-09", "Queued task needs a declared work target before its branch can be allocated")));
         }
 
-        // cas-a844/cas-5054: a genuinely conflicted parked branch is unfinished
-        // work, so its assigned worker may resume it. A clean AwaitingMerge
-        // task remains worker-complete and must stay parked for the supervisor.
-        let resuming_awaiting_merge = task.status == TaskStatus::AwaitingMerge;
         if resuming_awaiting_merge {
-            // cas-2bdf: only a close retry set the flag, so a merge-queue
-            // conflict dequeue or a moved target left the owner refused until
-            // the supervisor ran request_changes. Measure the parked tip
-            // against the target now; a clean tip still stays parked.
-            let live_conflict = (!task.deliverables.merge_conflicted)
-                .then(|| declared_repo_context.as_ref())
-                .flatten()
-                .and_then(|context| {
-                    let tip = task.deliverables.factory_branch_anchor.as_deref()
-                        .or(task.deliverables.parked_branch.as_deref())?;
-                    parked_tip_target_conflicts(&context.repo_root, &context.target_branch, tip)
-                });
             if let Some((target_ref, paths)) = live_conflict.as_ref() {
                 task.notes = format!(
                     "{}{}[{}] ✅ DECISION parked tip conflicts with {target_ref} in {}; owner resumes for a conflict-only repair (cas-2bdf). Merge the target into the branch rather than rebasing: prior test receipts stay valid when the resolution touches only CHANGELOG.md or generated hub-web/dist files",
@@ -2944,15 +2949,6 @@ impl CasCore {
                     chrono::Utc::now().format("%Y-%m-%d %H:%M"),
                     paths.join(", "),
                 );
-            } else if !task.deliverables.merge_conflicted {
-                // gate[G-05 start]: Clean AwaitingMerge task cannot be restarted by worker
-                return Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    close_ops::gate_text::awaiting_merge_start_refusal(
-                        &req.id,
-                        self.supervisor_guidance_prefix().unwrap_or(""),
-                    ),
-                ));
             }
 
             let now = chrono::Utc::now();

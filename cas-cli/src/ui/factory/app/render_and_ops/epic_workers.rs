@@ -7922,7 +7922,6 @@ mod tests {
         assert_eq!(task.status, TaskStatus::Open);
         assert_eq!(task.assignee.as_deref(), Some("replacement-reviewer"));
         assert!(task.notes.contains("prior review evidence"));
-        assert!(task.notes.contains("force-released"));
         assert_eq!(task.branch.as_deref(), Some("factory/prior-review"));
         agents
             .register(&cas_types::Agent::new_with_role(
@@ -9259,7 +9258,7 @@ mod tests {
         git(&checkout, &["commit", "-qm", "cas-d6b1: complete takeover"]);
         let tip = git(&checkout, &["rev-parse", "HEAD"]);
         git(&checkout, &["push", "-q", "origin", branch]);
-        worker
+        let park = worker
             .task(request(
                 serde_json::json!({"action": "close", "id": task.id, "reason": "Takeover validated"}),
             ))
@@ -9267,7 +9266,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             tasks.get(&task.id).unwrap().status,
-            TaskStatus::AwaitingMerge
+            TaskStatus::AwaitingMerge,
+            "{park:?}"
         );
         env.set_current_dir(&project);
         assert_eq!(

@@ -8,13 +8,15 @@ Pass `lane=<light|standard|taste|heavy>` (preferred) or a complete explicit `cli
 
 The table is generated from the embedded `cas-factory` registry; change policy in the registry, not here.
 
+November 26, 2026 operator ruling: heavy uses Claude Opus 5.5 at `xhigh`; taste stays on Claude Fable 5.2 at `high`. Explicit recipes accept their model's supported effort levels, not modes such as Ultracode or Instant.
+
 <!-- BEGIN GENERATED ROUTE TABLE: cas-factory lane registry -->
 | Lane | Recipe | Provider | CLI | Model | Effort | Status | Fallback | Notes |
 |---|---|---|---|---|---|---|---|---|
 | `light` | `codex_sol_6_2_low` | `openai` | `codex` | `gpt-6.2-sol` | `low` | `active` | `fallback: codex_luna_6, claude_opus_5_5_low` |  |
 | `standard` | `codex_sol_6_2` | `openai` | `codex` | `gpt-6.2-sol` | `xhigh` | `active` | `fallback: codex_sol_6_2_high, claude_sonnet_5_5_high` |  |
 | `taste` | `claude_fable_5_2_high` | `anthropic` | `claude` | `claude-fable-5-2` | `high` | `active` | `fallback: claude_opus_5_5, claude_opus` |  |
-| `heavy` | `claude_fable_5_2_high` | `anthropic` | `claude` | `claude-fable-5-2` | `high` | `active` | `fallback: claude_opus_5_5, codex_astra_high` |  |
+| `heavy` | `claude_opus_5_5_xhigh` | `anthropic` | `claude` | `claude-opus-5-5` | `xhigh` | `active` | `fallback: claude_opus_5_5, codex_astra_high` |  |
 | `supervisor` | `claude_opus_5_5` | `anthropic` | `claude` | `claude-opus-5-5` | `high` | `active` | `fallback: claude_fable_high` |  |
 | `— (explicit only)` | `claude_fable` | `anthropic` | `claude` | `claude-fable-5-1` | `medium` | `active` | `not lane-routed` |  |
 | `— (explicit only)` | `codex_astra` | `openai` | `codex` | `gpt-6-astra` | `medium` | `active` | `not lane-routed` | Heavy route; excluded from supervisor and taste after the observed 2026-09-05 stall holding finished workers and stopping epic drive. |

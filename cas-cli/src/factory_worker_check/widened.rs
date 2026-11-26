@@ -352,12 +352,19 @@ mod tests {
         write("apps/dm/package.json", "{\"scripts\":{\"build\":\"maizzle build\"}}");
         let email = "apps/dm/emails/receipt.vue";
         let types = "e2e/env.d.ts";
+        let journeys = "tests/journeys/playwright.config.ts";
+        let maizzle = "apps/dm/maizzle.config.ts";
         let edit = |marker: &str| {
             write(config, &format!("export default {{ testDir: '.', webServer: {{ command: 'node main.mjs' }} }}; // {marker}\n"));
             write(server, &format!("import {{ app }} from './nuxt-app.mjs';\napp('{marker}');\n"));
             write(shim, &format!("export const app = (name) => name; // {marker}\n"));
             write(email, &format!("<template><p>{marker}</p></template>\n"));
             write(types, &format!("declare const marker: '{marker}';\n"));
+            write(journeys, &format!("export default {{ testDir: '.', testMatch: /.*\\.spec\\.ts$/ }}; // {marker}\n"));
+            write(maizzle, &format!("import {{ defineConfig }} from '@maizzle/framework'\n\
+                import englishOnlyTemplates from '../backend/src/email/templates/english-only.json'\n\
+                export default defineConfig({{ build: {{ skip: englishOnlyTemplates }} }}) // {marker}\n"));
+            write("apps/backend/src/email/templates/english-only.json", &format!("[\"{marker}\"]"));
             git(&["add", "."]);
             git(&["commit", "-qm", marker]);
             git(&["rev-parse", "HEAD"])
@@ -365,10 +372,10 @@ mod tests {
         git(&["init", "-q", "-b", "main"]);
         let base = edit("base");
         let head = edit("delivery");
-        let paths = [server, shim, config, email, types].map(String::from);
+        let paths = [server, shim, config, email, types, journeys, maizzle].map(String::from);
         let suite = Scope::Package("tests/chat-history".into());
         assert_eq!(stability::requirements(repo.path(), &head, &base, &paths, None).unwrap(), (Vec::new(), vec![suite.clone()]));
-        assert_eq!((scope(repo.path(), config), scope(repo.path(), email)), (None, None));
+        assert_eq!([config, email, journeys, maizzle].map(|path| scope(repo.path(), path)), [None, None, None, None]);
         let commands = commands(Path::new("/cas"), repo.path(), &paths, &[suite.clone()], &Default::default());
         assert_eq!(commands.len(), 1, "{commands:?}");
         let args = commands[0].split_once(" -- ").unwrap().1.split_whitespace().map(str::to_owned).collect::<Vec<_>>();

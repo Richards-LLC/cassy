@@ -293,6 +293,7 @@ fn json_imports(path: &str, source: &str) -> Result<BTreeSet<String>> {
 }
 
 fn registering_json_imports(path: &str, source: &str) -> Result<BTreeSet<String>> {
+    if !test_file(path) { return Ok(BTreeSet::new()); }
     let imported = json_imports(path, source)?;
     if imported.is_empty() { return Ok(imported); }
     let Ok(tree) = source_tree(path, source) else { return Ok(imported) };
@@ -347,20 +348,35 @@ fn registering_json_imports(path: &str, source: &str) -> Result<BTreeSet<String>
     let mut registering = BTreeSet::new();
     let suite_or_test = |call: Node<'_>| declaration(call, source, &aliases).map(|(suite, ..)| suite)
         .or_else(|| callee_root(call).filter(|root| aliases.contains_key(root)).map(|_| false));
-    let in_test_body = |node: Node<'_>| {
+    let local_name = |function: Node<'_>| match function.kind() {
+        "function_declaration" | "generator_function_declaration" => function.child_by_field_name("name"),
+        "arrow_function" | "function_expression" => function.parent().filter(|parent| parent.kind() == "variable_declarator")
+            .and_then(|declarator| declarator.child_by_field_name("name")),
+        _ => None,
+    }.map(|name| text(name, source).to_owned());
+    let deferred = |node: Node<'_>, eager: &BTreeSet<String>| {
         let mut scope = node.parent();
         while let Some(current) = scope {
-            if matches!(current.kind(), "arrow_function" | "function_expression")
-                && let Some(call) = current.parent().filter(|parent| parent.kind() == "arguments").and_then(|arguments| arguments.parent())
+            if let Some(call) = matches!(current.kind(), "arrow_function" | "function_expression").then(|| current.parent()).flatten()
+                .filter(|parent| parent.kind() == "arguments").and_then(|arguments| arguments.parent())
                 && (suite_or_test(call) == Some(false) || call.child_by_field_name("function").is_some_and(|function|
                     matches!(text(function, source).rsplit('.').next(), Some("beforeEach" | "afterEach" | "beforeAll" | "afterAll"))))
             {
                 return true;
             }
+            if local_name(current).is_some_and(|name| !eager.contains(&name)) { return true; }
             scope = current.parent();
         }
         false
     };
+    let mut eager = BTreeSet::new();
+    loop {
+        let found: BTreeSet<String> = calls.iter().copied().filter(|call| !deferred(*call, &eager))
+            .filter_map(callee_root).collect();
+        if found.is_subset(&eager) { break; }
+        eager.extend(found);
+    }
+    let in_test_body = |node: Node<'_>| deferred(node, &eager);
     for call in calls.iter().copied().filter(|call| !in_test_body(*call)) {
         let mut cursor = call.walk();
         let arguments = call.child_by_field_name("arguments").map(|arguments| arguments.named_children(&mut cursor)
@@ -3094,6 +3110,33 @@ mod tests {
         Identity::exact(path, name)
     }
 
+
+    #[test]
+    fn probe_0304_delivery_4f4c2d3_requirements_and_covering() {
+        let source = crate::test_paths::crate_root().join("..");
+        let scratch = tempfile::tempdir().unwrap();
+        let repo = scratch.path().join("r");
+        let run = |dir: &Path, args: &[&str]| {
+            let output = Command::new("git").current_dir(dir).args(args).output().unwrap();
+            assert!(output.status.success(), "{args:?} {output:?}");
+            String::from_utf8(output.stdout).unwrap()
+        };
+        run(scratch.path(), &["clone", "--quiet", "--shared", "--no-checkout", source.to_str().unwrap(), "r"]);
+        run(&repo, &["checkout", "--quiet", "--detach", "4f4c2d3e27c48f33c12a5757b4c602c679f4d13a"]);
+        let base = "9a6c48cce1af5ddaa41eccd7cdc3a725b92b77c4";
+        let paths: Vec<String> = run(&repo, &["diff", "--name-only", base, "HEAD"]).lines().map(str::to_owned).collect();
+        assert_eq!(paths.len(), 34);
+        for module in ["cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs", "scripts/visual-qa.mjs"] {
+            eprintln!("PROBE changed_tests {module}: {:?}", changed_tests(&repo, base, "HEAD", &[module.to_string()], None).map_err(|error| format!("{error:#}")));
+        }
+        let non_rust: Vec<String> = paths.iter().filter(|path| !path.ends_with(".rs")).cloned().collect();
+        let (tests, widened) = super::super::stability::requirements(&repo, "HEAD", base, &non_rust, None).unwrap();
+        eprintln!("PROBE requirements(non-Rust {}): tests={tests:?} widened={widened:?}", non_rust.len());
+        let covering = super::super::widened::covering(&repo, "HEAD", &paths, &widened);
+        eprintln!("PROBE covering(all {}): {covering:?}", paths.len());
+        assert!(widened.is_empty(), "{widened:?}");
+    }
+
     #[test]
     fn red_first_playwright_timeout_matches_selected_spec_gh_2422() {
         let report = serde_json::from_str(include_str!("javascript/playwright-timed-out.txt")).unwrap();
@@ -4407,7 +4450,18 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         write(catalogue, "[[\"sms\", false]]");
         write("src/__scenarios__/legacy.json", "[[\"fax\", true]]");
         write(spec, &source("scenarios.json", ""));
-        write("src/__scenarios__/labels.spec.ts", "import cases from './scenarios.json';\nit('names the first channel', () => { expect(cases[0][0]).toBe('sms'); });\n");
+        let labels = "src/__scenarios__/labels.spec.ts";
+        write(labels, "import locale from './scenarios.json';\nconst t = (key: string) => {\n  let value: any = locale;\n\
+            for (const part of key.split('.')) value = value?.[part];\n  return String(value ?? key);\n};\n\
+            describe('workbench', () => {\n  beforeEach(() => { vi.stubGlobal('useI18n', () => ({ t })); });\n  it('names the first channel', () => {});\n});\n");
+        write("src/__scenarios__/copy.spec.ts", "it('locks the subject', () => {\n  const en = require('./scenarios.json') as Record<string, string>;\n  expect(en.subject).toBe('x');\n});\n");
+        write("src/__scenarios__/settings.test.ts", "import en from './scenarios.json';\n\
+            const render = () => mount(View, { global: { plugins: [createI18n({ legacy: false, locale: 'en', messages: { en } })] } });\n\
+            it('renders', () => { render(); });\n");
+        let titled = "src/__scenarios__/handoff.spec.ts";
+        write(titled, "import en from './scenarios.json';\nfor (const plan of [{ id: 'solo', cta: en[0][0] }] as const) {\n\
+            test(`signed out, \"${plan.cta}\" asks`, async () => {});\n}\n");
+        let script = "docs/evidence/scripts/report.cjs";
         let derived = "src/__scenarios__/derived.spec.ts";
         write(derived, "import cases from './scenarios.json';\nconst rows = cases.filter(([, listed]) => !listed);\n\
             const check = (channel) => it(`sends ${channel}`, () => {});\nfor (const [channel] of rows) check(channel);\n");
@@ -4416,13 +4470,16 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let base = commit("base");
 
         write(catalogue, "[[\"sms\", false], [\"email\", true]]");
+        write("docs/evidence/scripts/dump.json", "[]");
+        write(script, "const dump = require('./dump.json');\nconst { match } = require('./match.cjs');\nconsole.log(match(dump));\n");
         let catalogue_only = commit("catalogue only");
-        let required = super::super::stability::requirements(repo.path(), &catalogue_only, &base, &[catalogue.into()], None).unwrap();
-        assert_eq!(required, (Vec::new(), vec![Scope::File(spec.into()), Scope::File(derived.into()), Scope::File(external.into())]));
-        write("src/__scenarios__/labels.spec.ts", "it('names the first channel', () => { expect('sms').toBe('sms'); });\n");
+        let required = super::super::stability::requirements(repo.path(), &catalogue_only, &base, &[catalogue.into(), script.into(), "docs/evidence/scripts/dump.json".into()], None).unwrap();
+        assert_eq!(required, (Vec::new(), [spec, derived, external, titled].map(|path| Scope::File(path.into())).into_iter().collect::<BTreeSet<_>>().into_iter().collect()));
+        write(labels, "const t = (key: string) => key;\ndescribe('workbench', () => {\n\
+            beforeEach(() => { vi.stubGlobal('useI18n', () => ({ t })); });\n  it('names the first channel', () => { t('x'); });\n});\n");
         let dropped = commit("drop the read-only import");
-        assert_eq!(changed_tests(repo.path(), &catalogue_only, &dropped, &["src/__scenarios__/labels.spec.ts".into()], None).unwrap(),
-            [id("src/__scenarios__/labels.spec.ts", "names the first channel")]);
+        assert_eq!(changed_tests(repo.path(), &catalogue_only, &dropped, &[labels.into()], None).unwrap(),
+            [id(labels, "workbench names the first channel")]);
 
         write(spec, &source("legacy.json", "expect(1).toBe(1);"));
         let switched = commit("switch catalogue");
@@ -4634,13 +4691,18 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
   it.each([{ n: 1 }, { n: 2 }])('static title', () => {});
   it.each(['p', 'q'] as const)('const flat %s', () => {});
   it.each([{ s: 'x', on: true }] satisfies Row[])('const prop $s $on', () => {});
+  it.each(['en', 'es'] as const)(
+    'keeps the draft destination and follow-up without exposing the internal ID in %s',
+    () => {});
 });"#;
         let derived: BTreeMap<String, usize> = source_rows("a.test.ts", source).unwrap().into_values().flatten().collect();
         let printed = ["p prop bool false", "p prop bool true", "p prop str 'x'", "p prop str ''", "p prop num 1", "p prop num -2",
             "p prop num 1.5", "p prop num +0", "p prop nullish null", "p prop nullish undefined", "p two 1 and 'q' and 1",
             "p two 2 and 'r' and 2", "p missing undefined here", "p pct Funnel Drop then a", "p pct AIDA then c", "p pct one x",
             "p pct one y", "p flat p", "p flat q", "p lit true null undefined", "p extra a", "p short a undefined", "p index 0 1 a",
-            "p index 1 2 b", "p static title", "p static title", "p const flat p", "p const flat q", "p const prop 'x' true"];
+            "p index 1 2 b", "p static title", "p static title", "p const flat p", "p const flat q", "p const prop 'x' true",
+            "p keeps the draft destination and follow-up without exposing the internal ID in en",
+            "p keeps the draft destination and follow-up without exposing the internal ID in es"];
         let mut expected = BTreeMap::new();
         for name in printed { *expected.entry(name.to_string()).or_default() += 1; }
         assert_eq!(derived, expected);
@@ -4648,6 +4710,12 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             ("[1, 2]", "int %d and %i"), ("[['a']]", "percent %% and %s"), ("[{ a: 1 }]", "mixed %s and $a"),
             ("[{ s: \"it's\" }]", "quoted $s"), ("[{ s: 'long string value that is well over the forty character threshold' }]", "long $s"),
             ("[[{ k: 1 }]]", "object %s"), ("[[[1, 2]]]", "array %s"), ("[{ a: { b: 1 } }]", "nested $a.b"),
+            ("[390, 1440].flatMap(width =>\n      (['idea', 'revision', 'audit_fixes'] as const).map(flow => ({ width, flow }))\n    )",
+                "keeps the $flow draft preview above progress without a leave control at $width, then opens Content"),
+            ("[\n    { rapid: false, firstSaved: true, lastSaved: true },\n    { rapid: true, firstSaved: false, lastSaved: true }\n  ]",
+                "swaps hook slots before saving and reconciles ordered choices: %j"),
+            ("[\n      [{ status: 'refused', reason: 'protected_zaprite_source' }, true],\n      [{ status: 'skipped' }, false]\n    ]",
+                "maps API outcome %j to an informational protection notice (%s)"),
         ] {
             let unknown = format!("it.each({fragment})('{title}', () => {{}});");
             assert!(source_rows("a.test.ts", &unknown).unwrap().is_empty(), "{title}: rendering is not known exactly");

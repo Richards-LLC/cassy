@@ -1,4 +1,0 @@
-title: A cached conversation omitted from a fresh catalog appeared to be waiting for a supervisor
-tasks: [cas-228f]
-invariants: [HUB-J12-CATALOG-FOOTER]
-journeys: [HUB-J12]

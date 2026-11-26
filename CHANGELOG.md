@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.58.0] - 2026-11-26
+
+### Fixed — Commander
+
+- **Old conversations no longer stick in the live list** — Once a machine answers with a fresh session list, Commander drops old cached conversations the machine no longer reports. Live conversations stay visible, even when they have been idle for days.
+
+### Fixed — Factory
+
+- **Close names the delivery gate that timed out** — Merge-state and delivery-content checks share one budget. An expired proof refuses the close instead of parking the delivery afterward.
+
+### Changed — Factory
+
+- **Heavy workers use Opus 5.5** — Heavy defaults to Claude Opus 5.5 at `xhigh`; taste stays on Fable 5.2 at `high`. Explicit recipes accept each model's supported effort levels.
+
 ## [4.57.0] - 2026-11-26
 
 ### Fixed — Task Verification

@@ -35,14 +35,8 @@ export function sessionStopped(session: HubSession): boolean {
   return Boolean(session.ended) || session.liveness === "stale_metadata";
 }
 
-export function reconcileCatalog(previous: readonly HubSession[], listed: readonly HubSession[], stopped: readonly HubSession[] = [], expireCachedBefore = -Infinity): HubSession[] {
-  const reported = new Set(listed.map(session => session.name));
-  const known = new Map<string, HubSession>();
-  for (const session of previous) {
-    if (session.unreachable && !reported.has(session.name)
-        && Date.parse(session.last_activity_at ?? session.started_at ?? "") < expireCachedBefore) continue;
-    known.set(session.name, { ...session, stale: true });
-  }
+export function reconcileCatalog(previous: readonly HubSession[], listed: readonly HubSession[], stopped: readonly HubSession[] = [], _expireCachedBefore = -Infinity): HubSession[] {
+  const known = new Map<string, HubSession>(previous.map(session => [session.name, { ...session, stale: true }]));
   for (const session of stopped) if (sessionStopped(session)) known.set(session.name, session);
   for (const session of listed) {
     if (session.liveness === "missing_endpoint" && known.has(session.name)) continue;

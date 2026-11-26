@@ -19,7 +19,7 @@ describe("worker visibility", () => {
   });
 });
 
-import { visibleCatalog } from './worker-visibility';
+import { reconcileCatalog, visibleCatalog } from './worker-visibility';
 import type { HubSession } from './types';
 
 const liveSession: HubSession = { name: 'live', supervisor: 'supervisor', workers: ['worker'], liveness: 'live' };
@@ -40,6 +40,13 @@ describe('staffed session catalog', () => {
     expect(visibleCatalog([liveSession], false).map(row => row.name)).toEqual(['live']);
     expect(visibleCatalog([{ ...liveSession, dormant: true }]).map(row => row.name)).toEqual(['live']);
     expect(visibleCatalog([liveSession], true)[0].unreachable).toBeUndefined();
+  });
+  it('expires a 25-day-old cached session omitted from a fresh catalog', () => {
+    const lastActivityAt = '2026-11-01T16:38:00Z';
+    const current = { ...liveSession, last_activity_at: lastActivityAt };
+    const cached = { ...current, name: 'omitted', unreachable: true };
+    const cutoff = Date.parse('2026-11-26T16:38:00Z') - 30_000;
+    expect(visibleCatalog(reconcileCatalog([cached], [current], [], cutoff))).toEqual([current]);
   });
   it('never reads an exited supervisor', () => {
     expect(readablePanes(panes.map(pane => ({ ...pane, exited: true })))).toEqual([]);

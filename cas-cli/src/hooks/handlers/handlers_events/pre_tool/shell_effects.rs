@@ -988,13 +988,16 @@ pub(super) enum ShellSource {
     Command(usize),
     Script(usize),
     Stdin,
+    /// Bash refuses an option it does not know and runs nothing.
+    Rejected,
 }
 
 /// The `sh`-family argv grammar: option bundles, where each `o`/`O` takes the
 /// following word and `--rcfile`/`--init-file` take one, end at `--`, `-` or
 /// the first operand. With `-c` that operand is the command string.
-pub(super) fn shell_source(args: &[String]) -> Result<ShellSource, &'static str> {
+pub(super) fn shell_source(shell: &str, args: &[String]) -> Result<ShellSource, &'static str> {
     const UNRESOLVED: &str = "a shell command without a resolvable payload";
+    let rejected = || if shell == "bash" { Ok(ShellSource::Rejected) } else { Err(UNRESOLVED) };
     let (mut at, mut command, mut stdin, mut short) = (0, false, false, false);
     while let Some(arg) = args.get(at) {
         if arg == "--" || arg == "-" {
@@ -1003,11 +1006,11 @@ pub(super) fn shell_source(args: &[String]) -> Result<ShellSource, &'static str>
         }
         if let Some(long) = arg.strip_prefix("--") {
             at += match long {
-                _ if short => return Err(UNRESOLVED),
+                _ if short => return rejected(),
                 "rcfile" | "init-file" => 2,
                 "login" | "noprofile" | "norc" | "posix" | "restricted" | "verbose" | "noediting"
-                | "debugger" | "dump-strings" | "dump-po-strings" | "pretty-print" => 1,
-                _ => return Err(UNRESOLVED),
+                | "debug" | "debugger" | "dump-strings" | "dump-po-strings" | "pretty-print" => 1,
+                _ => return rejected(),
             };
             continue;
         }
@@ -1016,12 +1019,12 @@ pub(super) fn shell_source(args: &[String]) -> Result<ShellSource, &'static str>
         let mut values = 0;
         for flag in flags.chars() {
             match flag {
-                'c' | 's' if arg.starts_with('+') => return Err(UNRESOLVED),
+                'c' | 's' if arg.starts_with('+') => return rejected(),
                 'c' => command = true,
                 's' => stdin = true,
                 'o' | 'O' => values += 1,
                 _ if "abefhkmnptuvxBCEHPTilrD".contains(flag) => {}
-                _ => return Err(UNRESOLVED),
+                _ => return rejected(),
             }
         }
         at += 1 + values;
@@ -1598,18 +1601,21 @@ fn collect_script(
                     }
                 }
                 let searches_directory = cdpath.iter().any(|value| !value.is_empty());
+                // A quoted literal `'$D'` names a directory spelled `$D`.
                 let operands: Vec<_> = args
                     .iter()
-                    .filter(|arg| arg.as_str() != "--" && arg.as_str() != "-L")
+                    .zip(&word_literals[index.map_or(0, |index| index + 1)..])
+                    .filter(|(arg, _)| arg.as_str() != "--" && arg.as_str() != "-L")
                     .collect();
                 let targets = match operands.as_slice() {
                     [] => directory_values
                         .get("HOME")
                         .cloned()
                         .unwrap_or_else(|| vec!["$HOME".into()]),
-                    [target] if !target.starts_with('-') => {
-                        expand_factory_shell_word(target, &directory_values)
-                    }
+                    [(target, literal)] if !target.starts_with('-') => match literal {
+                        true => vec![target.to_string()],
+                        false => expand_factory_shell_word(target, &directory_values),
+                    },
                     _ => vec!["$UNRESOLVED_CWD".into()],
                 };
                 let mut changed = Vec::new();
@@ -1667,7 +1673,7 @@ fn collect_script(
                         add_directory(&mut changed, path);
                     }
                 }
-                if name == Some("cd") && operands.len() == 1 && operands[0] == "-" {
+                if name == Some("cd") && matches!(operands.as_slice(), [(target, _)] if *target == "-") {
                     changed = previous_dirs.clone();
                 }
                 // The next && statement requires cd to have succeeded.
@@ -1755,7 +1761,7 @@ fn collect_script(
             // parameters. Credential reads keep every binding as a candidate.
             let mut child = None;
             let payload = if matches!(name, Some("sh" | "bash" | "dash" | "zsh" | "ksh")) {
-                match shell_source(args)? {
+                match shell_source(name.unwrap_or_default(), args)? {
                     ShellSource::Command(at) => {
                         payload_literal = index
                             .and_then(|index| word_literals.get(index + 1 + at))
@@ -1773,7 +1779,7 @@ fn collect_script(
                         child = Some((values, names));
                         Some(args[at].clone())
                     }
-                    ShellSource::Script(_) | ShellSource::Stdin => None,
+                    ShellSource::Script(_) | ShellSource::Stdin | ShellSource::Rejected => None,
                 }
             } else if matches!(name, Some("script" | "su" | "runuser")) {
                 args.iter()
@@ -1792,10 +1798,11 @@ fn collect_script(
                     })
                     .transpose()?
             } else if name == Some("eval") {
-                payload_literal = word_literals[index.unwrap() + 1..]
+                let skip = usize::from(args.first().is_some_and(|arg| arg == "--"));
+                payload_literal = word_literals[index.unwrap() + 1 + skip..]
                     .iter()
                     .all(|literal| *literal);
-                Some(args.join(" "))
+                Some(args[skip..].join(" "))
             } else {
                 let payload = if continuation {
                     None

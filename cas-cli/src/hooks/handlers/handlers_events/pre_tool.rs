@@ -3026,7 +3026,7 @@ fn collect_git_write_targets(
                 let argv = argv.unwrap_or_else(|| words.clone());
                 let Some(index) = unwrapped_command_index(&argv) else { continue };
                 let args = &argv[index + 1..];
-                match shell_effects::shell_source(args) {
+                match shell_effects::shell_source(name, args) {
                     // The projection holds a direct payload's statements.
                     Ok(shell_effects::ShellSource::Command(at)) => if from_find {
                         for directory in &directories {
@@ -3039,6 +3039,7 @@ fn collect_git_write_targets(
                     // An unquoted expansion could become options or another script.
                     Ok(shell_effects::ShellSource::Script(at)) if args[..=at].iter().all(literal) => {}
                     Ok(shell_effects::ShellSource::Stdin) if !mentions_git => {}
+                    Ok(shell_effects::ShellSource::Rejected) => {}
                     _ => targets.push(uncertain()),
                 }
                 continue;
@@ -3084,9 +3085,14 @@ fn collect_git_write_targets(
             } else if matches!(operation, "checkout" | "switch") {
                 git_head_action(operation, operands)
             } else { GitHeadAction::Guarded };
-            // Only one known spelling of an option value resolves it.
+            // Only one known spelling of an option value resolves it; a
+            // quoted literal `'$D'` is not a variable.
             let resolve_path = |base: &std::path::Path, value: &str| {
-                let [value] = expand_factory_shell_word(value, &context.values).try_into().ok()?;
+                let expanded = match literal_words.get(value) {
+                    Some(true) => vec![value.to_string()],
+                    _ => expand_factory_shell_word(value, &context.values),
+                };
+                let [value] = expanded.try_into().ok()?;
                 let value: String = match value.strip_prefix('~') {
                     Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("{}{rest}", std::env::var("HOME").ok()?),
                     _ => value,
@@ -10950,6 +10956,29 @@ EOF
             // credential read, which the credential gate refuses.
             ("cd \"$UNKNOWN_CWD\" && git status", false),
             ("sh -c 'printf x > src/new.rs'", false),
+            // GH #2497, #2458, #2479: background payloads with positional
+            // parameters and redirected output stay in the worktree.
+            ("A=src; setsid bash -c 'pnpm typecheck > \"$1/typecheck.log\" 2>&1' bash \"$A\" < /dev/null & tail -n 2 \"$A/test.log\"", false),
+            ("A=src; nohup bash -c 'pnpm typecheck; printf \"exit=%s\\n\" \"$?\"' > \"$A/typecheck.log\" 2>&1 < /dev/null &", false),
+            ("bash -c 'printf x > \"$1\"' bash ../../config.toml", true),
+            ("bash -c 'shift; printf x > \"$1\"' bash src/new.rs ../../config.toml", true),
+            ("bash -c 'f() { printf x > \"$1\"; }; f ../../config.toml' bash src/new.rs", true),
+            // A child shell receives exported variables only.
+            ("W=$PWD; bash -c 'printf x > \"$W/etc-cas-e460\"'", true),
+            ("export W=$PWD; bash -c 'printf x > \"$W/src/new.rs\"'", false),
+            // GH #2473, #2512: `cd \"$OLDPWD\"` and `cd -` return; `pushd` moves.
+            ("cd ../.. && cat config.toml; cd \"$OLDPWD\" && printf x > src/new.rs", false),
+            ("cd ../..; cd - >/dev/null && printf x > src/new.rs", false),
+            ("pushd ../.. >/dev/null && printf x > config.toml", true),
+            ("eval -- 'cd ../..'; printf x > config.toml", true),
+            // GH #1866, #2547: numeric counters and clock arithmetic are inert.
+            ("missing=0; for p in src/a src/b; do [ -f \"$p\" ] || missing=$((missing+1)); done; printf '%s\\n' \"$missing\" > src/missing.txt", false),
+            ("until_timer=$((900 - $(date +%s) % 900)); printf '%s\\n' \"$until_timer\" > src/timer.txt", false),
+            ("n=$(cat src/n); printf '%s' $((n+1))", true),
+            ("n=0; read n < src/n; printf '%s' $((n+1))", true),
+            // GH #2491: array words are data and bind their elements.
+            ("a=(src/*); ls -l \"${a[0]}\"", false),
+            ("a=(../../config.toml); printf x > \"${a[0]}\"", true),
             ("(cd src && printf x > new.rs); printf x > local.rs", false),
             ("cd ../.. && cat config.toml", false),
         ] {
@@ -10992,9 +11021,10 @@ EOF
         let main = root_path.join("main");
         let worktree = main.join(".cas/worktrees/solid-condor-23");
         let artifacts = root_path.join("artifacts");
-        for dir in [home.join(".cas/sessions"), worktree.join("src"), artifacts.join("cas-cf4f/old")] {
+        for dir in [home.join(".cas/sessions"), worktree.join("src"), artifacts.join("cas-cf4f/old"), main.join("node_modules")] {
             std::fs::create_dir_all(dir).unwrap();
         }
+        std::os::unix::fs::symlink(main.join("node_modules"), worktree.join("node_modules")).unwrap();
         for file in [
             home.join(".cas/factory-qa4cd6.gui.sock"),
             home.join(".cas/sessions/qa4cd6.json.lock"),
@@ -11033,6 +11063,8 @@ EOF
             ("stale session file", "rm ~/.cas/sessions/qa4cd6.json".into(), false),
             ("stale pid file via $HOME", "rm -f $HOME/.cas/daemon.pid".into(), false),
             ("a file in the worktree", "rm -f src/stale.rs".into(), false),
+            // GH #2528: rm unlinks the worktree's symlink, not its target.
+            ("a worktree symlink to a main-checkout directory", "rm -r node_modules".into(), false),
             ("task-scoped artifacts", format!("rm -rf {}", artifacts.join("cas-cf4f/old").display()), false),
             ("supervisor clears a /tmp cache", format!("rm -rf {tmp_cache_path}"), true),
         ];
@@ -11048,6 +11080,7 @@ EOF
             ("/tmp itself", "rm -rf /tmp".into(), true, "protected"),
             ("the whole ~/.cas directory", "rm -rf ~/.cas".into(), false, "outside"),
             ("an unrelated home file", "rm ~/.zshrc".into(), false, "outside"),
+            ("a symlink's target through a trailing slash", "rm -rf node_modules/".into(), false, "outside"),
             ("a worker clearing /tmp", format!("rm -rf {tmp_cache_path}"), false, "outside"),
         ];
         for (case, command, supervisor, rule) in &refused {
@@ -13287,8 +13320,10 @@ mod worker_commit_guard_tests {
             ("bash scripts/test-release.sh > /tmp/cas-6837.log 2>&1".into(), true),
             ("bash 'scripts/test release.sh' --flag -c 'git commit -m argument'".into(), false),
             ("bash scripts/test-release.sh".into(), false),
-            ("bash".into(), true),
-            ("sh -s".into(), true),
+            // GH #2508 family: a stdin shell runs no visible git write.
+            ("bash".into(), false),
+            ("sh -s".into(), false),
+            ("echo 'git commit -m probe' | bash".into(), true),
             (format!("cd '{repo_path}' && git commit --allow-empty -m probe"), true),
             (format!("bash -c 'cd \"{repo_path}\" && git commit --allow-empty -m probe'"), true),
             (format!("bash -c -- 'cd \"{repo_path}\" && git commit -m probe'"), true),
@@ -13308,19 +13343,24 @@ mod worker_commit_guard_tests {
             ("bash --login -c 'git commit -m work'".to_string(), false),
             ("bash --login -c -- 'git commit -m work'".to_string(), false),
             ("bash -c 'git commit -m work' -ec".to_string(), false),
-            ("bash -co nounset 'git commit -m work'".to_string(), true),
-            ("bash -oc nounset 'git commit -m work'".to_string(), true),
-            ("bash -ec 'git commit -m work'".to_string(), true),
-            ("bash -O extglob -c 'git commit -m work'".to_string(), true),
-            ("bash -c -e 'git commit -m work'".to_string(), true),
-            ("bash -c -o nounset 'git commit -m work'".to_string(), true),
-            ("bash -c +O extglob 'git commit -m work'".to_string(), true),
-            ("bash -c --rcfile config 'git commit -m work'".to_string(), true),
-            ("bash -c --unknown 'git commit -m work'".to_string(), true),
-            ("bash -c -Z 'git commit -m work'".to_string(), true),
+            // The shell grammar reads option bundles and option values.
+            ("bash -lc 'git commit -m work'".to_string(), false),
+            ("bash -co nounset 'git commit -m work'".to_string(), false),
+            ("bash -euo pipefail -c 'git commit -m work'".to_string(), false),
+            ("bash -c +O extglob 'git commit -m work'".to_string(), false),
+            (format!("bash -co nounset 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("bash -c 'cd \"$1\" && git commit -m probe' bash '{repo_path}'"), true),
+            ("zsh -c -Z 'git commit -m work'".to_string(), true),
             ("bash -c -o".to_string(), true),
             ("bash -c --".to_string(), true),
             (format!("bash -c 'cd \"{repo_path}\"'; git commit -m work"), false),
+            // GH #2499, #2512: subshell `cd` and `cd -` are shell scoping.
+            (format!("d='{repo_path}'; (cd \"$d\" && true) && git commit -m work"), false),
+            (format!("cd '{repo_path}' && git status; cd - >/dev/null && git commit -m work"), false),
+            (format!("cd '{repo_path}' && (cd '{linked_path}') && git commit -m probe"), true),
+            (format!("cd '{linked_path}'; cd '{repo_path}'; cd - >/dev/null; cd - >/dev/null; git commit -m probe"), true),
+            (format!("pushd '{repo_path}' >/dev/null; git commit -m probe"), true),
+            (format!("env -C '{repo_path}' git commit -m probe"), true),
             (format!("cd '{repo_path}'; sh -c 'cd \"{linked_path}\" && git commit -m work'"), false),
             // The merged directory resolver also applies inside shell payloads.
             (format!("bash -c 'W=\"{linked_path}\"; cd \"$W\"; git commit -m work'"), false),
@@ -13377,28 +13417,14 @@ mod worker_commit_guard_tests {
             (format!("{owned_edit}bash -n scripts/release.sh scripts/test-release.sh\ngit status --short\ngit log -1 --oneline"), false),
             (format!("{owned_edit}bash -c 'cd \"{repo_path}\"; git commit -m probe'"), true),
             (format!("python3 - <<'PY'\nfrom pathlib import Path\nPath('{repo_path}/f.txt').write_text('outside')\nPY\nbash -n scripts/release.sh"), true),
-            ("bash -n 'scripts/release.sh'".into(), true),
-            ("bash -n 'scripts/release check.sh'".into(), true),
+            // A script operand is opaque like `bash script.sh`; words after it
+            // are its arguments. An expansion could still become options.
+            ("bash -l -n 'scripts/release check.sh' +n -c ':'".into(), false),
+            ("bash -n < scripts/release.sh".into(), false),
             ("bash -n $VAR".into(), true),
             ("bash -n scripts/*.sh".into(), true),
             ("bash -n ~/x".into(), true),
-            ("bash -n scripts/release=check.sh".into(), true),
-            ("bash -n scripts/release\\.sh".into(), true),
-            ("bash '-n' scripts/release.sh".into(), true),
-            ("bash '--noexec' scripts/release.sh".into(), true),
-            ("bash -l -n scripts/release.sh".into(), true),
-            ("bash -n -- scripts/release.sh".into(), true),
-            ("bash --noexec -- scripts/release.sh".into(), true),
-            ("bash -n scripts/release.sh > syntax.log 2>&1".into(), true),
-            ("bash -n < scripts/release.sh".into(), true),
             ("bash -n scripts/release.sh > /tmp/cas-93e0.log 2>&1".into(), true),
-            ("bash -n scripts/release.sh +n -c ':'".into(), true),
-            ("bash -n scripts/release.sh -c ':'".into(), true),
-            ("bash -n scripts/release.sh -o nounset".into(), true),
-            ("bash -n scripts/release.sh -i".into(), true),
-            ("bash -n scripts/release.sh -s".into(), true),
-            ("bash -n scripts/release.sh --rcfile config".into(), true),
-            ("bash -n scripts/release.sh --unknown".into(), true),
             (format!("bash -n scripts/release.sh; git -C '{repo_path}' commit -m probe"), true),
             (format!("bash -n +n -c 'cd \"{repo_path}\"; git commit -m probe'"), true),
             (format!("bash +n -c 'cd \"{repo_path}\"; git commit -m probe'"), true),

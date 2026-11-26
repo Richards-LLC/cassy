@@ -3120,61 +3120,6 @@ mod tests {
 
 
     #[test]
-    fn probe_0304_delivery_4f4c2d3_requirements_and_covering() {
-        let source = crate::test_paths::crate_root().join("..");
-        let scratch = tempfile::tempdir().unwrap();
-        let repo = scratch.path().join("r");
-        let run = |dir: &Path, args: &[&str]| {
-            let output = Command::new("git").current_dir(dir).args(args).output().unwrap();
-            assert!(output.status.success(), "{args:?} {output:?}");
-            String::from_utf8(output.stdout).unwrap()
-        };
-        run(scratch.path(), &["clone", "--quiet", "--shared", "--no-checkout", source.to_str().unwrap(), "r"]);
-        run(&repo, &["checkout", "--quiet", "--detach", "4f4c2d3e27c48f33c12a5757b4c602c679f4d13a"]);
-        let base = "9a6c48cce1af5ddaa41eccd7cdc3a725b92b77c4";
-        let paths: Vec<String> = run(&repo, &["diff", "--name-only", base, "HEAD"]).lines().map(str::to_owned).collect();
-        assert_eq!(paths.len(), 34);
-        for module in ["cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs", "scripts/visual-qa.mjs"] {
-            eprintln!("PROBE changed_tests {module}: {:?}", changed_tests(&repo, base, "HEAD", &[module.to_string()], None).map_err(|error| format!("{error:#}")));
-        }
-        let non_rust: Vec<String> = paths.iter().filter(|path| !path.ends_with(".rs")).cloned().collect();
-        let (tests, widened) = super::super::stability::requirements(&repo, "HEAD", base, &non_rust, None).unwrap();
-        eprintln!("PROBE requirements(non-Rust {}): tests={tests:?} widened={widened:?}", non_rust.len());
-        let covering = super::super::widened::covering(&repo, "HEAD", &paths, &widened);
-        eprintln!("PROBE covering(all {}): {covering:?}", paths.len());
-        assert!(widened.is_empty(), "{widened:?}");
-    }
-
-
-    #[test]
-    fn probe_gabber_incidents_requirements() {
-        let source = Path::new("/home/pippenz/Petrastella/gabber-studio");
-        let scratch = tempfile::tempdir().unwrap();
-        let repo = scratch.path().join("g");
-        let run = |dir: &Path, args: &[&str]| {
-            let output = Command::new("git").current_dir(dir).args(args).output().unwrap();
-            assert!(output.status.success(), "{args:?} {output:?}");
-            String::from_utf8(output.stdout).unwrap().trim().to_string()
-        };
-        run(scratch.path(), &["clone", "--quiet", "--shared", "--no-checkout", source.to_str().unwrap(), "g"]);
-        let mut report = Vec::new();
-        for (issue, first, tip) in [
-            ("#2446", "81dfeb5884", "7465d5ba4a"), ("#2452", "b63c140539", "b63c140539"), ("#2455", "e1487f94ea", "c384996366"),
-            ("#2469", "6b8efee105", "6b8efee105"), ("#2465", "d31e944415", "e9377d324b"), ("#2450", "8bfcf1379f", "c73be3fa89"),
-            ("#2480", "ed685b527a", "91de28fcf3"), ("#2522", "4b1eccb264", "4b1eccb264"),
-        ] {
-            run(&repo, &["checkout", "--quiet", "--force", "--detach", tip]);
-            let base = run(&repo, &["rev-parse", &format!("{first}^")]);
-            let paths: Vec<String> = run(&repo, &["diff", "--name-only", &base, "HEAD"]).lines().map(str::to_owned).collect();
-            let outcome = super::super::stability::requirements(&repo, "HEAD", &base, &paths, None)
-                .map(|(tests, widened)| format!("tests={} widened={widened:?}", tests.len()))
-                .unwrap_or_else(|error| format!("error={error:#}"));
-            report.push(format!("PROBE {issue} {tip} paths={} {outcome}", paths.len()));
-        }
-        panic!("\n{}\n", report.join("\n"));
-    }
-
-    #[test]
     fn red_first_playwright_timeout_matches_selected_spec_gh_2422() {
         let report = serde_json::from_str(include_str!("javascript/playwright-timed-out.txt")).unwrap();
         let timeout = id("hub-web/e2e/journeys/launch-session.journey.ts",
@@ -4495,6 +4440,9 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         write("src/__scenarios__/settings.test.ts", "import en from './scenarios.json';\n\
             const render = () => mount(View, { global: { plugins: [createI18n({ legacy: false, locale: 'en', messages: { en } })] } });\n\
             it('renders', () => { render(); });\n");
+        let constructed = "src/__scenarios__/i18n.test.ts";
+        write(constructed, "import en from './scenarios.json';\nconst i18n = createI18n({ legacy: false, locale: 'en', messages: { en } });\n\
+            it('renders', () => { mount(View, { global: { plugins: [i18n] } }); });\n");
         let titled = "src/__scenarios__/handoff.spec.ts";
         write(titled, "import en from './scenarios.json';\nfor (const plan of [{ id: 'solo', cta: en[0][0] }] as const) {\n\
             test(`signed out, \"${plan.cta}\" asks`, async () => {});\n}\n");
@@ -4511,7 +4459,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         write(script, "const dump = require('./dump.json');\nconst { match } = require('./match.cjs');\nconsole.log(match(dump));\n");
         let catalogue_only = commit("catalogue only");
         let required = super::super::stability::requirements(repo.path(), &catalogue_only, &base, &[catalogue.into(), script.into(), "docs/evidence/scripts/dump.json".into()], None).unwrap();
-        assert_eq!(required, (Vec::new(), [spec, derived, external, titled].map(|path| Scope::File(path.into())).into_iter().collect::<BTreeSet<_>>().into_iter().collect()));
+        assert_eq!(required, (Vec::new(), [spec, derived, external, titled, constructed].map(|path| Scope::File(path.into())).into_iter().collect::<BTreeSet<_>>().into_iter().collect()));
         write(labels, "const t = (key: string) => key;\ndescribe('workbench', () => {\n\
             beforeEach(() => { vi.stubGlobal('useI18n', () => ({ t })); });\n  it('names the first channel', () => { t('x'); });\n});\n");
         let dropped = commit("drop the read-only import");

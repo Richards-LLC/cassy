@@ -5371,7 +5371,13 @@ impl FactoryDaemon {
             let rows: Vec<_> = agents.iter().filter(|agent| agent.name == *name
                 && agent.factory_session.as_deref() == Some(self.session_name.as_str())).collect();
             let state = rows.iter().max_by_key(|agent| agent.last_heartbeat)
-                .map(|agent| crate::mcp::tools::service::factory_ops::worker_shutdown_state(self.app.cas_dir(), agent))
+                .map(|agent| {
+                    let state = crate::mcp::tools::service::factory_ops::worker_shutdown_state(self.app.cas_dir(), agent);
+                    match agent.metadata.get("clone_path").and_then(|path| git_head(std::path::Path::new(path))) {
+                        Some(tip) => format!("{state}; tip={tip}"),
+                        None => state,
+                    }
+                })
                 .unwrap_or_else(|| format!("{name}: tasks=unknown; dirty_files=unknown; unpushed_commits=unknown (registration unavailable)"));
             (name.clone(), state, rows.iter().map(|agent| agent.id.clone()).collect::<Vec<_>>())
         }).collect();
@@ -5405,10 +5411,16 @@ impl FactoryDaemon {
                 "still running; tasks retained".to_string()
             } else if !records.is_empty() && records.iter().all(|record| status(record) == ProcessGroupStatus::Gone) {
                 ended.workers_stopped.push(name.clone());
-                let release = |holder: &str| crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(self.app.cas_dir(), holder);
-                let released = release(&name) + agent_ids.iter().filter(|id| **id != name)
-                    .map(|id| release(id)).sum::<usize>();
-                format!("stopped; recovered_tasks={released}")
+                use crate::ui::factory::app::render_and_ops::epic_workers as bindings;
+                let interruption = bindings::Interruption {
+                    session: &self.session_name, reason: &ended.reason, evidence: &state,
+                };
+                let (mut held, mut released) = (0, 0);
+                for holder in std::iter::once(&name).chain(agent_ids.iter().filter(|id| **id != name)) {
+                    let settled = bindings::settle_interrupted_worker_tasks(self.app.cas_dir(), holder, &interruption);
+                    (held, released) = (held + settled.held, released + settled.released);
+                }
+                format!("stopped; held_for_recovery={held}; released={released}")
             } else {
                 ended.unverified.push(name.clone());
                 "stop unverified; tasks retained for recovery".to_string()
@@ -6275,6 +6287,12 @@ mod stall_nudge_routing_rework_tests {
 }
 
 
+fn git_head(worktree: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git").arg("-C").arg(worktree)
+        .args(["rev-parse", "--verify", "HEAD"]).output().ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 async fn persist_communication_session_summary(cas_dir: std::path::PathBuf, session: String) {
     match tokio::task::spawn_blocking(move || {
         cas_store::communication_slo::write_session_end(&cas_dir, &session, chrono::Utc::now())
@@ -6300,16 +6318,22 @@ mod communication_summary_tests {
             assert!(output.status.success(), "git {args:?}: {output:?}");
             String::from_utf8(output.stdout).unwrap().trim().to_string()
         };
-        git(&["init", "-b", "main"]);
+        let worker = "unfinished-worker";
+        let source = format!("factory/{worker}");
+        git(&["init", "-b", source.as_str()]);
         git(&["config", "user.name", "Fixture"]);
         git(&["config", "user.email", "fixture@example.invalid"]);
         std::fs::write(repo.join("work.txt"), "parked\n").unwrap();
         git(&["add", "work.txt"]);
         git(&["commit", "-m", "parked"]);
         git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
-        git(&["remote", "add", "origin", "https://example.invalid/fixture.git"]);
+        let origin = tempfile::tempdir().unwrap();
+        git(&["init", "--bare", origin.path().to_str().unwrap()]);
+        git(&["remote", "add", "origin", origin.path().to_str().unwrap()]);
+        // GH #2519: the interrupted worker committed one checkpoint locally.
         std::fs::write(repo.join("work.txt"), "unfinished\n").unwrap();
         git(&["commit", "-am", "local only"]);
+        let checkpoint = git(&["rev-parse", "HEAD"]);
         let root = crate::store::init_cas_dir(repo).unwrap();
         std::fs::write(repo.join("dirty.txt"), "keep this\n").unwrap();
         // Ignore the store so the only dirty input is the operator's file.
@@ -6328,7 +6352,6 @@ mod communication_summary_tests {
         lead.factory_session = Some(session.clone());
         agents.register(&lead).unwrap();
         crate::supervisor_continuity::record_end(&root, &lead.id, Some("prompt_input_exit")).unwrap();
-        let worker = "unfinished-worker";
         let pty = cas_mux::Pty::spawn(worker, cas_mux::PtyConfig {
             command: "/bin/sleep".into(), args: vec!["300".into()], cwd: Some(repo.to_path_buf()),
             env: vec![], env_remove: vec![], rows: 24, cols: 80,
@@ -6381,7 +6404,7 @@ mod communication_summary_tests {
         let mut output = String::new();
         client.read_to_string(&mut output).unwrap();
         let recovered = tasks.get(&task.id).unwrap();
-        let outcome = if owned { "stopped; recovered_tasks=1" }
+        let outcome = if owned { "stopped; held_for_recovery=1; released=0" }
             else { "stop unverified; tasks retained for recovery" };
         let mut failures = Vec::new();
         if !(output.contains(worker) && output.contains(&task.id)
@@ -6389,11 +6412,34 @@ mod communication_summary_tests {
             && output.contains(outcome)) {
             failures.push(format!("missing terminal teardown evidence: {output:?}"));
         }
-        if owned && (recovered.status != cas_types::TaskStatus::Open || recovered.assignee.is_some()) {
-            failures.push(format!("task stranded: {:?} {:?}", recovered.status, recovered.assignee));
+        if owned && (recovered.status != cas_types::TaskStatus::Blocked || recovered.assignee.as_deref() != Some(worker)) {
+            failures.push(format!("interrupted task not held: {:?} {:?}", recovered.status, recovered.assignee));
         }
         if owned {
             assert!(agents.get_lease(&task.id).unwrap().is_none(), "stopped worker's lease is released");
+            let hold = crate::mcp::tools::core::task::block_hold::read(tasks.as_ref(), &task.id).unwrap().unwrap();
+            assert_eq!(hold.who, format!("factory-session-end:{session}"));
+            assert!(recovered.notes.contains(&checkpoint) && recovered.notes.contains(&repo.display().to_string()));
+            assert!(tasks.list_ready().unwrap().iter().all(|ready| ready.id != task.id));
+            let second = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker_with_review(&root, &task.id, "second-writer");
+            assert!(second.is_err(), "a replacement cannot take interrupted work anonymously");
+            assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some(worker));
+            // Explicit successor recovery publishes the committed checkpoint
+            // under its own authority instead of replaying the work.
+            let mut successor = cas_types::Agent::new("successor-affc".into(), "successor-affc".into());
+            successor.role = cas_types::AgentRole::Supervisor;
+            agents.register(&successor).unwrap();
+            let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+            core.set_agent_id_for_testing(successor.id.clone());
+            let payload = serde_json::json!({"branch": source, "head": checkpoint, "expected_remote": ""});
+            crate::supervisor_branch_recovery::recover(&core, &task.id, &payload.to_string()).unwrap();
+            let resumed = tasks.get(&task.id).unwrap();
+            assert_eq!(resumed.assignee.as_deref(), Some("successor-affc"));
+            assert_eq!(resumed.deliverables.factory_branch_anchor.as_deref(), Some(checkpoint.as_str()));
+            assert_eq!(resumed.status, cas_types::TaskStatus::Blocked);
+            let published = std::process::Command::new("git").arg("-C").arg(origin.path())
+                .arg("rev-parse").arg(format!("refs/heads/factory/successor-affc-{}", task.id)).output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&published.stdout).trim(), checkpoint);
         } else {
             assert!(agents.get(&agent.id).is_ok(), "unverified stop retains its registered owner");
             assert_eq!(recovered.assignee.as_deref(), Some(worker));

@@ -3012,7 +3012,6 @@ fn collect_git_write_targets(
             .enumerate()
             .map(|(at, words)| (words, paired.then(|| arguments[at].clone()), false))
             .collect();
-        // The projection ran a variable executable as its bound value.
         let resolve = |mut words: Vec<String>| {
             for _ in 0..16 {
                 let Some(index) = unwrapped_command_index(&words) else { break };

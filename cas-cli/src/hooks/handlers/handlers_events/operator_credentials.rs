@@ -130,8 +130,9 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
             let Some(index) = super::pre_tool::unwrapped_command_index(words) else { continue; };
             let executable = Path::new(&words[index]).file_name().and_then(|name| name.to_str())
                 .unwrap_or(&words[index]).to_ascii_lowercase();
-            // Per statement: a listing opens no file.
-            let names_only = names_inert && statements.len() == arguments.len()
+            // Per statement: a listing opens no file. A payload's own pipes
+            // are not visible to the top-level judgement above.
+            let names_only = names_inert && !context.nested && statements.len() == arguments.len()
                 && arguments.get(at).is_some_and(|argv| {
                     super::pre_tool::unwrapped_command_index(argv).is_some_and(|other| {
                         argv[other] == words[index] && lists_names_only(&executable, &argv[other + 1..])
@@ -226,17 +227,7 @@ fn statement_references_store(
         .unwrap_or(&words[command_index])
         .to_ascii_lowercase();
     let args = &words[command_index + 1..];
-
-    // Inspect shell payloads as nested statement lists so a `cd` inside a
-    // `sh -c` or `bash -c` does not leak into the caller's working dir.
-    if matches!(executable.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh") {
-        return shell_command_payloads(args)
-            .into_iter()
-            .any(|payload| shell_references_store(payload, cwd, depth + 1));
-    }
-    if executable == "eval" {
-        return shell_references_store(&args.join(" "), cwd, depth + 1);
-    }
+    // Shell payloads and `eval` arrive as their own projected statements.
     let cwd = &wrapper_cwd(&words[..command_index], cwd);
 
     let descends = invocation_recursively_reads_directories(&executable, args);
@@ -296,7 +287,7 @@ fn statement_references_store(
 /// and `sudo -D DIR` (or `--chdir`) move it. `unwrapped_command_index` skips
 /// these wrappers, so their directory change is applied here from the
 /// skipped words.
-fn wrapper_cwd(prefix: &[String], cwd: &Path) -> PathBuf {
+pub(super) fn wrapper_cwd(prefix: &[String], cwd: &Path) -> PathBuf {
     let mut cwd = cwd.to_path_buf();
     let mut chdir_flag = None;
     let mut index = 0;
@@ -463,23 +454,6 @@ fn path_operand_is_bare_relative(argument: &str) -> bool {
         && !normalized.starts_with('$')
         && !normalized.contains('/')
         && !normalized.contains(['*', '?', '['])
-}
-
-/// Every non-option word after the command flag may be the command string:
-/// other options take their own values (`bash -oc pipefail '<cmd>'`).
-fn shell_command_payloads(args: &[String]) -> Vec<&str> {
-    let Some(flag) = args.iter().position(|arg| {
-        arg == "--command"
-            || arg == "-c"
-            || (arg.starts_with('-') && !arg.starts_with("--") && arg[1..].contains('c'))
-    }) else {
-        return Vec::new();
-    };
-    args[flag + 1..]
-        .iter()
-        .filter(|arg| !arg.starts_with('-'))
-        .map(String::as_str)
-        .collect()
 }
 
 fn invocation_recursively_reads_directories(name: &str, args: &[String]) -> bool {

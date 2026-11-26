@@ -26,17 +26,27 @@ pub(super) fn collect(command: &str, cwd: &Path) -> Result<ShellEffects, &'stati
         vec![Some(cwd.to_path_buf())],
         cwd,
         &HashMap::new(),
+        &environment_names(),
         0,
         &mut effects,
     )?;
     Ok(effects)
 }
 
+/// The variables a command inherits from its environment, which every child
+/// shell also inherits.
+fn environment_names() -> HashSet<String> {
+    ENVIRONMENT_DIRECTORIES.iter().chain(&["PWD", "OLDPWD"]).map(|name| name.to_string()).collect()
+}
+
+/// Environment variables a directory operand may name.
+const ENVIRONMENT_DIRECTORIES: [&str; 3] = ["HOME", "CDPATH", "CAS_CLONE_PATH"];
+
 /// Opt-in read projection; `None` when the command cannot be projected.
 /// Collecting workspace write effects keeps its current behavior.
 pub(super) fn read_contexts(command: &str, cwd: &Path) -> Option<Vec<ShellReadContext>> {
     let mut effects = ShellEffects { read_contexts: Some(Vec::new()), ..Default::default() };
-    collect_script(command, vec![Some(cwd.to_path_buf())], cwd, &HashMap::new(), 0, &mut effects).ok()?;
+    collect_script(command, vec![Some(cwd.to_path_buf())], cwd, &HashMap::new(), &environment_names(), 0, &mut effects).ok()?;
     let mut contexts = effects.read_contexts?;
     // A function body runs wherever it is later called, so every statement
     // is judged from every directory the command can reach.
@@ -135,13 +145,82 @@ fn numeric_arithmetic(expression: &str) -> Result<(), &'static str> {
     }
 }
 
-/// `test` receives expanded arguments as data; a captured shell exit status is
-/// a known integer even though the token is a variable reference. Keep other
-/// unknown operands conservative so `[[ ]]` and arithmetic evaluation still
-/// fail closed.
+/// Names whose every assignment in this script is numeric source: a number,
+/// `$?` or inert arithmetic (GH #1866). A name any builtin can rebind, or a
+/// script that can rebind names indirectly, keeps every name unknown.
+fn numeric_names(tokens: &[ShellToken]) -> HashSet<String> {
+    let words: Vec<&str> = tokens.iter().filter_map(|token| match token {
+        ShellToken::Word(word) => Some(word.as_str()),
+        _ => None,
+    }).collect();
+    if words.iter().any(|word| matches!(*word,
+        "eval" | "source" | "." | "declare" | "typeset" | "local" | "readonly" | "integer" | "let"))
+    {
+        return HashSet::new();
+    }
+    let assignments: Vec<(&str, &str)> = words.iter()
+        .filter_map(|word| word.split_once('='))
+        .filter(|(name, _)| is_shell_variable_name(name))
+        .collect();
+    let mut names: HashSet<String> = assignments.iter()
+        .map(|(name, _)| name.to_string())
+        .filter(|name| !words.iter().any(|word| word == name || *word == format!("-v{name}")
+            || word.starts_with(&format!("{name}+=")) || word.starts_with(&format!("{name}["))))
+        .collect();
+    loop {
+        let known = names.clone();
+        names.retain(|name| assignments.iter().filter(|(assigned, _)| assigned == name).all(|(_, value)| {
+            let expression = value.strip_prefix("$((").and_then(|value| value.strip_suffix("))"));
+            *value == "$?" || (!value.is_empty() && inert_arithmetic(expression.unwrap_or(value), &known, None).is_ok())
+        }));
+        if names.len() == known.len() {
+            return names;
+        }
+    }
+}
+
+/// Numeric names already bound (or, without `values`, any numeric name) and
+/// `$(date +%s)` evaluate as numbers; anything else must be numeric source.
+fn inert_arithmetic(
+    expression: &str,
+    names: &HashSet<String>,
+    values: Option<&HashMap<String, Vec<String>>>,
+) -> Result<(), &'static str> {
+    let bound = |name: &str| names.contains(name) && values.is_none_or(|values| {
+        values.get(name).is_some_and(|known| !known.is_empty() && !known.contains(&format!("${name}")))
+    });
+    let identifier = |text: &str| text.find(|ch: char| ch != '_' && !ch.is_ascii_alphanumeric()).unwrap_or(text.len());
+    let mut numeric = String::new();
+    let mut rest = expression;
+    while let Some(ch) = rest.chars().next() {
+        if let Some(after) = ["$(date +%s)", "$(date -u +%s)"].iter().find_map(|date| rest.strip_prefix(date)) {
+            numeric.push('0');
+            rest = after;
+            continue;
+        }
+        let reference = rest.strip_prefix("${")
+            .and_then(|tail| tail.find('}').map(|end| (&tail[..end], &tail[end + 1..])))
+            .or_else(|| rest.strip_prefix('$').map(|tail| tail.split_at(identifier(tail))))
+            .or_else(|| (ch == '_' || ch.is_ascii_alphabetic()).then(|| rest.split_at(identifier(rest))));
+        if let Some((_, after)) = reference.filter(|(name, _)| bound(name)) {
+            numeric.push('0');
+            rest = after;
+            continue;
+        }
+        numeric.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+    numeric_arithmetic(&numeric)
+}
+
+/// `test` receives expanded arguments as data; a captured shell exit status
+/// or a bound numeric name is a known integer even though the token is a
+/// variable reference. Keep other unknown operands conservative so `[[ ]]`
+/// and arithmetic evaluation still fail closed.
 fn numeric_test_operand(
     operand: &str,
     captured_status: &HashSet<String>,
+    numeric: (&HashSet<String>, &HashMap<String, Vec<String>>),
 ) -> Result<(), &'static str> {
     if operand == "$?"
         || operand
@@ -150,7 +229,7 @@ fn numeric_test_operand(
     {
         Ok(())
     } else {
-        numeric_arithmetic(operand)
+        inert_arithmetic(operand, numeric.0, Some(numeric.1))
     }
 }
 
@@ -314,8 +393,12 @@ fn parameter_arithmetic(body: &str) -> Result<(), &'static str> {
 }
 
 /// Extract executable substitutions from a shell word. Arithmetic operands
-/// must be numeric source, never values obtained from shell expansion.
-fn substitution_bodies(word: &str) -> Result<Vec<String>, &'static str> {
+/// must be numeric source or bound numeric names, never other values
+/// obtained from shell expansion.
+fn substitution_bodies(
+    word: &str,
+    numeric: (&HashSet<String>, Option<&HashMap<String, Vec<String>>>),
+) -> Result<Vec<String>, &'static str> {
     let bytes = word.as_bytes();
     let mut bodies = Vec::new();
     let mut index = 0;
@@ -358,7 +441,7 @@ fn substitution_bodies(word: &str) -> Result<Vec<String>, &'static str> {
             }
             if let Some(end) = end {
                 let operand_end = if bracket { end } else { end - 1 };
-                numeric_arithmetic(&word[index + prefix..operand_end])?;
+                inert_arithmetic(&word[index + prefix..operand_end], numeric.0, numeric.1)?;
                 index = end + 1;
                 continue;
             }
@@ -474,7 +557,7 @@ fn heredoc_substitution_bodies(body: &str, delimiter: &HeredocDelimiter) -> Resu
             continue;
         };
         let end = end.ok_or("an unresolved shell payload")?;
-        bodies.extend(substitution_bodies(&logical[index..=end])?);
+        bodies.extend(substitution_bodies(&logical[index..=end], (&HashSet::new(), None))?);
         index = end + 1;
     }
     Ok(bodies)
@@ -804,6 +887,45 @@ fn case_syntax(source: &str, lexed: &ShellLexed) -> Result<Vec<CaseSyntax>, &'st
     if cases.is_empty() { Ok(syntax) } else { Err("an unmatched shell scope") }
 }
 
+/// Bind `name`; an assignment that may be skipped only adds alternatives.
+fn bind_alternatives(values: &mut HashMap<String, Vec<String>>, name: &str, expanded: Vec<String>, may_skip: bool) {
+    if !may_skip {
+        values.insert(name.into(), expanded);
+        return;
+    }
+    let previous = values.entry(name.into()).or_insert_with(|| vec![format!("${name}")]);
+    for value in expanded {
+        if !previous.contains(&value) {
+            previous.push(value);
+        }
+    }
+    if previous.len() > 64 {
+        *previous = vec![format!("${name}")];
+    }
+}
+
+/// The words of an array literal, from just after its `(` to the matching `)`.
+pub(super) fn array_elements(tokens: &[ShellToken]) -> Vec<String> {
+    let mut depth = 0;
+    let mut elements = Vec::new();
+    for token in tokens {
+        match token {
+            ShellToken::Operator('(') => depth += 1,
+            ShellToken::Operator(')') if depth == 0 => break,
+            ShellToken::Operator(')') => depth -= 1,
+            ShellToken::Word(word) if depth == 0 => elements.push(word.clone()),
+            _ => {}
+        }
+    }
+    if elements.is_empty() { vec![String::new()] } else { elements }
+}
+
+fn oldpwd_values(dirs: &Directories) -> Vec<String> {
+    dirs.iter()
+        .map(|dir| dir.as_ref().map_or_else(|| "$OLDPWD".into(), |path| path.display().to_string()))
+        .collect()
+}
+
 fn pwd_values(dirs: &Directories) -> Vec<String> {
     dirs.iter()
         .map(|dir| {
@@ -858,6 +980,115 @@ fn resolve_executable(
         tokens.splice(position..position + 1, replacement);
     }
     Err("an unresolved shell executable")
+}
+
+/// Where an `sh`-family invocation reads its commands.
+pub(super) enum ShellSource {
+    /// The `-c` command string at this argument; `$0`, `$1`, … follow it.
+    Command(usize),
+    Script(usize),
+    Stdin,
+}
+
+/// The `sh`-family argv grammar: option bundles, where each `o`/`O` takes the
+/// following word and `--rcfile`/`--init-file` take one, end at `--`, `-` or
+/// the first operand. With `-c` that operand is the command string.
+pub(super) fn shell_source(args: &[String]) -> Result<ShellSource, &'static str> {
+    const UNRESOLVED: &str = "a shell command without a resolvable payload";
+    let (mut at, mut command, mut stdin, mut short) = (0, false, false, false);
+    while let Some(arg) = args.get(at) {
+        if arg == "--" || arg == "-" {
+            at += 1;
+            break;
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            at += match long {
+                _ if short => return Err(UNRESOLVED),
+                "rcfile" | "init-file" => 2,
+                "login" | "noprofile" | "norc" | "posix" | "restricted" | "verbose" | "noediting"
+                | "debugger" | "dump-strings" | "dump-po-strings" | "pretty-print" => 1,
+                _ => return Err(UNRESOLVED),
+            };
+            continue;
+        }
+        let Some(flags) = arg.strip_prefix(['-', '+']).filter(|flags| !flags.is_empty()) else { break };
+        short = true;
+        let mut values = 0;
+        for flag in flags.chars() {
+            match flag {
+                'c' | 's' if arg.starts_with('+') => return Err(UNRESOLVED),
+                'c' => command = true,
+                's' => stdin = true,
+                'o' | 'O' => values += 1,
+                _ if flag.is_ascii_alphabetic() => {}
+                _ => return Err(UNRESOLVED),
+            }
+        }
+        at += 1 + values;
+    }
+    if at > args.len() {
+        return Err(UNRESOLVED);
+    }
+    // Brace expansion can turn one word into options or another operand.
+    let braced = |word: &String| word.contains('{') && (word.contains(',') || word.contains(".."));
+    if args[..at].iter().any(braced) || (!command && args.get(at).is_some_and(braced)) {
+        return Err(UNRESOLVED);
+    }
+    match args.get(at) {
+        Some(_) if command => Ok(ShellSource::Command(at)),
+        None if command => Err(UNRESOLVED),
+        Some(_) if !stdin => Ok(ShellSource::Script(at)),
+        _ => Ok(ShellSource::Stdin),
+    }
+}
+
+fn is_positional(name: &str) -> bool {
+    matches!(name, "@" | "*") || (!name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// `$0`, `$1`, … and `$@`/`$*` of a `-c` command string, from the words after
+/// it. After `shift` each parameter may be any argument. Functions take their
+/// own parameters and `set` operands replace them, so either leaves all unknown.
+fn positional_values(payload: &str, arguments: &[String]) -> HashMap<String, Vec<String>> {
+    let tokens = factory_shell_lex(&shell_command_without_heredoc_bodies(payload), false, 0).tokens;
+    if tokens.windows(2).any(|pair| pair == [ShellToken::Operator('('), ShellToken::Operator(')')])
+        || tokens.iter().any(|token| matches!(token, ShellToken::Word(word) if word == "function"))
+    {
+        return HashMap::new();
+    }
+    let mut shifts = false;
+    for words in shell_statement_words(payload) {
+        let Some(index) = unwrapped_command_index(&words) else { continue };
+        match shell_word_basename(&words[index]) {
+            "shift" => shifts = true,
+            "set" => {
+                let mut rest = words[index + 1..].iter();
+                while let Some(word) = rest.next() {
+                    if word == "--" || !word.starts_with(['-', '+']) {
+                        return HashMap::new();
+                    }
+                    for _ in word.matches('o') {
+                        rest.next();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut values = HashMap::new();
+    let Some((name, parameters)) = arguments.split_first() else { return values };
+    values.insert("0".into(), vec![name.clone()]);
+    let every = if parameters.is_empty() { vec![String::new()] } else { parameters.to_vec() };
+    for index in 1..=9 {
+        let value = match shifts {
+            true => every.clone(),
+            false => vec![parameters.get(index - 1).cloned().unwrap_or_default()],
+        };
+        values.insert(index.to_string(), value);
+    }
+    values.insert("@".into(), every.clone());
+    values.insert("*".into(), every);
+    values
 }
 
 /// The line-based extractor cannot prove Bash boundaries for these forms.
@@ -922,6 +1153,7 @@ fn collect_script(
     mut dirs: Directories,
     original: &Path,
     inherited: &HashMap<String, Vec<String>>,
+    inherited_exports: &HashSet<String>,
     depth: usize,
     effects: &mut ShellEffects,
 ) -> Result<Directories, &'static str> {
@@ -951,12 +1183,13 @@ fn collect_script(
             _ => None,
         })
         .collect();
+    let numeric = numeric_names(&tokens);
     let mut values = inherited.clone();
     values.extend(factory_shell_variable_values(&tokens));
     // Directory operands use only bindings visible before that cd. The
     // legacy file-target expander above also collects finite loop values.
     let mut directory_values = inherited.clone();
-    for name in ["HOME", "CDPATH"] {
+    for name in ENVIRONMENT_DIRECTORIES {
         if let Ok(value) = std::env::var(name) {
             directory_values
                 .entry(name.into())
@@ -964,6 +1197,9 @@ fn collect_script(
         }
     }
     directory_values.insert("PWD".into(), pwd_values(&dirs));
+    // Only exported names reach a child shell's environment.
+    let mut exported = inherited_exports.clone();
+    let mut export_scopes = Vec::new();
     let conditional_bindings = tokens.iter().any(|token| matches!(token,
         ShellToken::Word(word) if matches!(word.as_str(), "if" | "while" | "until" | "for" | "case")));
     let mut alternatives = Vec::new();
@@ -993,8 +1229,12 @@ fn collect_script(
             && (0..tokens.len()).any(|at| lone_operator(&tokens, &projected, &source_ends, at).is_some()));
     // Directories and stack on entry to the current and-or list, which a
     // trailing background `&` runs in a subshell.
-    // `cd -` returns to the previous directory; unknown before the first change.
-    let mut previous_dirs: Directories = vec![None];
+    // `cd -` and `$OLDPWD` name the previous directory; unknown before the
+    // first change unless the enclosing shell bound it.
+    let mut previous_dirs: Directories = inherited.get("OLDPWD").map_or_else(|| vec![None], |known| {
+        known.iter().map(|path| (!path.contains('$')).then(|| PathBuf::from(path))).collect()
+    });
+    directory_values.insert("OLDPWD".into(), oldpwd_values(&previous_dirs));
     let mut list_entry = (dirs.clone(), directory_stack.clone(), previous_dirs.clone());
     // The directories on entry to each open `case`. Only one arm runs, so no arm
     // sees a `cd` from an earlier one and any of them may be the one that ran.
@@ -1087,6 +1327,15 @@ fn collect_script(
         }
         let substitution_scope = separator == Some('(')
             && matches!(statement.last(), Some(ShellToken::Word(word)) if word.ends_with('$'));
+        // `NAME=(...)` assigns an array: its words are data, not a subshell.
+        let array_name = (separator == Some('(') && end > 0 && source_ends[end - 1] + 1 == source_ends[end])
+            .then(|| match statement.last() {
+                Some(ShellToken::Word(word)) => word.strip_suffix('=').map(|name| name.strip_suffix('+').unwrap_or(name)),
+                _ => None,
+            })
+            .flatten()
+            .filter(|name| is_shell_variable_name(name))
+            .map(String::from);
         // The substitution's output stands in as one opaque operand.
         let substitution_head = substitution_scope.then(|| format!(
             "{}{}SUBSTITUTION",
@@ -1177,11 +1426,12 @@ fn collect_script(
                     if at + 2 < args.len()
                         && matches!(binary, Some("-eq" | "-ne" | "-lt" | "-gt" | "-le" | "-ge"))
                     {
-                        numeric_test_operand(&args[at], &captured_status)?;
+                        numeric_test_operand(&args[at], &captured_status, (&numeric, &directory_values))?;
                         numeric_test_operand(
                             args.get(at + 2)
                                 .ok_or("an unresolved conditional operand")?,
                             &captured_status,
+                            (&numeric, &directory_values),
                         )?;
                         at += 3;
                     } else if matches!(binary, Some("=" | "==" | "!=" | "-nt" | "-ot" | "-ef")) {
@@ -1230,6 +1480,7 @@ fn collect_script(
                     statement_dirs.clone(),
                     original,
                     &directory_values,
+                    &exported,
                     depth + 1,
                     effects,
                 )?;
@@ -1246,12 +1497,13 @@ fn collect_script(
                 .chain(redirect_targets.iter().copied());
             for (word, literal) in every_word {
                 if !literal {
-                    for body in substitution_bodies(word)? {
+                    for body in substitution_bodies(word, (&numeric, Some(&directory_values)))? {
                         collect_script(
                             &body,
                             statement_dirs.clone(),
                             original,
                             &directory_values,
+                            &exported,
                             depth + 1,
                             effects,
                         )?;
@@ -1307,21 +1559,26 @@ fn collect_script(
 
             // A leading command executes before any later conditional syntax.
             let entry_directory = depth == 0 && skipped_keywords == 0
-                && effects.read_contexts.as_ref().is_some_and(Vec::is_empty);
-            if depth == 0 && let Some(contexts) = &mut effects.read_contexts {
+                && effects.read_contexts.as_ref().is_some_and(|contexts| contexts.iter().all(|context| context.nested));
+            if let Some(contexts) = &mut effects.read_contexts {
                 if dirs.is_empty() { return Err("an unresolved credential working directory"); }
                 let command = if continuation { format!("{continuation_head}{read_command}") } else { read_command };
                 // Only assignments the shell has already made when this
                 // statement expands its words: earlier statements, export
                 // operands and prefix assignments, never a later rebinding
                 // or an ordinary `NAME=value` argument.
-                contexts.push(ShellReadContext { command, directories: dirs.clone(), values: directory_values.clone() });
+                contexts.push(ShellReadContext {
+                    command,
+                    directories: dirs.clone(),
+                    values: directory_values.clone(),
+                    nested: depth > 0,
+                });
             }
             let read_stack = effects.read_contexts.is_some();
             let read_unconditional =
                 read_stack && !keep_alternatives && (!assignment_may_skip || entry_directory);
             let statement_entry = (dirs.clone(), directory_stack.clone());
-            if read_stack && name == Some("popd") {
+            if name == Some("popd") {
                 if let Some(previous) = directory_stack.pop() {
                     if keep_alternatives {
                         for directory in previous {
@@ -1332,7 +1589,7 @@ fn collect_script(
                     }
                 }
             }
-            if name == Some("cd") || (read_stack && name == Some("pushd")) {
+            if matches!(name, Some("cd" | "pushd")) {
                 if name == Some("pushd") { directory_stack.push(dirs.clone()); }
                 let mut cdpath = directory_values.get("CDPATH").cloned().unwrap_or_default();
                 for word in &words[..index.unwrap_or(0)] {
@@ -1410,7 +1667,7 @@ fn collect_script(
                         add_directory(&mut changed, path);
                     }
                 }
-                if read_stack && name == Some("cd") && operands.len() == 1 && operands[0] == "-" {
+                if name == Some("cd") && operands.len() == 1 && operands[0] == "-" {
                     changed = previous_dirs.clone();
                 }
                 // The next && statement requires cd to have succeeded.
@@ -1432,7 +1689,7 @@ fn collect_script(
             }
             // A piped change never reaches this shell; one that may be
             // skipped or not persist only adds a possible previous directory.
-            if read_stack && !pipe_element && matches!(name, Some("cd" | "pushd" | "popd"))
+            if !pipe_element && matches!(name, Some("cd" | "pushd" | "popd"))
                 && dirs != statement_entry.0
             {
                 if !((and_then && !keep_alternatives) || read_unconditional) {
@@ -1446,8 +1703,9 @@ fn collect_script(
             if pipe_element {
                 (dirs, directory_stack) = statement_entry;
             }
-            if name == Some("cd") || (read_stack && matches!(name, Some("pushd" | "popd"))) {
+            if matches!(name, Some("cd" | "pushd" | "popd")) {
                 directory_values.insert("PWD".into(), pwd_values(&dirs));
+                directory_values.insert("OLDPWD".into(), oldpwd_values(&previous_dirs));
             }
             let assignments = if continuation {
                 &words[..0]
@@ -1456,34 +1714,68 @@ fn collect_script(
             } else {
                 &words[..index.unwrap_or(words.len())]
             };
-            for word in assignments {
+            if matches!(name, Some("export"))
+                || (matches!(name, Some("declare" | "typeset")) && args.iter().any(|arg| arg.starts_with('-') && arg.contains('x')))
+            {
+                exported.extend(args.iter().filter_map(|arg| arg.split('=').next()).filter(|name| is_shell_variable_name(name)).map(String::from));
+            }
+            if name == Some("set") && args.iter().any(|arg| arg == "allexport" || (arg.starts_with('-') && arg.contains('a'))) {
+                exported.insert("*".into());
+            }
+            // Builtins that bind a name from data leave its value unknown.
+            let rebound: Vec<&str> = match name {
+                Some("read" | "readarray" | "mapfile" | "unset" | "getopts") => args.iter().map(String::as_str).collect(),
+                Some("printf") => args.iter().enumerate()
+                    .filter_map(|(at, arg)| if arg == "-v" { args.get(at + 1).map(String::as_str) } else { arg.strip_prefix("-v") })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            // `NAME=$(...)`: the substitution's output is not a known value.
+            let substituted = substitution_scope.then(|| words.last()).flatten()
+                .filter(|word| word.ends_with('$') && assignments.contains(word));
+            let unknown = assignments.iter().filter_map(|word| {
+                let (target, _) = word.split_once('=')?;
+                target.strip_suffix('+').or_else(|| target.split_once('[').map(|(base, _)| base))
+                    .or_else(|| (substituted == Some(word)).then_some(target))
+            });
+            for name in rebound.into_iter().chain(unknown).filter(|name| is_shell_variable_name(name)).collect::<Vec<_>>() {
+                directory_values.insert(name.into(), vec![format!("${name}")]);
+            }
+            for word in assignments.iter().filter(|word| substituted != Some(*word)) {
                 if let Some((name, value)) = word.split_once('=')
                     && is_shell_variable_name(name)
                 {
                     let expanded = expand_factory_shell_word(value, &directory_values);
-                    if assignment_may_skip {
-                        let previous = directory_values
-                            .entry(name.into())
-                            .or_insert_with(|| vec![format!("${name}")]);
-                        for value in expanded {
-                            if !previous.contains(&value) {
-                                previous.push(value);
-                            }
-                        }
-                        if previous.len() > 64 {
-                            *previous = vec![format!("${name}")];
-                        }
-                    } else {
-                        directory_values.insert(name.into(), expanded);
-                    }
+                    bind_alternatives(&mut directory_values, name, expanded, assignment_may_skip);
                 }
             }
 
             let mut payload_literal = true;
-            let payload = if matches!(
-                name,
-                Some("sh" | "bash" | "dash" | "zsh" | "ksh" | "script" | "su" | "runuser")
-            ) {
+            // A child shell sees exported names and its own positional
+            // parameters. Credential reads keep every binding as a candidate.
+            let mut child = None;
+            let payload = if matches!(name, Some("sh" | "bash" | "dash" | "zsh" | "ksh")) {
+                match shell_source(args)? {
+                    ShellSource::Command(at) => {
+                        payload_literal = index
+                            .and_then(|index| word_literals.get(index + 1 + at))
+                            .copied()
+                            .unwrap_or(false);
+                        let prefix: Vec<&str> = words[..index.unwrap_or(0)].iter()
+                            .filter_map(|word| word.split_once('=').map(|(name, _)| name)).collect();
+                        let mut values: HashMap<String, Vec<String>> = directory_values.iter()
+                            .filter(|(name, _)| !is_positional(name) && (read_mode || exported.contains("*")
+                                || exported.contains(*name) || prefix.contains(&name.as_str())))
+                            .map(|(name, value)| (name.clone(), value.clone()))
+                            .collect();
+                        values.extend(positional_values(&args[at], &args[at + 1..]));
+                        let names = values.keys().cloned().collect();
+                        child = Some((values, names));
+                        Some(args[at].clone())
+                    }
+                    ShellSource::Script(_) | ShellSource::Stdin => None,
+                }
+            } else if matches!(name, Some("script" | "su" | "runuser")) {
                 args.iter()
                     .position(|arg| {
                         arg == "--command"
@@ -1530,11 +1822,13 @@ fn collect_script(
                 if !payload_literal {
                     return Err("an unresolved shell payload");
                 }
+                let (child_values, child_exports) = child.as_ref().map_or((&directory_values, &exported), |(values, names)| (values, names));
                 let nested = collect_script(
                     &payload,
                     statement_dirs,
                     original,
-                    &directory_values,
+                    child_values,
+                    child_exports,
                     depth + 1,
                     effects,
                 )?;
@@ -1559,6 +1853,13 @@ fn collect_script(
                 if scopes.len() >= 8 {
                     return Err("a shell payload beyond the resolution limit");
                 }
+                if let Some(name) = &array_name {
+                    let elements = array_elements(&tokens[end + 1..]).iter()
+                        .flat_map(|element| expand_factory_shell_word(element, &directory_values))
+                        .collect();
+                    bind_alternatives(&mut directory_values, name, elements, assignment_may_skip);
+                }
+                export_scopes.push(exported.clone());
                 scopes.push((
                     dirs.clone(),
                     alternatives.clone(),
@@ -1569,10 +1870,14 @@ fn collect_script(
                     previous_dirs.clone(),
                     (std::mem::take(&mut continuation_head), substitution_head.unwrap_or_default()),
                 ));
-                continuation = false;
+                continuation = array_name.is_some();
+                if continuation {
+                    continuation_head = "true ".into();
+                }
             }
             Some(')') => {
                 let parent = scopes.pop().ok_or("an unmatched shell scope")?;
+                exported = export_scopes.pop().unwrap_or_default();
                 dirs = parent.0;
                 alternatives = parent.1;
                 directory_values = parent.2;

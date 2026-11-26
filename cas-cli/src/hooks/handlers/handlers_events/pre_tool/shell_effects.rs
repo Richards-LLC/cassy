@@ -1020,7 +1020,7 @@ pub(super) fn shell_source(args: &[String]) -> Result<ShellSource, &'static str>
                 'c' => command = true,
                 's' => stdin = true,
                 'o' | 'O' => values += 1,
-                _ if flag.is_ascii_alphabetic() => {}
+                _ if "abefhkmnptuvxBCEHPTilrD".contains(flag) => {}
                 _ => return Err(UNRESOLVED),
             }
         }

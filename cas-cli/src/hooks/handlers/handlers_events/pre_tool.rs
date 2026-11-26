@@ -6423,12 +6423,6 @@ pub(super) struct ShellSubstitutions {
     pub(super) unresolved_ansi_c: bool,
 }
 
-impl ShellSubstitutions {
-    pub(super) fn unresolved(&self) -> bool {
-        self.unresolved_heredoc || self.unresolved_ansi_c
-    }
-}
-
 pub(super) fn shell_substitutions(command: &str) -> ShellSubstitutions {
     let mut found = ShellSubstitutions::default();
     let projected = shell_command_without_heredoc_bodies(command);

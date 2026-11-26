@@ -10968,7 +10968,8 @@ EOF
             ("export W=$PWD; bash -c 'printf x > \"$W/src/new.rs\"'", false),
             // GH #2473, #2512: `cd \"$OLDPWD\"` and `cd -` return; `pushd` moves.
             ("cd ../.. && cat config.toml; cd \"$OLDPWD\" && printf x > src/new.rs", false),
-            ("cd ../..; cd - >/dev/null && printf x > src/new.rs", false),
+            ("cd ../.. && cat config.toml && cd - >/dev/null && printf x > src/new.rs", false),
+            ("cd /nonexistent && true; cd - >/dev/null && printf x > .bashrc", true),
             ("pushd ../.. >/dev/null && printf x > config.toml", true),
             ("eval -- 'cd ../..'; printf x > config.toml", true),
             // GH #1866, #2547: numeric counters and clock arithmetic are inert.

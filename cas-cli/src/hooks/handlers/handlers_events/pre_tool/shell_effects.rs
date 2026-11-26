@@ -153,8 +153,11 @@ fn numeric_names(tokens: &[ShellToken]) -> HashSet<String> {
         ShellToken::Word(word) => Some(word.as_str()),
         _ => None,
     }).collect();
+    // A function body binds only when, and if, it is called.
     if words.iter().any(|word| matches!(*word,
-        "eval" | "source" | "." | "declare" | "typeset" | "local" | "readonly" | "integer" | "let"))
+        "eval" | "source" | "." | "declare" | "typeset" | "local" | "readonly" | "integer" | "let"
+        | "function" | "coproc"))
+        || tokens.windows(2).any(|pair| pair == [ShellToken::Operator('('), ShellToken::Operator(')')])
     {
         return HashSet::new();
     }
@@ -1052,7 +1055,7 @@ fn is_positional(name: &str) -> bool {
 /// `$0`, `$1`, … and `$@`/`$*` of a `-c` command string, from the words after
 /// it. After `shift` each parameter may be any argument. Functions take their
 /// own parameters and `set` operands replace them, so either leaves all unknown.
-fn positional_values(payload: &str, arguments: &[String]) -> HashMap<String, Vec<String>> {
+fn positional_values(payload: &str, arguments: &[Vec<String>]) -> HashMap<String, Vec<String>> {
     let tokens = factory_shell_lex(&shell_command_without_heredoc_bodies(payload), false, 0).tokens;
     if tokens.windows(2).any(|pair| pair == [ShellToken::Operator('('), ShellToken::Operator(')')])
         || tokens.iter().any(|token| matches!(token, ShellToken::Word(word) if word == "function"))
@@ -1080,12 +1083,12 @@ fn positional_values(payload: &str, arguments: &[String]) -> HashMap<String, Vec
     }
     let mut values = HashMap::new();
     let Some((name, parameters)) = arguments.split_first() else { return values };
-    values.insert("0".into(), vec![name.clone()]);
-    let every = if parameters.is_empty() { vec![String::new()] } else { parameters.to_vec() };
+    values.insert("0".into(), name.clone());
+    let every = if parameters.is_empty() { vec![String::new()] } else { parameters.concat() };
     for index in 1..=9 {
         let value = match shifts {
             true => every.clone(),
-            false => vec![parameters.get(index - 1).cloned().unwrap_or_default()],
+            false => parameters.get(index - 1).cloned().unwrap_or_else(|| vec![String::new()]),
         };
         values.insert(index.to_string(), value);
     }
@@ -1238,6 +1241,8 @@ fn collect_script(
         known.iter().map(|path| (!path.contains('$')).then(|| PathBuf::from(path))).collect()
     });
     directory_values.insert("OLDPWD".into(), oldpwd_values(&previous_dirs));
+    // Previous directories of a skipped `cd`, which a later `;` join reaches.
+    let mut previous_alternatives: Directories = Vec::new();
     let mut list_entry = (dirs.clone(), directory_stack.clone(), previous_dirs.clone());
     // The directories on entry to each open `case`. Only one arm runs, so no arm
     // sees a `cd` from an earlier one and any of them may be the one that ran.
@@ -1293,11 +1298,10 @@ fn collect_script(
             }
         }
         let conditional_before = open_blocks.contains(&true);
-        let assignment_may_skip = if read_mode { conditional_before } else { conditional_bindings }
-            || matches!(
-                tokens.get(start.wrapping_sub(1)),
-                Some(ShellToken::Operator('&' | '|'))
-            );
+        let after_operator = matches!(tokens.get(start.wrapping_sub(1)), Some(ShellToken::Operator('&' | '|')));
+        let assignment_may_skip = if read_mode { conditional_before } else { conditional_bindings } || after_operator;
+        // A numeric name is bound only by a statement that surely runs.
+        let numeric_may_skip = conditional_before || after_operator;
         // Pattern text and `esac` are not operands of anything.
         let visible: Vec<usize> =
             (start..end).filter(|index| case_tokens[*index] == CaseSyntax::Code).collect();
@@ -1346,6 +1350,7 @@ fn collect_script(
             read_command.strip_suffix('$').unwrap_or(&read_command),
         ));
         let mut incoming = dirs.clone();
+        let mut incoming_previous = previous_dirs.clone();
         let and_then =
             separator == Some('&') && tokens.get(end + 1) == Some(&ShellToken::Operator('&'));
         if !statement.is_empty() {
@@ -1638,7 +1643,8 @@ fn collect_script(
                             },
                             false => target.as_str(),
                         };
-                        let path = if target.contains(['$', '`', '*', '?', '['])
+                        // An empty expansion leaves no operand: `cd` goes home.
+                        let path = if target.is_empty() || target.contains(['$', '`', '*', '?', '['])
                             || (searches_directory
                                 && !Path::new(target).is_absolute()
                                 && !target.starts_with('~')
@@ -1706,6 +1712,9 @@ fn collect_script(
                     previous_dirs = statement_entry.0.clone();
                 }
             }
+            if read_unconditional && matches!(name, Some("cd" | "pushd")) {
+                incoming_previous = previous_dirs.clone();
+            }
             if pipe_element {
                 (dirs, directory_stack) = statement_entry;
             }
@@ -1752,7 +1761,8 @@ fn collect_script(
                     && is_shell_variable_name(name)
                 {
                     let expanded = expand_factory_shell_word(value, &directory_values);
-                    bind_alternatives(&mut directory_values, name, expanded, assignment_may_skip);
+                    let may_skip = if numeric.contains(name) { numeric_may_skip } else { assignment_may_skip };
+                    bind_alternatives(&mut directory_values, name, expanded, may_skip);
                 }
             }
 
@@ -1774,7 +1784,14 @@ fn collect_script(
                                 || exported.contains(*name) || prefix.contains(&name.as_str())))
                             .map(|(name, value)| (name.clone(), value.clone()))
                             .collect();
-                        values.extend(positional_values(&args[at], &args[at + 1..]));
+                        // Arguments expand in this shell before the child sees them.
+                        let arguments: Vec<Vec<String>> = args[at + 1..].iter().enumerate().map(|(offset, arg)| {
+                            match index.and_then(|index| word_literals.get(index + 2 + at + offset)) {
+                                Some(true) => vec![arg.clone()],
+                                _ => expand_factory_shell_word(arg, &directory_values),
+                            }
+                        }).collect();
+                        values.extend(positional_values(&args[at], &arguments));
                         let names = values.keys().cloned().collect();
                         child = Some((values, names));
                         Some(args[at].clone())
@@ -1874,7 +1891,7 @@ fn collect_script(
                     substitution_scope,
                     directory_stack.clone(),
                     list_entry.clone(),
-                    previous_dirs.clone(),
+                    (previous_dirs.clone(), previous_alternatives.clone()),
                     (std::mem::take(&mut continuation_head), substitution_head.unwrap_or_default()),
                 ));
                 continuation = array_name.is_some();
@@ -1891,7 +1908,7 @@ fn collect_script(
                 continuation = parent.3;
                 directory_stack = parent.4;
                 list_entry = parent.5;
-                previous_dirs = parent.6;
+                (previous_dirs, previous_alternatives) = parent.6;
                 // A substitution's following words continue its command.
                 let (outer, after) = parent.7;
                 continuation_head = if continuation { after } else { outer };
@@ -1901,22 +1918,34 @@ fn collect_script(
                 for directory in incoming {
                     add_directory(&mut alternatives, directory);
                 }
+                for directory in incoming_previous {
+                    add_directory(&mut previous_alternatives, directory);
+                }
             }
             Some(';') | Some('|') | None => {
                 continuation = false;
                 for directory in std::mem::take(&mut alternatives) {
                     add_directory(&mut dirs, directory);
                 }
+                for directory in std::mem::take(&mut previous_alternatives) {
+                    add_directory(&mut previous_dirs, directory);
+                }
+                directory_values.insert("OLDPWD".into(), oldpwd_values(&previous_dirs));
             }
             Some('&') if tokens.get(end.wrapping_sub(1)) != Some(&ShellToken::Operator('&')) => {
                 continuation = false;
                 if read_mode && !unordered_cwd && lone_operator(&tokens, &projected, &source_ends, end).is_some() {
                     alternatives.clear();
+                    previous_alternatives.clear();
                     (dirs, directory_stack, previous_dirs) = list_entry.clone();
                 }
                 for directory in std::mem::take(&mut alternatives) {
                     add_directory(&mut dirs, directory);
                 }
+                for directory in std::mem::take(&mut previous_alternatives) {
+                    add_directory(&mut previous_dirs, directory);
+                }
+                directory_values.insert("OLDPWD".into(), oldpwd_values(&previous_dirs));
             }
             _ => {}
         }

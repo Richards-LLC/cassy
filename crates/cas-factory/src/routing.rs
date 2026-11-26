@@ -2103,7 +2103,7 @@ no_fallback = true
 
     #[test]
     fn validate_explicit_preserves_static_rejections() {
-        let spec = WorkerSpec {
+        let mut spec = WorkerSpec {
             name: None,
             cli: SupervisorCli::Codex,
             model: Some("gpt-5.6-luna".to_string()),
@@ -2112,7 +2112,13 @@ no_fallback = true
             requester_config_dir: None,
             requester_secure_storage_dir: None,
         };
-        assert!(validate_explicit(&spec, &CapabilitySnapshot::default()).is_err());
+        let snapshot = CapabilitySnapshot::default();
+        assert!(validate_explicit(&spec, &snapshot).is_ok());
+        spec.effort = Some(Effort::Minimal);
+        assert!(matches!(
+            validate_explicit(&spec, &snapshot),
+            Err(RoutingError::Policy(_))
+        ));
     }
 
     #[test]

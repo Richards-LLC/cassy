@@ -935,6 +935,104 @@ mod tests {
     }
 
     #[test]
+    fn batch_park_requires_a_changed_state_visual_capture() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        env.set_current_dir(repo);
+        git(repo, &["init", "-q", "-b", "main"]);
+        let base = commit_file(repo, "README.md", "base\n");
+        git(repo, &["switch", "-q", "-c", "factory/worker"]);
+        let head = commit_file(repo, "hub-web/src/Ranking.vue", "<template>Ranking</template>\n");
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(root.join("config.toml"), "[qa]\nmode='batch'\napi_paths=['server/**']\n").unwrap();
+        let task = Task::new("cas-0304-replay".into(), "Ranking panel".into());
+        crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+        let park = || qa_evidence_close_gate_for_paths(&root, &task, repo, "main", Some(&head), None, Some(&base));
+        let refused = || assert_eq!(crate::gates::codes_in(&park().unwrap_err()), ["G-171"]);
+        refused();
+
+        let dir = task_evidence_dir(&root, &task).unwrap();
+        let sweep = dir.join("visual-qa");
+        std::fs::create_dir_all(&sweep).unwrap();
+        macro_rules! captured {
+            ($path:literal) => { include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/visual-qa-fixtures/batch-park/", $path)) };
+        }
+        let install = |target: &Path, fixture: &[u8], revision: &str, shot: &[u8], update_digest: bool| {
+            let mut report: serde_json::Value = serde_json::from_slice(fixture).unwrap();
+            report["build"]["revision"] = revision.into();
+            report["generatedAt"] = chrono::Utc::now().to_rfc3339().into();
+            let capture = &mut report["screenshots"][1];
+            let name = capture["path"].as_str().unwrap().to_owned();
+            if update_digest {
+                capture["sha256"] = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(shot)).into();
+            }
+            std::fs::write(target.join(&name), shot).unwrap();
+            std::fs::write(target.join("visual-qa.json"), report.to_string()).unwrap();
+            name
+        };
+        let pass = captured!("pass/visual-qa.json");
+        let capture = captured!("pass/127-0-0-1-52391-ranking-expanded-light-390x800.png");
+        let name = install(&sweep, pass, &head, capture, false);
+        std::fs::write(dir.join("unrelated.png"), capture).unwrap();
+
+        let ledger = dir.join("LEDGER.md");
+        let write_row = |verdict: &str, cell: &str, evidence: &str| {
+            let passed = usize::from(verdict == "PASS");
+            std::fs::write(&ledger, format!(
+                "cells=1; PASS={passed}; FAIL=0; NOT EXERCISED={}\nlabels: real-build=1\n{}\n| M01 | {cell} | Ranking visible | Ranking visible | {verdict} | real-build | {evidence} | - |\n",
+                1 - passed, crate::qa_ledger::HEADER,
+            )).unwrap();
+        };
+        let cell = "/ranking/ [expanded]";
+        let citation = |name: &str| format!("visual-qa/{name}");
+        write_row("NOT EXERCISED: deferred to batch", cell, "-");
+        refused();
+        write_row("PASS", cell, "unrelated.png");
+        refused();
+        write_row("PASS", "/ranking/", &citation(&name));
+        refused();
+        write_row("PASS", cell, &citation(&name));
+        std::fs::write(sweep.join(&name), captured!("pass/127-0-0-1-52391-ranking-light-390x800.png")).unwrap();
+        refused();
+        assert!(!cas_store::has_qa_batch_deferral(&root, &task.id).unwrap());
+
+        std::fs::write(sweep.join(&name), capture).unwrap();
+        assert!(park().is_ok());
+        assert!(cas_store::has_qa_batch_deferral(&root, &task.id).unwrap());
+
+        let gate_codes = || park().err().map(|error| crate::gates::codes_in(&error)).unwrap_or_default();
+        let corrupt = b"\x89PNG\x0d\x0a\x1a\x0a\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x06IDATx\x9c\xff\xff\xff\xff\x1d\xca|\x9e\x00\x00\x00\x00IEND\xaeB\x60\x82";
+        install(&sweep, pass, &head, corrupt, true);
+        let corrupt_codes = gate_codes();
+        install(&sweep, pass, &base, capture, false);
+        let wrong_tip_codes = gate_codes();
+        let stale = install(&sweep, captured!("stale/visual-qa.json"), &head, captured!("stale/127-0-0-1-52573-ranking-expanded-light-390x800.png"), false);
+        write_row("PASS", cell, &citation(&stale));
+        let stale_build_codes = gate_codes();
+
+        let baseline = dir.join("visual-qa-baseline");
+        std::fs::create_dir_all(&baseline).unwrap();
+        let scoped = install(&sweep, captured!("scoped-tip/visual-qa.json"), &head, captured!("scoped-tip/127-0-0-1-52460-ranking-expanded-light-390x800.png"), false);
+        write_row("PASS", cell, &citation(&scoped));
+        let baseline_run = |revision: &str| {
+            install(&baseline, captured!("scoped-base/visual-qa.json"), revision, captured!("scoped-base/127-0-0-1-52519-ranking-expanded-light-390x800.png"), false);
+        };
+        baseline_run(&base);
+        park().unwrap();
+        baseline_run(&head);
+        let wrong_base_codes = gate_codes();
+
+        git(repo, &["switch", "--detach", "-q", &base]);
+        let api_head = commit_file(repo, "server/routes/ranking.ts", "export const ranking = [];\n");
+        let api_task = Task::new("cas-0304-api".into(), "Ranking API".into());
+        crate::store::open_task_store(&root).unwrap().add(&api_task).unwrap();
+        assert!(qa_evidence_close_gate_for_paths(&root, &api_task, repo, "main", Some(&api_head), None, Some(&base)).is_ok());
+        assert_eq!((corrupt_codes, wrong_tip_codes, wrong_base_codes, stale_build_codes),
+            (vec!["G-171"], vec!["G-171"], vec!["G-171"], vec!["G-171"]));
+    }
+
+    #[test]
     fn ledger_preflight_preserves_batch_evidence_ownership() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();

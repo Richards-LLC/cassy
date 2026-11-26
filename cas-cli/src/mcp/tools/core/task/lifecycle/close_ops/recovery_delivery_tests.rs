@@ -3017,6 +3017,33 @@ async fn parked_for(env: &mut TestEnvGuard, target: &str) -> (Recovery, CasCore,
     (f, supervisor, tasks)
 }
 
+#[tokio::test]
+async fn merged_supervisor_close_with_expired_delivery_budget_refuses_cas_c129() {
+    use crate::mcp::tools::service::mutation_receipt;
+    let mut env = TestEnvGuard::temp_home();
+    let (fixture, supervisor, tasks) = parked_for(&mut env, "develop").await;
+    merge_into(fixture.dir.path(), "develop", BRANCH, "Merge parked delivery");
+    let before = tasks.get(TASK).unwrap();
+    let receipt = mutation_receipt::Receipt::new("task", "close", Some(TASK));
+    receipt.close_gate_deadline.set(crate::bounded_process::Deadline::after(std::time::Duration::ZERO)).unwrap();
+    let result = mutation_receipt::scope(
+        receipt.clone(),
+        supervisor.cas_task_close(Parameters(TaskCloseRequest {
+            id: TASK.into(), reason: Some("Reviewed the integrated delivery".into()),
+            commit_receipt: Some(fixture.final_tip), supervisor_override: Some(true),
+            no_delivery: None, stranded_branch_override: None, search_manifest: None,
+        })),
+    ).await.unwrap();
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    assert_eq!(receipt.close_gate_timeout.get(), Some(&"G-55"));
+    assert!(crate::gates::codes_in(&text(result)).contains(&"G-55"));
+    assert!(receipt.terminal.get().is_none());
+    let after = tasks.get(TASK).unwrap();
+    assert_eq!(after.status, TaskStatus::AwaitingMerge);
+    assert_eq!(after.deliverables.factory_branch_anchor, before.deliverables.factory_branch_anchor);
+    assert_eq!(after.deliverables.green_merge_commit, before.deliverables.green_merge_commit);
+}
+
 /// Merge `source` into `target` in the primary checkout and publish it.
 fn merge_into(repo: &Path, target: &str, source: &str, message: &str) {
     git(repo, &["checkout", "-q", target]);

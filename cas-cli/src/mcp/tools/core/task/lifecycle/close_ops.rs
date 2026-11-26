@@ -9981,7 +9981,11 @@ impl CasCore {
                     close_notes.record(&mut task, &note);
                 }
                 MergeStateGateOutcome::Unresolved(message) => {
-                    gate_refusals.push(crate::gates::tag("G-55", message));
+                    gate_refusals.push(if message.ends_with("\n\n[G-56]") || message.ends_with("\n\n[G-55]") {
+                        message
+                    } else {
+                        crate::gates::tag("G-55", message)
+                    });
                     return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                 }
                 MergeStateGateOutcome::HistoricalDeliveryRejection(message) => {
@@ -16620,7 +16624,7 @@ fn dropped_line_samples(
         let output = std::process::Command::new("git")
             .args(args)
             .current_dir(repo_path)
-            .output()
+            .measurement_output()
             .ok()?;
         output
             .status
@@ -16748,7 +16752,7 @@ pub(crate) fn validated_delivery_drop_review(
                 "--",
             ])
             .current_dir(repo)
-            .output()
+            .measurement_output()
             .map_err(|error| error.to_string())?;
         if !output.status.success() {
             return Err(format!("cannot inspect superseding commit `{sha}`"));
@@ -16779,7 +16783,7 @@ pub(crate) fn validated_delivery_drop_review(
             ])
             .args(affected.iter().map(|path| path.as_str()))
             .current_dir(repo)
-            .output()
+            .measurement_output()
             .map_err(|error| error.to_string())?;
         if !output.status.success() {
             return Err(format!(
@@ -16870,7 +16874,7 @@ fn validated_delivery_content_review(
         let output = std::process::Command::new("git")
             .args(["diff", "--name-only", "--no-renames", "-z", &format!("{sha}^1"), &sha, "--"])
             .current_dir(repo)
-            .output()
+            .measurement_output()
             .map_err(|error| error.to_string())?;
         if !output.status.success() {
             return Err(format!("cannot inspect delivery commit `{sha}`"));
@@ -16892,12 +16896,14 @@ fn validated_delivery_content_review(
     )))
 }
 
-/// cas-24d8: the child-close content gate's share of the 55s tool deadline.
-/// Its ownership walks are memoized and skip unchanged edges, but a long
-/// epic history under host load can still exceed this; then the close
-/// returns a typed, retryable refusal instead of timing out with an unknown
-/// outcome.
-const CHILD_CONTENT_GATE_BUDGET: std::time::Duration = std::time::Duration::from_secs(35);
+const DELIVERY_GATE_BUDGET: std::time::Duration = std::time::Duration::from_secs(35);
+
+fn delivery_gate_timeout(gate: &'static str, message: String) -> MergeStateGateOutcome {
+    if let Some(receipt) = crate::mcp::tools::service::mutation_receipt::current() {
+        let _ = receipt.close_gate_timeout.set(gate);
+    }
+    MergeStateGateOutcome::Unresolved(crate::gates::tag(gate, message))
+}
 
 // gate[G-56 close-after-merge integrity]: Delivery content presence (content dropped, unverifiable, timed out, review rejected)
 fn anchored_delivery_content_gate(
@@ -16910,12 +16916,9 @@ fn anchored_delivery_content_gate(
     commit_receipt: Option<&str>,
     supervisor_override_reason: Option<&str>,
 ) -> Option<MergeStateGateOutcome> {
-    // cas-24d8: an outer epic collection may already own a shorter deadline.
-    let budget = epic_measurement::deadline()
-        .map(|deadline| deadline.remaining())
-        .unwrap_or(std::time::Duration::MAX)
-        .min(CHILD_CONTENT_GATE_BUDGET);
-    let _scope = epic_measurement::Scope::new(budget);
+    let _phase = crate::mcp::tools::service::mutation_receipt::phase("G-56");
+    let _scope = epic_measurement::deadline().is_none()
+        .then(|| epic_measurement::Scope::new(DELIVERY_GATE_BUDGET));
     let audit = PromotionAudit::new();
     let started = std::time::Instant::now();
     let outcome = anchored_delivery_content_gate_unbounded(
@@ -16943,11 +16946,10 @@ fn anchored_delivery_content_gate(
         // An expired probe surfaces as an error, and some callers read an
         // error as dropped content. Never report a verdict measured past the
         // budget: refuse with the retry instead.
-        return Some(MergeStateGateOutcome::Reject(crate::gates::tag("G-56", format!(
-            "DELIVERY CONTENT CHECK TIMED OUT: proving task {}'s delivery {anchor} on {parent_branch} took longer than {}s ({elapsed_ms} ms measured), so Cassy made no decision and changed nothing. Retry the close when the host is less loaded; if it keeps timing out, the epic history is too long to measure inside one tool call — report it with this message.",
-            task.id,
-            budget.as_secs()
-        ))));
+        return Some(delivery_gate_timeout("G-56", format!(
+            "DELIVERY CONTENT CHECK TIMED OUT: proving task {}'s delivery {anchor} on {parent_branch} exhausted the remaining delivery proof budget ({elapsed_ms} ms in this check). No close or park was authorized. Retry the close when the host is less loaded.",
+            task.id
+        )));
     }
     match (outcome, audit.note()) {
         (None | Some(MergeStateGateOutcome::Proceed), Some(note)) => {
@@ -18410,6 +18412,42 @@ fn run_factory_branch_merge_gate_for_delivery(
     attribution: TaskCommitAttribution<'_>,
     validated_recovery_branch: Option<&str>,
 ) -> MergeStateGateOutcome {
+    use crate::mcp::tools::service::mutation_receipt;
+    let phase = mutation_receipt::phase("G-55");
+    let receipt = mutation_receipt::current();
+    let request_deadline = receipt.as_ref()
+        .and_then(|receipt| receipt.close_gate_deadline.get().copied());
+    let budget = epic_measurement::deadline().into_iter().chain(request_deadline)
+        .map(|deadline| deadline.remaining()).fold(DELIVERY_GATE_BUDGET, std::time::Duration::min);
+    let _scope = epic_measurement::Scope::new(budget);
+    let outcome = (!epic_measurement::expired()).then(|| {
+        run_factory_branch_merge_gate_inner(task, parent_branch, repo_path, attribution, validated_recovery_branch)
+    });
+    if let Some(outcome) = outcome
+        && (!epic_measurement::expired()
+            || matches!(&outcome, MergeStateGateOutcome::Unresolved(message) if message.ends_with("\n\n[G-56]")))
+    {
+        drop(phase);
+        if receipt.as_ref().is_none_or(|receipt| receipt.close_gate_timeout.get().is_none())
+            || matches!(&outcome, MergeStateGateOutcome::Unresolved(message) if message.ends_with("\n\n[G-56]"))
+        {
+            return outcome;
+        }
+    }
+    let gate = receipt.as_ref().and_then(|receipt| receipt.close_gate_timeout.get().copied()).unwrap_or("G-55");
+    delivery_gate_timeout(gate, format!(
+        "CLOSE GATE TIMED OUT: {} for task {} on {parent_branch} exhausted the remaining delivery proof budget. No close or park was authorized. Retry close.",
+        crate::gates::find(gate).expect("registered delivery gate").title, task.id,
+    ))
+}
+
+fn run_factory_branch_merge_gate_inner(
+    task: &Task,
+    parent_branch: &str,
+    repo_path: &std::path::Path,
+    attribution: TaskCommitAttribution<'_>,
+    validated_recovery_branch: Option<&str>,
+) -> MergeStateGateOutcome {
     if task.task_type == TaskType::Epic {
         return MergeStateGateOutcome::Proceed;
     }
@@ -18738,10 +18776,18 @@ fn run_factory_branch_merge_gate_for_delivery(
                     .window
                     .and_then(|window| window.supervisor_override_reason.as_deref()),
             );
+            let origin_before = (!origin_fetch_attempted)
+                .then(|| resolve_branch_sha(repo_path, &origin_parent_branch));
             let mut outcome = judge();
-            if !origin_fetch_attempted && matches!(outcome, Some(MergeStateGateOutcome::Reject(_) | MergeStateGateOutcome::Unresolved(_))) {
+            if matches!(outcome, Some(MergeStateGateOutcome::Reject(_)))
+                && let Some(origin_before) = origin_before
+            {
                 refresh(&mut origin_fetch_attempted);
-                outcome = judge();
+                if !epic_measurement::expired()
+                    && resolve_branch_sha(repo_path, &origin_parent_branch) != origin_before
+                {
+                    outcome = judge();
+                }
             }
             if let Some(outcome) = outcome { return outcome; }
         }
@@ -21553,7 +21599,7 @@ pub(crate) fn resolve_task_commit_receipt_sha(
     let resolved = Command::new("git")
         .args(["rev-parse", "--verify", "--quiet", receipt])
         .current_dir(repo_path)
-        .output()
+        .measurement_output()
         .map_err(|error| format!("failed to resolve the commit receipt: {error}"))?;
     if !resolved.status.success() {
         return Err(format!(
@@ -21583,7 +21629,7 @@ pub(crate) fn resolve_task_commit_receipt_sha(
     let object_type = Command::new("git")
         .args(["cat-file", "-t", &full_object])
         .current_dir(repo_path)
-        .output()
+        .measurement_output()
         .map_err(|error| format!("failed to inspect the receipt object type: {error}"))?;
     if !object_type.status.success() {
         return Err(format!(
@@ -21603,7 +21649,7 @@ pub(crate) fn resolve_task_commit_receipt_sha(
     let commit = Command::new("git")
         .args(["rev-parse", "--verify", "--quiet", &commit_object])
         .current_dir(repo_path)
-        .output()
+        .measurement_output()
         .map_err(|error| format!("failed to peel the receipt commit: {error}"))?;
     if !commit.status.success() {
         return Err(format!(
@@ -21711,7 +21757,7 @@ pub(crate) fn validate_task_commit_receipt(
     let commit_epoch_output = Command::new("git")
         .args(["show", "-s", "--format=%ct", &full_receipt, "--"])
         .current_dir(repo_path)
-        .output()
+        .measurement_output()
         .map_err(|error| format!("failed to inspect the commit timestamp: {error}"))?;
     if !commit_epoch_output.status.success() {
         return Err("git could not inspect the commit timestamp".to_string());
@@ -21775,7 +21821,7 @@ pub(crate) fn validate_task_commit_receipt(
             "--",
         ])
         .current_dir(repo_path)
-        .output()
+        .measurement_output()
         .map_err(|error| format!("failed to inspect the commit diff: {error}"))?;
     if !diff.status.success() {
         return Err("git could not inspect the commit diff".to_string());

@@ -1809,8 +1809,6 @@ raise SystemExit(1 if failed else 0)
         let found = covering.get(&package).unwrap();
         assert_eq!(found.specs, specs.map(String::from));
         assert!(found.unresolved.is_empty(), "every changed input is read by a covering spec");
-        // GH #2537, #2535: a changed spec in the package keeps its own
-        // stability proof; it is not an input some other spec must read.
         let edited = [paths.clone(), vec!["apps/backend/src/unrelated.spec.ts".into()]].concat();
         assert_eq!(widened::covering(&repo, &head, &edited, &scopes), covering);
         // Every prescribed package command targets exactly the covering specs.

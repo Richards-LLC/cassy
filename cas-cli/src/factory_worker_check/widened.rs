@@ -39,11 +39,6 @@ pub(super) fn valid(proof: &Proof) -> bool {
         }
 }
 
-/// The one capped run that proves an input no static selection classifies,
-/// shared by park's demand and the runner's execution. `None` when no capped
-/// run can execute a test for it: a runner config, whose listed tests keep
-/// their own proof, or a package that holds no test (a Maizzle email package,
-/// GH #2457, #2465, #2455), where any run would select zero tests.
 pub(crate) fn scope(repo: &Path, path: &str) -> Option<Scope> {
     if javascript::runner_config_file(path) { return None; }
     if javascript::javascript(path) {
@@ -56,10 +51,6 @@ pub(crate) fn scope(repo: &Path, path: &str) -> Option<Scope> {
         if (matches!(runner, Some("jest" | "vitest")) && !unloadable) || javascript::related_tests(repo, path).is_some() {
             return Some(Scope::Related(path.into()));
         }
-        // GH #2543: a Playwright support module no spec imports (a fixture
-        // server the config starts) is exercised by the suite of the config
-        // that owns its directory inside its package, run under that config.
-        // A config above the package (GH #2457) does not own it.
         if runner == Some("playwright")
             && let (Scope::Package(owner), Scope::Package(home)) = (owning_package(repo, path, "playwright"), package(repo, path))
             && Path::new(&owner).starts_with(&home)
@@ -74,7 +65,6 @@ pub(crate) fn scope(repo: &Path, path: &str) -> Option<Scope> {
     }
 }
 
-/// Whether the checkout tracks a file under `directory` that may hold tests.
 fn holds_tests(repo: &Path, directory: &str) -> bool {
     git(repo, &["ls-files", "--", if directory.is_empty() { "." } else { directory }])
         .map_or(true, |listed| listed.lines().any(|path| javascript::javascript(path) && javascript::test_file(path)))
@@ -180,12 +170,8 @@ pub(crate) fn covering(repo: &Path, head: &str, paths: &[String], scopes: &[Scop
     }).collect()
 }
 
-/// The changed inputs a package scope stands for: those whose own scope it
-/// is. A changed test keeps its own stability proof and a related source its
-/// own related run; neither waits on a spec reading it (GH #2537, #2535).
 fn package_inputs<'a>(repo: &Path, paths: &'a [String], scope: &Scope) -> Vec<&'a str> {
     let Scope::Package(directory) = scope else { return Vec::new() };
-    // Only an input inside its own package can resolve to a directory of it.
     paths.iter().map(String::as_str)
         .filter(|path| matches!(package(repo, path), Scope::Package(home) if Path::new(directory).starts_with(&home)))
         .filter(|path| self::scope(repo, path).as_ref() == Some(scope)).collect()
@@ -326,7 +312,6 @@ mod tests {
         }
         let (plain, vue) = ("plain/components/Foo.vue", "vue/components/Foo.vue");
         assert_eq!(scope(repo.path(), vue), Some(Scope::Related(vue.into())));
-        // GH #2537: create-vue's vitest config takes the plugin from `./vite.config`.
         std::fs::create_dir_all(repo.path().join("merged/components")).unwrap();
         std::fs::write(repo.path().join("merged/package.json"), "{}").unwrap();
         std::fs::write(repo.path().join("merged/vite.config.ts"), "import vue from '@vitejs/plugin-vue';\nexport default { plugins: [vue()] };\n").unwrap();
@@ -347,12 +332,6 @@ mod tests {
         }
     }
 
-    /// GH #2543, #2457: a Playwright fixture server no spec imports proves
-    /// through the suite of the config owning its directory, under that config;
-    /// that config owes no run of its own, nor does a declaration file (GH
-    /// #2434); a Maizzle email package holding no test, below the repository's
-    /// Playwright config, owes none at all. The
-    /// prescribed command resolves back to the scope park demands.
     #[test]
     fn uncertain_inputs_resolve_to_one_runnable_scope_or_none_gh2543() {
         let repo = tempfile::tempdir().unwrap();

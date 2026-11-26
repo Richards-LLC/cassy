@@ -1052,6 +1052,8 @@ When a peer replaces a stale worker, Cassy syncs the reset and the new delivery 
 
 If a no-code report review has no recorded proof, Cassy stops the review without a verdict and asks you to reconnect or restart the requesting MCP session on the installed binary before retrying.
 
+Task close shares one delivery-proof budget across merge-state and content checks. If that budget runs out, the task keeps its delivery state and the reply names the gate to retry instead of reporting background close work.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.
@@ -1247,6 +1249,10 @@ Before a worker parks a delivery it runs the `cas-no-comments` skill on its own 
 The `cas-update` shell helper honors `NO_COLOR` and uses contrasting status and warning marks on light and dark terminals. The install path appears on its own indented line below the target label.
 
 On a Codex supervisor, the typed `/reload-cassy` confirmation keeps its focused action through session list updates. After confirmation, Commander prevents a duplicate send while taking pane control. A successful request clears the matching command draft; a refusal keeps it and identifies the current controller when available. Back and the header toggle dismiss the header confirmation without sending it.
+
+- **Commander conversation recovery** — Commander shows the last known conversations during a machine outage. When the machine answers again, old cached conversations missing from its session list no longer appear to be waiting for a supervisor.
+
+- **Heavy and taste worker routing** — Heavy defaults to Claude Opus 5.5 at `xhigh`; taste remains on Claude Fable 5.2 at `high`. Explicit recipes accept supported effort levels without changing lane defaults.
 
 ## Authoritative Sources
 

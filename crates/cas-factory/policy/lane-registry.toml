@@ -54,7 +54,7 @@ harness = "claude"
 provider = "anthropic"
 model = "claude-sonnet-5-5"
 default_effort = "high"
-allowed_efforts = ["medium", "high", "max"]
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
 status = "active"
 required_capability = "claude-account"
 
@@ -63,8 +63,7 @@ harness = "claude"
 provider = "anthropic"
 model = "claude-fable-5-2"
 default_effort = "high"
-# `max` per the Claude effort doc (cas-556a); explicit request only.
-allowed_efforts = ["medium", "high", "max"]
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
 status = "active"
 required_capability = "claude-account"
 
@@ -101,7 +100,7 @@ harness = "claude"
 provider = "anthropic"
 model = "claude-opus-5-5"
 default_effort = "high"
-allowed_efforts = ["low", "high"]
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
 status = "active"
 required_capability = "claude-account"
 
@@ -110,7 +109,16 @@ harness = "claude"
 provider = "anthropic"
 model = "claude-opus-5-5"
 default_effort = "low"
-allowed_efforts = ["low", "high"]
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
+status = "active"
+required_capability = "claude-account"
+
+[recipes.claude_opus_5_5_xhigh]
+harness = "claude"
+provider = "anthropic"
+model = "claude-opus-5-5"
+default_effort = "xhigh"
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
 status = "active"
 required_capability = "claude-account"
 
@@ -119,7 +127,7 @@ harness = "codex"
 provider = "openai"
 model = "gpt-5.6-luna"
 default_effort = "xhigh"
-allowed_efforts = ["xhigh"]
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
 status = "active"
 required_capability = "codex-account"
 
@@ -128,8 +136,7 @@ harness = "claude"
 provider = "anthropic"
 model = "claude-opus-5"
 default_effort = "high"
-# `max` per the Claude effort doc (cas-556a); explicit request only.
-allowed_efforts = ["high", "max"]
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
 status = "active"
 required_capability = "claude-account"
 
@@ -138,8 +145,7 @@ harness = "claude"
 provider = "anthropic"
 model = "claude-fable-5-1"
 default_effort = "medium"
-# `max` per the Claude effort doc (cas-556a); explicit request only.
-allowed_efforts = ["medium", "high", "max"]
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
 status = "active"
 required_capability = "claude-account"
 
@@ -148,7 +154,7 @@ harness = "claude"
 provider = "anthropic"
 model = "claude-fable-5-1"
 default_effort = "high"
-allowed_efforts = ["medium", "high", "max"]
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
 status = "active"
 required_capability = "claude-account"
 
@@ -157,9 +163,7 @@ harness = "codex"
 provider = "openai"
 model = "gpt-6-astra"
 default_effort = "medium"
-# Explicit Astra requests retain the existing Cassy effort vocabulary; `max`
-# per the Codex models manifest (cas-556a).
-allowed_efforts = ["minimal", "low", "medium", "high", "xhigh", "max"]
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
 status = "active"
 reason = "Heavy route; excluded from supervisor and taste after the observed 2026-09-05 stall holding finished workers and stopping epic drive."
 required_capability = "codex-account"
@@ -169,8 +173,7 @@ harness = "codex"
 provider = "openai"
 model = "gpt-6-astra"
 default_effort = "high"
-# `max` per the Codex models manifest (cas-556a); explicit request only.
-allowed_efforts = ["high", "xhigh", "max"]
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
 status = "active"
 required_capability = "codex-account"
 
@@ -179,8 +182,7 @@ harness = "codex"
 provider = "openai"
 model = "gpt-5.6-sol"
 default_effort = "high"
-# `max` per the Codex models manifest (cas-556a); explicit request only.
-allowed_efforts = ["high", "max"]
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
 status = "active"
 required_capability = "codex-account"
 
@@ -225,5 +227,5 @@ fallbacks = ["claude_fable_high"]
 no_fallback = false
 
 [lanes.heavy]
-candidates = ["claude_fable_5_2_high"]
+candidates = ["claude_opus_5_5_xhigh"]
 fallbacks = ["claude_opus_5_5", "codex_astra_high"]

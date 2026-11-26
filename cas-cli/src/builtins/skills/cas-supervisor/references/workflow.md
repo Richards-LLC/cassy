@@ -63,8 +63,8 @@ factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6.2-sol ef
 # taste — recipe claude_fable_5_2_high (fallback: claude_opus_5_5, claude_opus)
 factory action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-2 effort=high
 
-# heavy — recipe claude_fable_5_2_high (fallback: claude_opus_5_5, codex_astra_high)
-factory action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-2 effort=high
+# heavy — recipe claude_opus_5_5_xhigh (fallback: claude_opus_5_5, codex_astra_high)
+factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=xhigh
 
 # supervisor — recipe claude_opus_5_5 (fallback: claude_fable_high)
 factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high

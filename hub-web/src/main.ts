@@ -1104,7 +1104,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     onMachineInfo: (info) => { machineInfo.set(machine.id, info); render(); },
     onSessions: (listed, freshnessThresholdSecs, stopped) => {
       const previous = new Map((sessions.get(machine.id) ?? []).map(item => [item.name, item]));
-      const items = reconcileCatalog([...previous.values()], listed, stopped);
+      const ttl = freshnessThresholdSecs !== undefined && Number.isFinite(freshnessThresholdSecs) && freshnessThresholdSecs > 0 ? freshnessThresholdSecs * 1000 : Infinity;
+      const items = reconcileCatalog([...previous.values()], listed, stopped, Date.now() - ttl);
       fleetCatalogUpdatedAt.set(machine.id, new Date().toISOString());
       // cas-9846: the machine answered; its cached catalog gives way, and the
       // live one is kept for the next reload during an outage.
@@ -1113,7 +1114,6 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // An authenticated catalog read proves the hub accepts this credential:
       // a stale revocation block on it stops fencing the journal (cas-2904).
       readmitCredential(machines.get(machine.id) ?? machine);
-      const ttl = freshnessThresholdSecs !== undefined && Number.isFinite(freshnessThresholdSecs) && freshnessThresholdSecs > 0 ? freshnessThresholdSecs * 1000 : Infinity;
       catalogExpiresAt.set(machine.id, Date.now() + ttl);
       window.clearTimeout(catalogExpiryTimers.get(machine.id));
       if (Number.isFinite(ttl)) catalogExpiryTimers.set(machine.id, window.setTimeout(() => render(), ttl));

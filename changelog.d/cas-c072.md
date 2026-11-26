@@ -7,10 +7,13 @@
   and Playwright config files, Playwright runs of Vue email templates in
   packages with no tests, and Vitest runs of Playwright fixture servers. Now:
   park and worker-check resolve each uncertain input to the same single scope.
-  Changed specs keep their own stability proof. Only tests built from a JSON
-  table owe a whole-file run when it changes. Config files and packages with
-  no tests owe nothing. A fixture server proves through its own config's suite,
-  run under that config.
+  Changed specs keep their own stability proof. A changed JSON file owes a
+  whole-file run only from a test file whose collection-time code uses it in a
+  table, loop or call; reads inside tests, hooks or helpers that only tests
+  call do not count. Config files and packages with no tests owe nothing. A
+  fixture server proves through its own config's suite, run under that config.
+  A module calling `/re/.test(x)` no longer makes its other calls look like an
+  unresolved test API.
 - **Worker-check explains a rejected run** — Was: a run whose report passed but
   whose process exited nonzero said only "stability failed", and a skipped
   selected test looked like a failed assertion. Now: the refusal names the exit

@@ -184,7 +184,11 @@ pub(crate) fn covering(repo: &Path, head: &str, paths: &[String], scopes: &[Scop
 /// is. A changed test keeps its own stability proof and a related source its
 /// own related run; neither waits on a spec reading it (GH #2537, #2535).
 fn package_inputs<'a>(repo: &Path, paths: &'a [String], scope: &Scope) -> Vec<&'a str> {
-    paths.iter().map(String::as_str).filter(|path| self::scope(repo, path).as_ref() == Some(scope)).collect()
+    let Scope::Package(directory) = scope else { return Vec::new() };
+    // Only an input inside its own package can resolve to a directory of it.
+    paths.iter().map(String::as_str)
+        .filter(|path| matches!(package(repo, path), Scope::Package(home) if Path::new(directory).starts_with(&home)))
+        .filter(|path| self::scope(repo, path).as_ref() == Some(scope)).collect()
 }
 
 /// A widened scope is proven by its own pass or, for a package, by a

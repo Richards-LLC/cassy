@@ -2752,6 +2752,7 @@ pub(crate) struct NotRun {
 /// reported inactive. `whole_file` runs ran their specs without a name
 /// filter: every other test they report must pass too, and a table template
 /// the source cannot expand must report the same rows in every iteration.
+// gate-audit[whole_file]: selector Drops the name filter so a run executes more tests; every row it reports must still pass and match iteration 1, so it waives no G-61 check.
 fn verify_repeats(
     runner: &str,
     repo: &Path,

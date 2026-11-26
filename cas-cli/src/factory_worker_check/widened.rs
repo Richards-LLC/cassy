@@ -345,8 +345,9 @@ mod tests {
 
     /// GH #2543, #2457: a Playwright fixture server no spec imports proves
     /// through the suite of the config owning its directory, under that config;
-    /// that config owes no run of its own; a Maizzle email package holding no
-    /// test, below the repository's Playwright config, owes none at all. The
+    /// that config owes no run of its own, nor does a declaration file (GH
+    /// #2434); a Maizzle email package holding no test, below the repository's
+    /// Playwright config, owes none at all. The
     /// prescribed command resolves back to the scope park demands.
     #[test]
     fn uncertain_inputs_resolve_to_one_runnable_scope_or_none_gh2543() {
@@ -367,11 +368,13 @@ mod tests {
         write("tests/chat-history/history.spec.ts", "import { test } from '@playwright/test';\ntest('history', () => {});\n");
         write("apps/dm/package.json", "{\"scripts\":{\"build\":\"maizzle build\"}}");
         let email = "apps/dm/emails/receipt.vue";
+        let types = "e2e/env.d.ts";
         let edit = |marker: &str| {
             write(config, &format!("export default {{ testDir: '.', webServer: {{ command: 'node main.mjs' }} }}; // {marker}\n"));
             write(server, &format!("import {{ app }} from './nuxt-app.mjs';\napp('{marker}');\n"));
             write(shim, &format!("export const app = (name) => name; // {marker}\n"));
             write(email, &format!("<template><p>{marker}</p></template>\n"));
+            write(types, &format!("declare const marker: '{marker}';\n"));
             git(&["add", "."]);
             git(&["commit", "-qm", marker]);
             git(&["rev-parse", "HEAD"])
@@ -379,7 +382,7 @@ mod tests {
         git(&["init", "-q", "-b", "main"]);
         let base = edit("base");
         let head = edit("delivery");
-        let paths = [server, shim, config, email].map(String::from);
+        let paths = [server, shim, config, email, types].map(String::from);
         let suite = Scope::Package("tests/chat-history".into());
         assert_eq!(stability::requirements(repo.path(), &head, &base, &paths, None).unwrap(), (Vec::new(), vec![suite.clone()]));
         assert_eq!((scope(repo.path(), config), scope(repo.path(), email)), (None, None));

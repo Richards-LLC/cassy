@@ -189,7 +189,10 @@ pub(crate) fn changed_tests(
         if !safe_path(path) {
             bail!("invalid JavaScript stability path: {path}");
         }
-        if super::git(repo, &["ls-tree", "--name-only", head, "--", path])?.is_empty() || runner_config_file(path) {
+        // A declaration file holds only erased types (GH #2434).
+        if super::git(repo, &["ls-tree", "--name-only", head, "--", path])?.is_empty() || runner_config_file(path)
+            || Path::new(path).file_stem().and_then(|stem| stem.to_str()).is_some_and(|stem| stem.ends_with(".d"))
+        {
             continue;
         }
         let diff = super::git(
@@ -2061,12 +2064,13 @@ pub(crate) fn runner_hint(repo: &Path, path: &str) -> Option<&'static str> {
     if source.contains("@jest/globals") {
         return Some("jest");
     }
-    if source.contains("@playwright/test") {
-        return Some("playwright");
-    }
-    // GH #2055: a node:test file beside a Jest config is Node's own runner.
+    // GH #2055: a node:test file beside a Jest config is Node's own runner,
+    // also when it drives a browser through Playwright's library (GH #2399).
     if source.contains("'node:test'") || source.contains("\"node:test\"") {
         return Some("node --test");
+    }
+    if source.contains("@playwright/test") {
+        return Some("playwright");
     }
     let mut current = repo.join(path);
     while current.pop() && current.starts_with(repo) {
@@ -2767,7 +2771,8 @@ fn verify_repeats(
             selection.extend(rows.iter().filter(|(row, status)| *status == "passed" && !tests.iter().any(|test| test.selects(row)))
                 .map(|(row, _)| row.clone()).collect::<BTreeSet<_>>());
             if iteration == 0 {
-                for test in tests.iter().filter(|test| test.parameterized && !expected.contains_key(*test)) {
+                let underivable: Vec<_> = tests.iter().filter(|test| test.parameterized && !expected.contains_key(*test)).collect();
+                for test in underivable {
                     let mut names = Expansion::new();
                     for (row, _) in rows.iter().filter(|(row, _)| test.selects(row)) { *names.entry(row.name.clone()).or_default() += 1; }
                     expected.insert(test.clone(), names);
@@ -4008,6 +4013,10 @@ process.exit(listed.length ? 0 : 1);
         )
         .unwrap();
         assert_eq!(runner_hint(repo.path(), "api/app-boot.test.cjs"), Some("node --test"));
+        // GH #2399: a node:test file driving a browser through Playwright's library stays Node's.
+        std::fs::write(repo.path().join("api/browser.test.mjs"),
+            "import { test } from 'node:test';\nimport { chromium } from '@playwright/test';\ntest('opens', async () => { await chromium.launch(); });\n").unwrap();
+        assert_eq!(runner_hint(repo.path(), "api/browser.test.mjs"), Some("node --test"));
         assert_eq!(invocation(&["node".into(), "--test".into(), "api/app-boot.test.cjs".into()]).map(|invocation| invocation.runner), Some("node"));
         assert_eq!(runner_hint(repo.path(), "bin/a.test.ts"), Some("vitest"));
         assert_eq!(runner_hint(repo.path(), "bare/a.test.ts"), None);
@@ -4437,6 +4446,11 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let catalogue_only = commit("catalogue only");
         let required = super::super::stability::requirements(repo.path(), &catalogue_only, &base, &[catalogue.into(), helper.into()], None).unwrap();
         assert_eq!(required, (Vec::new(), vec![Scope::File(spec.into())]));
+        // GH #2522: dropping an import the tests only read is an ordinary test edit.
+        write("src/__scenarios__/labels.spec.ts", "it('names the first channel', () => { expect('sms').toBe('sms'); });\n");
+        let dropped = commit("drop the read-only import");
+        assert_eq!(changed_tests(repo.path(), &catalogue_only, &dropped, &["src/__scenarios__/labels.spec.ts".into()], None).unwrap(),
+            [id("src/__scenarios__/labels.spec.ts", "names the first channel")]);
 
         write(spec, &source("legacy.json", "expect(1).toBe(1);"));
         let switched = commit("switch catalogue");

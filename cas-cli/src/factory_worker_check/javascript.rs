@@ -1930,7 +1930,7 @@ fn config_name(name: &str, runner: &str) -> bool {
 /// theirs, run under it (GH #2526, #2514, #2423, #2543).
 pub(crate) fn runner_config_file(path: &str) -> bool {
     let name = Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or_default();
-    ["jest", "vitest", "playwright"].iter().any(|runner| config_name(name, runner))
+    !test_match(path, None) && ["jest", "vitest", "playwright"].iter().any(|runner| config_name(name, runner))
 }
 
 /// The runner configs in `dir`, nearest default first. Jest repositories keep
@@ -4649,13 +4649,15 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
   it.each([['a']])('short %s %s', () => {});
   it.each([['a'], ['b']])('index %# %$ %s', () => {});
   it.each([{ n: 1 }, { n: 2 }])('static title', () => {});
+  it.each(['p', 'q'] as const)('const flat %s', () => {});
+  it.each([{ s: 'x', on: true }] satisfies Row[])('const prop $s $on', () => {});
 });"#;
         let derived: BTreeMap<String, usize> = source_rows("a.test.ts", source).unwrap().into_values().flatten().collect();
         let printed = ["p prop bool false", "p prop bool true", "p prop str 'x'", "p prop str ''", "p prop num 1", "p prop num -2",
             "p prop num 1.5", "p prop num +0", "p prop nullish null", "p prop nullish undefined", "p two 1 and 'q' and 1",
             "p two 2 and 'r' and 2", "p missing undefined here", "p pct Funnel Drop then a", "p pct AIDA then c", "p pct one x",
             "p pct one y", "p flat p", "p flat q", "p lit true null undefined", "p extra a", "p short a undefined", "p index 0 1 a",
-            "p index 1 2 b", "p static title", "p static title"];
+            "p index 1 2 b", "p static title", "p static title", "p const flat p", "p const flat q", "p const prop 'x' true"];
         let mut expected = BTreeMap::new();
         for name in printed { *expected.entry(name.to_string()).or_default() += 1; }
         assert_eq!(derived, expected);

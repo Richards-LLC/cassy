@@ -39018,8 +39018,8 @@ esac
             None,
         );
         assert!(
-            matches!(&outcome, Some(MergeStateGateOutcome::Reject(message))
-                if message.contains("DELIVERY CONTENT CHECK TIMED OUT")),
+            matches!(&outcome, Some(MergeStateGateOutcome::Unresolved(message))
+                if crate::gates::codes_in(message).contains(&"G-56")),
             "{outcome:?}"
         );
     }

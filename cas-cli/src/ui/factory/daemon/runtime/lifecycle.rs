@@ -6330,7 +6330,6 @@ mod communication_summary_tests {
         let origin = tempfile::tempdir().unwrap();
         git(&["init", "--bare", origin.path().to_str().unwrap()]);
         git(&["remote", "add", "origin", origin.path().to_str().unwrap()]);
-        // GH #2519: the interrupted worker committed one checkpoint locally.
         std::fs::write(repo.join("work.txt"), "unfinished\n").unwrap();
         git(&["commit", "-am", "local only"]);
         let checkpoint = git(&["rev-parse", "HEAD"]);
@@ -6424,8 +6423,6 @@ mod communication_summary_tests {
             let second = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker_with_review(&root, &task.id, "second-writer");
             assert!(second.is_err(), "a replacement cannot take interrupted work anonymously");
             assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some(worker));
-            // Explicit successor recovery publishes the committed checkpoint
-            // under its own authority instead of replaying the work.
             let mut successor = cas_types::Agent::new("successor-affc".into(), "successor-affc".into());
             successor.role = cas_types::AgentRole::Supervisor;
             agents.register(&successor).unwrap();

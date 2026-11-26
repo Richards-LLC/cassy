@@ -2374,10 +2374,8 @@ pub(crate) fn release_worker_task_bindings(cas_dir: &std::path::Path, worker_nam
     settle_worker_task_bindings(cas_dir, worker_name, None).released
 }
 
-/// `blocked_hold.who` prefix marking work a factory session end interrupted.
 pub(crate) const INTERRUPTED_HOLD_WHO: &str = "factory-session-end:";
 
-/// A factory session end that stopped a worker mid-task (GH #2519).
 pub(crate) struct Interruption<'a> {
     pub session: &'a str,
     pub reason: &'a str,
@@ -2390,10 +2388,6 @@ pub(crate) struct SettledBindings {
     pub released: usize,
 }
 
-/// Session-end teardown of a confirmed-stopped worker. Unstarted pre-assigns
-/// are released as before. Started work keeps its assignee, which
-/// authenticates the source branch for recovery, and becomes Blocked under a
-/// hold naming the evidence, so it never re-enters the ready queue.
 pub(crate) fn settle_interrupted_worker_tasks(
     cas_dir: &std::path::Path, worker_name: &str, interruption: &Interruption<'_>,
 ) -> SettledBindings {

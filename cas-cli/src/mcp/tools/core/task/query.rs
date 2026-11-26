@@ -837,8 +837,12 @@ impl CasCore {
         )?);
         if req.read.full {
             answer.structured_content = Some(match current_qa {
-                Ok(impact) => serde_json::json!({"qa_impact": impact}),
-                Err(error) => serde_json::json!({"qa_impact": null, "qa_impact_error": format!("{error:#}")}),
+                Ok(impact) => serde_json::json!({"text": output, "qa_impact": impact}),
+                Err(error) => serde_json::json!({
+                    "text": output,
+                    "qa_impact": null,
+                    "qa_impact_error": format!("{error:#}"),
+                }),
             });
         }
         Ok(answer)

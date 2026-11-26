@@ -3160,7 +3160,7 @@ invariants:
     check: Run supervisor-commands.test.ts with rejection, timeout, late-status and session-isolation cases, then the HUB-J27 error-before-ended-catalog stage at desktop and 390px. Batch QA verifies real Claude and Codex Exit against authenticated ended receipts with at least 120 seconds of failure observation allowance.
     bug: {task: cas-7f2a}
   HUB-J27-EXIT-WORKER-RECOVERY:
-    statement: Supervisor exit retains and prints each worker's unfinished task, dirty and unpushed counts and observed stop outcome; confirmed stopped workers have unfinished task bindings released, and the receipt keeps the observed exit reason.
+    statement: Supervisor exit retains and prints each worker's unfinished task, dirty and unpushed counts, checkpoint tip and observed stop outcome; a confirmed stopped worker's started task stays Blocked under that worker for explicit recovery instead of entering the ready queue, its lease is released, and the receipt keeps the observed exit reason.
     check: Run supervisor_exit_reports_and_releases_unfinished_worker_cas_affc through the native pane-exit event, actual worker PTY teardown, client stream and durable receipt. Batch QA confirms native Exit retains those worker states on a disposable session; the browser double alone cannot prove worker shutdown.
     bug: {task: cas-affc}
   HUB-J27-REFUSAL-ROW:

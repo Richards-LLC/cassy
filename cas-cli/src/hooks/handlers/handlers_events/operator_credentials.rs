@@ -96,7 +96,7 @@ fn collect_strings<'a>(value: &'a Value, paths: &mut Vec<&'a str>) {
 /// GH #2171: the Bash command runs a statement from a directory the guard
 /// cannot resolve, so its relative and `$VAR` operands are judged as if they
 /// ran inside a credential store.
-pub(super) fn bash_directory_unresolved(input: &HookInput) -> bool {
+fn bash_directory_unresolved(input: &HookInput) -> bool {
     let unknown = std::ffi::OsStr::new(super::pre_tool::UNKNOWN_DIRECTORY);
     input.tool_input.as_ref().and_then(|tool_input| tool_input.get("command")).and_then(Value::as_str)
         .and_then(|command| super::pre_tool::shell_read_contexts(command, Path::new(&input.cwd)))
@@ -104,10 +104,23 @@ pub(super) fn bash_directory_unresolved(input: &HookInput) -> bool {
             .any(|directory| directory.as_ref().is_none_or(|directory| directory.components().any(|part| part.as_os_str() == unknown))))
 }
 
+/// GH #2502, #2473: the command reaches a store only through a directory the
+/// guard cannot resolve, so the refusal names that directory, not a store.
+pub(super) fn bash_store_reference_needs_unresolved_directory(input: &HookInput) -> bool {
+    bash_directory_unresolved(input)
+        && input.tool_input.as_ref().and_then(|tool_input| tool_input.get("command")).and_then(Value::as_str)
+            .is_some_and(|command| !shell_references_store_with(command, Path::new(&input.cwd), 0, true))
+}
+
+fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bool {
+    shell_references_store_with(command, initial_cwd, depth, false)
+}
+
 /// A command that cannot be projected is refused: no weaker reading stands in
 /// for the per-statement projection. An unresolved directory may be any
-/// directory, so its statements are judged from every one that could matter.
-fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bool {
+/// directory, so its statements are judged from every one that could matter,
+/// or, with `known_only`, not at all.
+fn shell_references_store_with(command: &str, initial_cwd: &Path, depth: usize, known_only: bool) -> bool {
     if depth > 3 { return true; }
     let Some(contexts) = super::pre_tool::shell_read_contexts(command, initial_cwd) else {
         return true;
@@ -121,7 +134,9 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
     };
     for mut context in contexts {
         let parents = context.command.matches("..").count().min(16);
+        let unknown = std::ffi::OsStr::new(super::pre_tool::UNKNOWN_DIRECTORY);
         let directories: Vec<PathBuf> = std::mem::take(&mut context.directories).into_iter()
+            .filter(|cwd| !known_only || cwd.as_ref().is_some_and(|cwd| !cwd.components().any(|part| part.as_os_str() == unknown)))
             .flat_map(|cwd| cwd_candidates(cwd, parents))
             .collect();
         let statements = super::pre_tool::shell_statement_words(&context.command);
@@ -131,7 +146,7 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
             let executable = Path::new(&words[index]).file_name().and_then(|name| name.to_str())
                 .unwrap_or(&words[index]).to_ascii_lowercase();
             // Per statement: a listing opens no file.
-            let names_only = names_inert && statements.len() == arguments.len()
+            let names_only = names_inert && !context.nested && statements.len() == arguments.len()
                 && arguments.get(at).is_some_and(|argv| {
                     super::pre_tool::unwrapped_command_index(argv).is_some_and(|other| {
                         argv[other] == words[index] && lists_names_only(&executable, &argv[other + 1..])
@@ -145,7 +160,7 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
             directories.iter().any(|cwd| {
                 script_constructs_store_path(&body.text, cwd, body.python_source)
                     // A shell executes the body, including any substitution in it.
-                    || (body.shell_commands && shell_body_references_store(&body.text, cwd, depth + 1))
+                    || (body.shell_commands && shell_body_references_store(&body.text, cwd, depth + 1, known_only))
             })
         }) { return true; }
     }
@@ -155,11 +170,11 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
 /// A shell executes this heredoc body. Beyond its statements, any word naming a
 /// store path counts, wherever it sits (inside a quoted command substitution
 /// included): the shell's own parse is not trusted to surface it.
-fn shell_body_references_store(body: &str, cwd: &Path, depth: usize) -> bool {
+fn shell_body_references_store(body: &str, cwd: &Path, depth: usize, known_only: bool) -> bool {
     body.split(|c: char| c.is_whitespace() || "\"'`()$;|&<>={}".contains(c))
         .filter(|word| !word.is_empty())
         .any(|word| path_references_store(word, cwd, false))
-        || shell_references_store(body, cwd, depth)
+        || shell_references_store_with(body, cwd, depth, known_only)
 }
 
 /// The directories that stand for `cwd`. Each unknown entry takes, per store,
@@ -226,17 +241,6 @@ fn statement_references_store(
         .unwrap_or(&words[command_index])
         .to_ascii_lowercase();
     let args = &words[command_index + 1..];
-
-    // Inspect shell payloads as nested statement lists so a `cd` inside a
-    // `sh -c` or `bash -c` does not leak into the caller's working dir.
-    if matches!(executable.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh") {
-        return shell_command_payloads(args)
-            .into_iter()
-            .any(|payload| shell_references_store(payload, cwd, depth + 1));
-    }
-    if executable == "eval" {
-        return shell_references_store(&args.join(" "), cwd, depth + 1);
-    }
     let cwd = &wrapper_cwd(&words[..command_index], cwd);
 
     let descends = invocation_recursively_reads_directories(&executable, args);
@@ -296,7 +300,7 @@ fn statement_references_store(
 /// and `sudo -D DIR` (or `--chdir`) move it. `unwrapped_command_index` skips
 /// these wrappers, so their directory change is applied here from the
 /// skipped words.
-fn wrapper_cwd(prefix: &[String], cwd: &Path) -> PathBuf {
+pub(super) fn wrapper_cwd(prefix: &[String], cwd: &Path) -> PathBuf {
     let mut cwd = cwd.to_path_buf();
     let mut chdir_flag = None;
     let mut index = 0;
@@ -463,23 +467,6 @@ fn path_operand_is_bare_relative(argument: &str) -> bool {
         && !normalized.starts_with('$')
         && !normalized.contains('/')
         && !normalized.contains(['*', '?', '['])
-}
-
-/// Every non-option word after the command flag may be the command string:
-/// other options take their own values (`bash -oc pipefail '<cmd>'`).
-fn shell_command_payloads(args: &[String]) -> Vec<&str> {
-    let Some(flag) = args.iter().position(|arg| {
-        arg == "--command"
-            || arg == "-c"
-            || (arg.starts_with('-') && !arg.starts_with("--") && arg[1..].contains('c'))
-    }) else {
-        return Vec::new();
-    };
-    args[flag + 1..]
-        .iter()
-        .filter(|arg| !arg.starts_with('-'))
-        .map(String::as_str)
-        .collect()
 }
 
 fn invocation_recursively_reads_directories(name: &str, args: &[String]) -> bool {

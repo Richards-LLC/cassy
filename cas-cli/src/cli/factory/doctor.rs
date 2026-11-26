@@ -1114,12 +1114,4 @@ effort = "high"
 
         assert!(error.contains("codex_luna"), "{error}");
     }
-
-    #[test]
-    fn doctor_rejects_luna_high_with_registry_alternatives() {
-        let error =
-            doctor_routing_error(r#"{"cli":"codex","model":"gpt-5.6-luna","effort":"high"}"#);
-
-        assert!(error.contains("codex_luna"), "{error}");
-    }
 }

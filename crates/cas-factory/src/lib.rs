@@ -55,7 +55,7 @@ pub use routing::{
     default_effort_for_model, embedded_registry, model_harness, parse_registry,
     recipe_route_identity, registered_harnesses, registry, render_route_table,
     render_spawn_recipes, resolve_lane, resolve_lane_from_registry, resolve_lane_specs,
-    validate_explicit, validate_lane_request, validate_model_effort_policy,
+    validate_explicit, validate_lane_request,
     validate_model_matches_cli, is_claude_model_slug, validate_model_is_active,
     validate_model_slug, validate_model_slug_with, normalize_spec_for_harness,
 };

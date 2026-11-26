@@ -609,6 +609,10 @@ impl CasService {
         let handler_close_guard = close_guard.clone();
         let tool_work = self.tool_work.permit();
         let start = std::time::Instant::now();
+        if tool_name == "task" && action == "close" {
+            let reserve = std::time::Duration::from_secs(2).min(budget / 10);
+            let _ = receipt.close_gate_deadline.set(crate::bounded_process::Deadline::after(budget - reserve));
+        }
         let mut handle = tokio::spawn(super::mutation_receipt::scope(receipt.clone(), async move {
             let _tool_work = tool_work;
             let _close_guard = handler_close_guard;
@@ -791,6 +795,15 @@ impl CasService {
                     && receipt.action() == "close"
                     && receipt.task_id().is_some();
                 if task_close {
+                    if receipt.terminal.get().is_none()
+                        && let Some(gate) = receipt.refuse_running_delivery_gate()
+                    {
+                        let refusal = crate::gates::tag(gate, format!(
+                            "CLOSE GATE TIMED OUT: {}. No close or park was authorized. Retry close.",
+                            crate::gates::find(gate).expect("registered delivery gate").title,
+                        ));
+                        return Ok(rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(refusal)]));
+                    }
                     return self.close_continuation_answer(handle, receipt, start, budget);
                 }
                 if let Some(id) = &continuation_id {
@@ -2258,10 +2271,11 @@ mod tests {
         );
         std::fs::create_dir_all(&service.inner.cas_root).unwrap();
         let tasks = service.inner.open_task_store().unwrap();
-        for (id, intermediate, committed) in [
-            ("cas-preflight", false, false),
-            ("cas-evidence", true, false),
-            ("cas-followup", true, true),
+        for (id, phase, intermediate, committed) in [
+            ("cas-preflight", "preflight", false, false),
+            ("cas-evidence", "close_gates", true, false),
+            ("cas-followup", "close_gates", true, true),
+            ("cas-proof", "G-56", true, false),
         ] {
             tasks.add(&crate::types::Task::new(id.into(), "slow close".into())).unwrap();
             let arguments = serde_json::json!({"action":"close", "id":id});
@@ -2276,7 +2290,7 @@ mod tests {
             let answer = service.call_with_deadline(
                 "task", arguments.as_object(), std::time::Duration::from_millis(20), async move {
                     started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let _phase = mutation_receipt::phase(if intermediate { "close_gates" } else { "preflight" });
+                    let _phase = mutation_receipt::phase(phase);
                     if intermediate { mutation_receipt::task_committed(id); }
                     if committed {
                         let mut task = store.get(id).unwrap();
@@ -2285,7 +2299,7 @@ mod tests {
                         mutation_receipt::task_disposition_committed(id, &supplied_outcome);
                     }
                     held.await.unwrap();
-                    if !committed {
+                    if !committed && mutation_receipt::current().unwrap().close_gate_timeout.get().is_none() {
                         let mut task = store.get(id).unwrap();
                         task.status = crate::types::TaskStatus::AwaitingMerge;
                         store.update(&task).unwrap();
@@ -2295,6 +2309,15 @@ mod tests {
                     Ok(CasCore::tool_error(supplied_refusal))
                 },
             ).await.expect("retained close must return a normal tool result");
+            if phase == "G-56" {
+                assert_eq!(answer.is_error, Some(true), "{answer:?}");
+                assert!(crate::gates::codes_in(answer.content[0].as_text().unwrap().text.as_str()).contains(&"G-56"));
+                assert!(answer.structured_content.is_none());
+                release.send(()).unwrap();
+                service.tool_work.wait_idle().await;
+                assert_eq!(tasks.get(id).unwrap().status, crate::types::TaskStatus::Open);
+                continue;
+            }
             assert_eq!(answer.is_error, Some(false));
             let data = answer.structured_content.unwrap();
             assert_eq!(data["mutation_outcome"], if committed { "COMMITTED" } else { "IN_PROGRESS" });

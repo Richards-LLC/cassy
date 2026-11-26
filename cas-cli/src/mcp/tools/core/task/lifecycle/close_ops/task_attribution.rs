@@ -2309,7 +2309,7 @@ fn draft_retired_by_delivery(
             .args(["cat-file", "-e", &object])
             .current_dir(repo)
             .stderr(std::process::Stdio::null())
-            .status()
+            .measurement_status()
             .map_err(|error| format!("failed to inspect `{object}`: {error}"))?
             .success();
         let mut counts = std::collections::HashMap::new();
@@ -2319,7 +2319,7 @@ fn draft_retired_by_delivery(
         let output = Command::new("git")
             .args(["cat-file", "blob", &object])
             .current_dir(repo)
-            .output()
+            .measurement_output()
             .map_err(|error| format!("failed to read `{object}`: {error}"))?;
         if !output.status.success() {
             return Err(format!("Git could not read `{object}`"));
@@ -2576,7 +2576,7 @@ fn resolution_has_novel_lines(
         let output = Command::new("git")
             .args(["show", &format!("{parent}:{path}")])
             .current_dir(repo)
-            .output()
+            .measurement_output()
             .ok()?;
         if output.status.success() {
             let contents = String::from_utf8(output.stdout).ok()?;
@@ -2620,7 +2620,7 @@ fn git_diff_is_empty(repo: &Path, left: &str, right: &str, path: &str) -> Option
     let status = Command::new("git")
         .args(["diff", "--quiet", "--no-renames", left, right, "--", path])
         .current_dir(repo)
-        .status()
+        .measurement_status()
         .ok()?;
     match status.code() {
         Some(0) => Some(true),

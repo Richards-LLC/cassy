@@ -297,8 +297,14 @@ fn registering_json_imports(path: &str, source: &str) -> Result<BTreeSet<String>
     let imported = json_imports(path, source)?;
     if imported.is_empty() { return Ok(imported); }
     let Ok(tree) = source_tree(path, source) else { return Ok(imported) };
-    let words = |text: &str| text.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'))
-        .filter(|word| !word.is_empty()).map(str::to_owned).collect::<BTreeSet<_>>();
+    const FUNCTIONS: [&str; 5] = ["arrow_function", "function_expression", "function_declaration", "generator_function_declaration", "method_definition"];
+    fn references(node: Node<'_>, source: &str, into_functions: bool, found: &mut Vec<String>) {
+        if matches!(node.kind(), "identifier" | "shorthand_property_identifier") { found.push(text(node, source).to_owned()); }
+        if !into_functions && FUNCTIONS.contains(&node.kind()) { return; }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) { references(child, source, into_functions, found); }
+    }
+    let refs = |node: Node<'_>, into_functions: bool| { let mut found = Vec::new(); references(node, source, into_functions, &mut found); found };
     let directory = Path::new(path).parent().unwrap_or(Path::new(""));
     let mut bound: BTreeMap<String, String> = BTreeMap::new();
     let mut declarators = Vec::new();
@@ -315,9 +321,7 @@ fn registering_json_imports(path: &str, source: &str) -> Result<BTreeSet<String>
             {
                 let mut cursor = node.walk();
                 for clause in node.named_children(&mut cursor).filter(|child| child.kind() == "import_clause") {
-                    for name in words(text(clause, source)).into_iter().filter(|word| word != "as") {
-                        bound.insert(name, data.clone());
-                    }
+                    for name in refs(clause, false) { bound.insert(name, data.clone()); }
                 }
             },
             "variable_declarator" => declarators.push(node),
@@ -328,26 +332,10 @@ fn registering_json_imports(path: &str, source: &str) -> Result<BTreeSet<String>
         let mut cursor = node.walk();
         stack.extend(node.named_children(&mut cursor));
     }
-    let callee_root = |call: Node<'_>| call.child_by_field_name("function")
-        .and_then(|function| words(text(function, source)).into_iter().next());
-    loop {
-        let before = bound.len();
-        for declarator in &declarators {
-            let (Some(name), Some(value)) = (declarator.child_by_field_name("name"), declarator.child_by_field_name("value")) else { continue };
-            let value_text = text(value, source);
-            let data = words(value_text).into_iter().find_map(|word| bound.get(&word).cloned()).or_else(|| {
-                relative_literals(path, value_text).ok()?.into_iter()
-                    .filter_map(|resolved| resolved.to_str().map(str::to_owned)).find(|data| imported.contains(data))
-            });
-            if let Some(data) = data {
-                for word in words(text(name, source)) { bound.entry(word).or_insert_with(|| data.clone()); }
-            }
-        }
-        if bound.len() == before { break; }
-    }
-    let mut registering = BTreeSet::new();
+    let callee_root = |call: Node<'_>| call.child_by_field_name("function").and_then(|function| refs(function, false).into_iter().next());
     let suite_or_test = |call: Node<'_>| declaration(call, source, &aliases).map(|(suite, ..)| suite)
         .or_else(|| callee_root(call).filter(|root| aliases.contains_key(root)).map(|_| false));
+    let callback_of = |function: Node<'_>| function.parent().filter(|parent| parent.kind() == "arguments").and_then(|arguments| arguments.parent());
     let local_name = |function: Node<'_>| match function.kind() {
         "function_declaration" | "generator_function_declaration" => function.child_by_field_name("name"),
         "arrow_function" | "function_expression" => function.parent().filter(|parent| parent.kind() == "variable_declarator")
@@ -357,38 +345,56 @@ fn registering_json_imports(path: &str, source: &str) -> Result<BTreeSet<String>
     let deferred = |node: Node<'_>, eager: &BTreeSet<String>| {
         let mut scope = node.parent();
         while let Some(current) = scope {
-            if let Some(call) = matches!(current.kind(), "arrow_function" | "function_expression").then(|| current.parent()).flatten()
-                .filter(|parent| parent.kind() == "arguments").and_then(|arguments| arguments.parent())
-                && (suite_or_test(call) == Some(false) || call.child_by_field_name("function").is_some_and(|function|
-                    matches!(text(function, source).rsplit('.').next(), Some("beforeEach" | "afterEach" | "beforeAll" | "afterAll"))))
-            {
-                return true;
+            if FUNCTIONS.contains(&current.kind()) {
+                match callback_of(current) {
+                    Some(call) if suite_or_test(call) == Some(false) || call.child_by_field_name("function").is_some_and(|function|
+                        matches!(text(function, source).rsplit('.').next(), Some("beforeEach" | "afterEach" | "beforeAll" | "afterAll"))) => return true,
+                    Some(_) => {}
+                    None if local_name(current).is_some_and(|name| eager.contains(&name))
+                        || current.parent().filter(|parent| parent.kind() == "parenthesized_expression")
+                            .and_then(|parent| parent.parent()).is_some_and(|call| call.kind() == "call_expression") => {}
+                    None => return true,
+                }
             }
-            if local_name(current).is_some_and(|name| !eager.contains(&name)) { return true; }
             scope = current.parent();
         }
         false
     };
     let mut eager = BTreeSet::new();
     loop {
-        let found: BTreeSet<String> = calls.iter().copied().filter(|call| !deferred(*call, &eager))
-            .filter_map(callee_root).collect();
+        let found: BTreeSet<String> = calls.iter().copied().filter(|call| !deferred(*call, &eager)).filter_map(callee_root).collect();
         if found.is_subset(&eager) { break; }
         eager.extend(found);
     }
-    let in_test_body = |node: Node<'_>| deferred(node, &eager);
-    for call in calls.iter().copied().filter(|call| !in_test_body(*call)) {
-        let mut cursor = call.walk();
-        let arguments = call.child_by_field_name("arguments").map(|arguments| arguments.named_children(&mut cursor)
-            .filter(|argument| !matches!(argument.kind(), "arrow_function" | "function_expression"))
-            .map(|argument| text(argument, source)).collect::<Vec<_>>()).unwrap_or_default();
-        let callee = call.child_by_field_name("function").map_or("", |function| text(function, source));
-        registering.extend(std::iter::once(callee).chain(arguments).flat_map(words).filter_map(|word| bound.get(&word).cloned()));
+    loop {
+        let before = bound.len();
+        for declarator in declarators.iter().copied().filter(|declarator| !deferred(*declarator, &eager)) {
+            let (Some(name), Some(value)) = (declarator.child_by_field_name("name"), declarator.child_by_field_name("value")) else { continue };
+            let data = refs(value, true).into_iter().find_map(|word| bound.get(&word).cloned()).or_else(|| {
+                relative_literals(path, text(value, source)).ok()?.into_iter()
+                    .filter_map(|resolved| resolved.to_str().map(str::to_owned)).find(|data| imported.contains(data))
+            });
+            if let Some(data) = data {
+                for word in refs(name, false) { bound.entry(word).or_insert_with(|| data.clone()); }
+            }
+        }
+        if bound.len() == before { break; }
     }
-    for control in controls.into_iter().filter(|control| !in_test_body(*control)) {
-        let body = control.child_by_field_name("body").or_else(|| control.child_by_field_name("consequence"));
-        let header = &source[control.start_byte()..body.map_or(control.end_byte(), |body| body.start_byte())];
-        registering.extend(words(header).into_iter().filter_map(|word| bound.get(&word).cloned()));
+    let mut registering = BTreeSet::new();
+    for call in calls.iter().copied().filter(|call| !deferred(*call, &eager)) {
+        let mut used = call.child_by_field_name("function").map(|function| refs(function, false)).unwrap_or_default();
+        let mut cursor = call.walk();
+        for argument in call.child_by_field_name("arguments").into_iter().flat_map(|arguments| arguments.named_children(&mut cursor).collect::<Vec<_>>()) {
+            used.extend(refs(argument, false));
+        }
+        registering.extend(used.into_iter().filter_map(|word| bound.get(&word).cloned()));
+    }
+    for control in controls.into_iter().filter(|control| !deferred(*control, &eager)) {
+        let body = ["body", "consequence", "alternative"].map(|field| control.child_by_field_name(field));
+        let mut cursor = control.walk();
+        for part in control.named_children(&mut cursor).filter(|child| !body.contains(&Some(*child))) {
+            registering.extend(refs(part, false).into_iter().filter_map(|word| bound.get(&word).cloned()));
+        }
     }
     Ok(registering)
 }

@@ -335,7 +335,9 @@ fn registering_json_imports(path: &str, source: &str) -> Result<BTreeSet<String>
     let callee_root = |call: Node<'_>| call.child_by_field_name("function").and_then(|function| refs(function, false).into_iter().next());
     let suite_or_test = |call: Node<'_>| declaration(call, source, &aliases).map(|(suite, ..)| suite)
         .or_else(|| callee_root(call).filter(|root| aliases.contains_key(root)).map(|_| false));
-    let callback_of = |function: Node<'_>| function.parent().filter(|parent| parent.kind() == "arguments").and_then(|arguments| arguments.parent());
+    fn callback_of(function: Node<'_>) -> Option<Node<'_>> {
+        function.parent().filter(|parent| parent.kind() == "arguments").and_then(|arguments| arguments.parent())
+    }
     let local_name = |function: Node<'_>| match function.kind() {
         "function_declaration" | "generator_function_declaration" => function.child_by_field_name("name"),
         "arrow_function" | "function_expression" => function.parent().filter(|parent| parent.kind() == "variable_declarator")

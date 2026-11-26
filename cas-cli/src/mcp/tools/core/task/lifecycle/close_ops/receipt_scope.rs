@@ -1794,6 +1794,7 @@ raise SystemExit(1 if failed else 0)
         git(&["mv", "apps/backend/prisma/migrations/1_init", "apps/backend/prisma/migrations/2_init"]);
         write("apps/backend/src/__scenarios__/scenarios.json", "[[\"sms\", false], [\"email\", true]]");
         write("apps/backend/test/fixtures/patterns.ts", "export const pattern = /^a+$/;\n");
+        write("apps/backend/src/unrelated.spec.ts", "import { x } from '../lib/x';\nit('unrelated', () => { void x; void 1; });\n");
         git(&["commit", "-qam", "rename migration, extend catalogue, widen fixture"]);
         std::fs::write(root.path().join("config.toml"), "[factory]\nepic_base_branch='main'\n").unwrap();
         let head = git(&["rev-parse", "HEAD"]);
@@ -1808,6 +1809,10 @@ raise SystemExit(1 if failed else 0)
         let found = covering.get(&package).unwrap();
         assert_eq!(found.specs, specs.map(String::from));
         assert!(found.unresolved.is_empty(), "every changed input is read by a covering spec");
+        // GH #2537, #2535: a changed spec in the package keeps its own
+        // stability proof; it is not an input some other spec must read.
+        let edited = [paths.clone(), vec!["apps/backend/src/unrelated.spec.ts".into()]].concat();
+        assert_eq!(widened::covering(&repo, &head, &edited, &scopes), covering);
         // Every prescribed package command targets exactly the covering specs.
         let commands = widened::commands(root.path(), &repo, &paths, &[package.clone()], &covering);
         assert!(!commands.is_empty());
@@ -1956,7 +1961,7 @@ sys.exit(0 if ok else 1)
         let head = git(&["rev-parse", "HEAD"]);
         let paths = vec![source.to_owned()];
         let task = Task::new("cas-1587".into(), "related source proof".into());
-        let scopes = vec![widened::scope(&repo, source)];
+        let scopes = vec![widened::scope(&repo, source).unwrap()];
         let commands = widened::commands(root.path(), &repo, &paths, &scopes, &Default::default());
         assert_eq!(commands.len(), 1);
         // These bytes are the runnable command consumed by worker-check.
@@ -1981,7 +1986,7 @@ sys.exit(0 if ok else 1)
         // A receipt for this source cannot cover a second source in the package.
         let other_source = format!("{package}/src/other.ts");
         write(&other_source, "export const value = 3;\n");
-        let other = widened::scope(&repo, &other_source);
+        let other = widened::scope(&repo, &other_source).unwrap();
         assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &head), &[other.clone()], &Default::default()), [other]);
         std::fs::remove_file(repo.join(&other_source)).unwrap();
         // A failing related spec must withdraw the old proof at the new tip.

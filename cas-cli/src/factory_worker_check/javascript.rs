@@ -189,7 +189,7 @@ pub(crate) fn changed_tests(
         if !safe_path(path) {
             bail!("invalid JavaScript stability path: {path}");
         }
-        if super::git(repo, &["ls-tree", "--name-only", head, "--", path])?.is_empty() {
+        if super::git(repo, &["ls-tree", "--name-only", head, "--", path])?.is_empty() || runner_config_file(path) {
             continue;
         }
         let diff = super::git(
@@ -274,11 +274,11 @@ pub(crate) fn changed_tests(
 }
 
 /// The catalogue that changes this source's generated tests, if any: a JSON
-/// file it imports by relative path that the delivery changed, or a JSON
-/// import the delivery added, removed or switched.
+/// file it registers tests from that the delivery changed, or such an import
+/// the delivery added, removed or switched.
 fn changed_data_import(repo: &Path, base: &str, head: &str, path: &str, source: &str, old: &str) -> Result<Option<String>> {
-    let imported = json_imports(path, source)?;
-    if let Some(switched) = imported.symmetric_difference(&json_imports(path, old)?).next() {
+    let imported = registering_json_imports(path, source)?;
+    if let Some(switched) = imported.symmetric_difference(&registering_json_imports(path, old)?).next() {
         return Ok(Some(switched.clone()));
     }
     let changed = super::git(repo, &["diff", "--name-only", base, head, "--", "*.json"])?;
@@ -293,22 +293,121 @@ fn json_imports(path: &str, source: &str) -> Result<BTreeSet<String>> {
         .collect())
 }
 
+/// The JSON files `source` registers tests from (GH #2221): imported by
+/// relative path and read by a registration's own table or title, or by the
+/// head of a loop, condition or call enclosing one. Data read only inside test
+/// bodies, such as a locale dictionary, registers the same tests whatever it
+/// holds (GH #2516, #2483, #2438), and a module registering no test registers
+/// none from it (GH #2482). A source that does not parse keeps every import.
+fn registering_json_imports(path: &str, source: &str) -> Result<BTreeSet<String>> {
+    let imported = json_imports(path, source)?;
+    if imported.is_empty() { return Ok(imported); }
+    let Ok(tree) = source_tree(path, source) else { return Ok(imported) };
+    let words = |text: &str| text.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'))
+        .filter(|word| !word.is_empty()).map(str::to_owned).collect::<BTreeSet<_>>();
+    let directory = Path::new(path).parent().unwrap_or(Path::new(""));
+    let mut bound: BTreeMap<String, String> = BTreeMap::new();
+    let mut declarators = Vec::new();
+    let mut calls = Vec::new();
+    let mut aliases = BTreeMap::new();
+    imported_aliases(tree.root_node(), source, &mut aliases);
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "import_statement" => if let Some(from) = node.child_by_field_name("source")
+                && let Some(data) = title(from, source).map(|literal| normalize_relative(directory, &literal))
+                    .and_then(|data| data.to_str().map(str::to_owned)).filter(|data| imported.contains(data))
+            {
+                let mut cursor = node.walk();
+                for clause in node.named_children(&mut cursor).filter(|child| child.kind() == "import_clause") {
+                    for name in words(text(clause, source)).into_iter().filter(|word| word != "as") {
+                        bound.insert(name, data.clone());
+                    }
+                }
+            },
+            "variable_declarator" => declarators.push(node),
+            "call_expression" => calls.push(node),
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    // A registration: the test API, an alias of it, or a local function that
+    // registers tests when called (`for (const row of data) runCase(row)`).
+    let callee_root = |call: Node<'_>| call.child_by_field_name("function")
+        .and_then(|function| words(text(function, source)).into_iter().next());
+    let mut registrations: Vec<Node<'_>> = calls.iter().copied().filter(|call| declaration(*call, source, &aliases).is_some()
+        || callee_root(*call).is_some_and(|root| aliases.contains_key(&root))).collect();
+    let factories: BTreeSet<String> = registrations.iter().filter_map(|registration| {
+        let mut scope = registration.parent();
+        while let Some(node) = scope {
+            match node.kind() {
+                "function_declaration" => return node.child_by_field_name("name").map(|name| text(name, source).to_owned()),
+                "arrow_function" | "function_expression" => return node.parent().filter(|parent| parent.kind() == "variable_declarator")
+                    .and_then(|declarator| declarator.child_by_field_name("name")).map(|name| text(name, source).to_owned()),
+                _ => scope = node.parent(),
+            }
+        }
+        None
+    }).collect();
+    registrations.extend(calls.iter().copied().filter(|call| callee_root(*call).is_some_and(|root| factories.contains(&root))));
+    // `require('./data.json')`, and values derived from bound data, bind too.
+    loop {
+        let before = bound.len();
+        for declarator in &declarators {
+            let (Some(name), Some(value)) = (declarator.child_by_field_name("name"), declarator.child_by_field_name("value")) else { continue };
+            let value_text = text(value, source);
+            let data = words(value_text).into_iter().find_map(|word| bound.get(&word).cloned()).or_else(|| {
+                relative_literals(path, value_text).ok()?.into_iter()
+                    .filter_map(|resolved| resolved.to_str().map(str::to_owned)).find(|data| imported.contains(data))
+            });
+            if let Some(data) = data {
+                for word in words(text(name, source)) { bound.entry(word).or_insert_with(|| data.clone()); }
+            }
+        }
+        if bound.len() == before { break; }
+    }
+    let mut registering = BTreeSet::new();
+    for registration in registrations {
+        let callback = {
+            let mut cursor = registration.walk();
+            registration.child_by_field_name("arguments").and_then(|arguments| arguments.named_children(&mut cursor)
+                .find(|argument| matches!(argument.kind(), "arrow_function" | "function_expression")))
+        };
+        let mut headers = vec![&source[registration.start_byte()..callback.map_or(registration.end_byte(), |callback| callback.start_byte())]];
+        let (mut child, mut parent) = (registration, registration.parent());
+        while let Some(scope) = parent {
+            if matches!(scope.kind(), "for_statement" | "for_in_statement" | "while_statement" | "if_statement"
+                | "switch_statement" | "ternary_expression" | "call_expression" | "arguments")
+            {
+                headers.push(&source[scope.start_byte()..child.start_byte()]);
+            }
+            (child, parent) = (scope, scope.parent());
+        }
+        registering.extend(headers.into_iter().flat_map(words).filter_map(|word| bound.get(&word).cloned()));
+    }
+    Ok(registering)
+}
+
+/// `literal` (`./a.json`, `../b`) resolved from `directory`, repository-relative.
+fn normalize_relative(directory: &Path, literal: &str) -> PathBuf {
+    let mut resolved = PathBuf::new();
+    for part in directory.join(literal).components() {
+        match part {
+            Component::ParentDir => { resolved.pop(); }
+            Component::CurDir => {}
+            other => resolved.push(other),
+        }
+    }
+    resolved
+}
+
 /// Repository paths that a source's relative string literals name, resolved
 /// from the source's own directory (`'./scenarios.json'`, `'../prisma/migrations'`).
 fn relative_literals(path: &str, source: &str) -> Result<Vec<PathBuf>> {
     let directory = Path::new(path).parent().unwrap_or(Path::new(""));
     let literal = regex::Regex::new(r#"["'`](\.{1,2}/[^"'`\s$]+)["'`]"#)?;
-    Ok(literal.captures_iter(source).map(|capture| {
-        let mut resolved = PathBuf::new();
-        for part in directory.join(&capture[1]).components() {
-            match part {
-                Component::ParentDir => { resolved.pop(); }
-                Component::CurDir => {}
-                other => resolved.push(other),
-            }
-        }
-        resolved
-    }).collect())
+    Ok(literal.captures_iter(source).map(|capture| normalize_relative(directory, &capture[1])).collect())
 }
 
 /// GH #2221: the test files at `head` that import the changed catalogue
@@ -327,7 +426,7 @@ pub(crate) fn catalogue_specs(repo: &Path, head: &str, data: &str) -> Result<Vec
             continue;
         }
         let source = String::from_utf8_lossy(&show(repo, head, spec)?.unwrap_or_default()).into_owned();
-        if json_imports(spec, &source)?.contains(data) {
+        if registering_json_imports(spec, &source)?.contains(data) {
             specs.push(spec.to_owned());
         }
     }
@@ -1274,9 +1373,21 @@ fn walk(
 /// followed by a space. Anything whose exact Vitest rendering is not known
 /// (other `%` directives, nested keys, long or quoted strings, objects, a
 /// variable or spread table) gives `None`.
+/// A table, row or cell without the TypeScript `as const` or `satisfies`
+/// assertion or the parentheses around it: the runtime value is unchanged
+/// (GH #2527, #2404, #2443).
+fn unwrapped(mut node: Node<'_>) -> Node<'_> {
+    while matches!(node.kind(), "as_expression" | "satisfies_expression" | "parenthesized_expression" | "non_null_expression")
+        && let Some(inner) = node.named_child(0)
+    {
+        node = inner;
+    }
+    node
+}
+
 fn expand_table(call: Node<'_>, source: &str, title: &str, prefix: &str) -> Option<Expansion> {
     let arguments = call.child_by_field_name("function")?.child_by_field_name("arguments")?;
-    let table = arguments.named_child(0).filter(|_| arguments.named_child_count() == 1)?;
+    let table = unwrapped(arguments.named_child(0).filter(|_| arguments.named_child_count() == 1)?);
     if table.kind() != "array" {
         return None;
     }
@@ -1290,7 +1401,7 @@ fn expand_table(call: Node<'_>, source: &str, title: &str, prefix: &str) -> Opti
             "," => previous_comma = true,
             "spread_element" => return None,
             _ => {
-                rows.push(child);
+                rows.push(unwrapped(child));
                 previous_comma = false;
             }
         }
@@ -1346,7 +1457,7 @@ fn percent_title(title: &str, index: usize, row: Node<'_>, source: &str) -> Opti
                 "," if previous_comma => return None,
                 "," => previous_comma = true,
                 _ => {
-                    args.push(child);
+                    args.push(unwrapped(child));
                     previous_comma = false;
                 }
             }
@@ -1393,7 +1504,7 @@ fn dollar_title(pattern: &str, row: Node<'_>, source: &str) -> Option<String> {
                     "string" => title(key, source)?,
                     _ => return None,
                 };
-                values.insert(key, quoted_literal(pair.child_by_field_name("value")?, source)?);
+                values.insert(key, quoted_literal(unwrapped(pair.child_by_field_name("value")?), source)?);
             }
             _ => return None,
         }
@@ -1537,8 +1648,11 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
         match changed_tests(&repo, &base, &head, std::slice::from_ref(file), None) {
             Ok(selected) if !selected.is_empty() => tests.extend(selected),
             result => {
-                let scope = super::widened::scope(&repo, file);
                 let cause = result.err().map(|error| format!("{error:#}")).unwrap_or_else(|| "no static changed-test selection".into());
+                let Some(scope) = super::widened::scope(&repo, file) else {
+                    eprintln!("Nothing to run for {file}: no capped run can select a test for it ({cause}); park owes it none");
+                    continue;
+                };
                 eprintln!("Widening {file} to {scope:?} for one capped pass: {cause}");
                 widened.entry(scope).or_insert_with(|| (file.clone(), cause));
             }
@@ -1771,8 +1885,24 @@ fn playwright_config_selects(repo: &Path, dir: &Path, config: &Path, spec: &Path
 /// config or no plugin `vitest related <file>.vue` crashes (GH #2352).
 pub(crate) fn vitest_loads_vue(repo: &Path, path: &str) -> bool {
     runner_root(repo, path, "vitest").ok().and_then(|(_, config)| config)
-        .and_then(|config| std::fs::read_to_string(config).ok())
-        .is_some_and(|config| ["plugin-vue", "@nuxt/test-utils", "unplugin-vue"].iter().any(|plugin| config.contains(plugin)))
+        .is_some_and(|config| config_sources(&config).iter()
+            .any(|source| ["plugin-vue", "@nuxt/test-utils", "unplugin-vue"].iter().any(|plugin| source.contains(plugin))))
+}
+
+/// A runner config's source and the sources of the configs it imports by
+/// relative path: `mergeConfig(viteConfig, …)` takes its plugins from
+/// `./vite.config` (GH #2537), a Playwright config its `webServer` from a
+/// shared base (GH #2362).
+pub(super) fn config_sources(config: &Path) -> Vec<String> {
+    static IMPORT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(||
+        regex::Regex::new(r#"(?:\bfrom|\bimport)\s*\(?\s*['"](\.\.?/[^'"\n]+)['"]"#).expect("import pattern"));
+    let Ok(own) = std::fs::read_to_string(config) else { return Vec::new() };
+    let imported = IMPORT.captures_iter(&own).filter_map(|capture| {
+        let base = config.parent()?.join(&capture[1]);
+        std::iter::once(base.clone()).chain(["ts", "mts", "cts", "js", "mjs", "cjs"].iter()
+            .map(|ext| PathBuf::from(format!("{}.{ext}", base.display())))).find(|path| path.is_file())
+    }).filter_map(|path| std::fs::read_to_string(path).ok()).collect::<Vec<_>>();
+    std::iter::once(own).chain(imported).collect()
 }
 
 /// The repository-relative non-default Playwright config that lists `path`,
@@ -1782,6 +1912,25 @@ pub(crate) fn playwright_owner(repo: &Path, path: &str) -> Option<PathBuf> {
     let config = config?;
     if runner_config(&dir, "playwright").as_ref() == Some(&config) { return None; }
     config.strip_prefix(repo).ok().map(Path::to_path_buf)
+}
+
+/// Whether a file name is a `runner` config: its default names, or a further
+/// config beside it (`jest-x.integration.config.js`, `playwright.hermetic.config.ts`).
+fn config_name(name: &str, runner: &str) -> bool {
+    javascript(name) && name.contains(".config.") && match runner {
+        "jest" => name.contains("jest"),
+        "playwright" => name.starts_with("playwright"),
+        "vitest" => name.starts_with("vitest") || name.starts_with("vite."),
+        _ => false,
+    }
+}
+
+/// A runner's config selects and configures tests and registers none, so its
+/// change owes no changed-test proof of its own; the tests it lists keep
+/// theirs, run under it (GH #2526, #2514, #2423, #2543).
+pub(crate) fn runner_config_file(path: &str) -> bool {
+    let name = Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    ["jest", "vitest", "playwright"].iter().any(|runner| config_name(name, runner))
 }
 
 /// The runner configs in `dir`, nearest default first. Jest repositories keep
@@ -1797,8 +1946,7 @@ fn runner_configs(dir: &Path, runner: &str) -> Vec<PathBuf> {
             .flatten()
             .filter(|entry| {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                (if runner == "jest" { name.contains("jest") } else { name.starts_with("playwright") })
-                    && name.contains(".config.") && javascript(&name) && !defaults.contains(&name.as_str())
+                config_name(&name, runner) && !defaults.contains(&name.as_str())
             })
             .map(|entry| entry.path())
             .collect();
@@ -1857,9 +2005,11 @@ fn owning_package(repo: &Path, dir: &Path) -> PathBuf {
 /// scripts, then locally installed executables. The first nonempty kind wins.
 fn local_runners(dir: &Path) -> BTreeSet<&'static str> {
     const RUNNERS: [&str; 3] = ["jest", "vitest", "playwright"];
+    // A further config beside the defaults is that runner's evidence too, as
+    // `runner_root` already reads it (GH #2543).
     let configs: BTreeSet<_> = RUNNERS
         .into_iter()
-        .filter(|runner| runner_config(dir, runner).is_some())
+        .filter(|runner| !runner_configs(dir, runner).is_empty())
         .collect();
     if !configs.is_empty() {
         return configs;
@@ -2046,7 +2196,9 @@ fn execute_selection(
         // discovered runner config (cas-1468); never pass both.
         let (package, discovered) = if let Some((super::widened::Scope::Package(directory), _, _)) = widened {
             let package = repo.join(directory);
-            let config = self::runner_config(&package, runner);
+            // The config owning the input in that directory, as `scope` chose it (GH #2543).
+            let config = runner_root(repo, path, runner).ok().filter(|(owner, _)| *owner == package)
+                .and_then(|(_, config)| config).or_else(|| self::runner_config(&package, runner));
             (package, config)
         } else { runner_root(repo, path, runner)? };
         let discovered = if consumers.is_empty() || runner != "playwright" || runner_config.is_some() { discovered } else {
@@ -2072,6 +2224,12 @@ fn execute_selection(
         let cwd = if runner == "jest" { owning_package(repo, &package) } else { package.clone() };
         let source = std::fs::read_to_string(repo.join(path))?;
         let expected_rows = source_rows(path, &source).unwrap_or_default();
+        // GH #2527, #2472, #2443, #2440, #2404: a changed `it.each` whose rows
+        // the source table cannot name runs its whole spec instead: every row
+        // and every other test in it, five times, with no name filter.
+        let whole_file = runner == "vitest" && widened.is_none()
+            && selected.iter().any(|test| test.parameterized && !expected_rows.contains_key(*test));
+        if whole_file { eprintln!("Running all of {path}: its changed table rows cannot be named from source"); }
         let sites = if widened.is_none() { declared_sites(path, &source)? } else { Vec::new() };
         if !sites.is_empty() {
             if runner != "playwright" {
@@ -2088,7 +2246,7 @@ fn execute_selection(
                 .args(["--list", "--reporter=json"])
                 .arg(regex::escape(&repo.join(path).to_string_lossy()))
                 .env("PLAYWRIGHT_JSON_OUTPUT_FILE", &report);
-            if !run_scoped_javascript(command, high, &reports.path().join("discovery-scope"))? {
+            if !run_scoped_javascript(command, high, &reports.path().join("discovery-scope"))?.success() {
                 bail!("Playwright native discovery failed for {path}");
             }
             let report = serde_json::from_slice(
@@ -2109,7 +2267,7 @@ fn execute_selection(
             format!("^(?:{pattern})$")
         };
         let selected: Vec<_> = selected.into_iter().cloned().collect();
-        let run = |iteration| -> Result<(bool, Value)> {
+        let run = |iteration| -> Result<(Exit, Value)> {
             let report = reports.path().join(format!("report-{iteration}.json"));
             let mut command = Command::new(&executable);
             command.current_dir(&cwd).env("CI", "1").envs(environment.iter().copied());
@@ -2178,7 +2336,7 @@ fn execute_selection(
                 }
                 _ => bail!("unsupported stability runner: {runner}"),
             }
-            if widened.is_none() {
+            if widened.is_none() && !whole_file {
                 match runner {
                     "node" => { command.arg(format!("--test-name-pattern={pattern}")); }
                     "playwright" => { command.args(["--grep", &pattern]); }
@@ -2195,7 +2353,8 @@ fn execute_selection(
                 else { command.arg(&file); }
             }
             let marker = reports.path().join(format!("scope-{iteration}"));
-            let success = run_scoped_javascript(command, high, &marker)?;
+            let status = run_scoped_javascript(command, high, &marker)?;
+            let success = status.success();
             let value: Value =
                 serde_json::from_slice(&std::fs::read(&report).with_context(|| {
                     format!("{runner} did not produce a stability report for {path}")
@@ -2207,10 +2366,11 @@ fn execute_selection(
                         super::RedFirstFailure::JavaScript { runner: runner.into(), tests }, format!("{runner} {path}"))?;
                 }
             }
-            Ok((success, value))
+            Ok((if success { Ok(()) } else { Err(status.to_string()) }, value))
         };
         let (ran, skipped) = if widened.is_some() && runner == "playwright" {
-            let (success, report) = run(0)?;
+            let (exit, report) = run(0)?;
+            let success = exit.is_ok();
             let inherited = if success { BTreeSet::new() } else {
                 if playwright_found_no_tests(&report) {
                     let mut has_specs = false;
@@ -2230,7 +2390,7 @@ fn execute_selection(
             };
             validate_report_with_inherited(runner, repo, &report, &selected, 1, &inherited, None,
                 if consumers.is_empty() { &[] } else { std::slice::from_ref(&path) })?
-        } else { verify_repeats(runner, repo, &selected, &expected_rows, run)? };
+        } else { verify_repeats(runner, repo, &selected, &expected_rows, whole_file, run)? };
         count += ran;
         inactive.extend(skipped);
         // GH #2146: a stability run that executed every test of a spec under
@@ -2463,7 +2623,7 @@ fn failed_javascript_tests(runner: &str, repo: &Path, report: &Value) -> BTreeSe
     failed
 }
 
-fn run_scoped_javascript(command: Command, high: u64, marker: &Path) -> Result<bool> {
+fn run_scoped_javascript(command: Command, high: u64, marker: &Path) -> Result<std::process::ExitStatus> {
     let _ = std::fs::remove_file(marker);
     let mut command = crate::factory_build_memory::scope_command(
         command,
@@ -2485,7 +2645,7 @@ fn run_scoped_javascript(command: Command, high: u64, marker: &Path) -> Result<b
     let status = super::wait_for_worker_command(&mut child)?;
     #[cfg(not(unix))]
     let status = child.wait()?;
-    Ok(status.success())
+    Ok(status)
 }
 
 /// GH #2146: Playwright's own `--list` of `spec` under `config`, every test the
@@ -2501,7 +2661,7 @@ fn playwright_listing(
         .arg("test").arg("--config").arg(config).args(["--list", "--reporter=json"])
         .arg(regex::escape(&repo.join(spec).to_string_lossy()))
         .env("PLAYWRIGHT_JSON_OUTPUT_FILE", &report);
-    if !run_scoped_javascript(command, high, &scratch.join("listing-scope")).ok()? { return None; }
+    if !run_scoped_javascript(command, high, &scratch.join("listing-scope")).ok()?.success() { return None; }
     let listed: Value = serde_json::from_slice(&std::fs::read(&report).ok()?).ok()?;
     let root = playwright_report_root(repo, &listed);
     let mut tests = BTreeSet::new();
@@ -2547,33 +2707,90 @@ fn found_no_tests(runner: &str, success: bool, report: &Value) -> bool {
     }
 }
 
+/// How a runner process ended: `Err` carries its exit status or signal. The
+/// process and its report must both pass before a run is admitted.
+type Exit = std::result::Result<(), String>;
+
+/// GH #2548: the runner process failed at this iteration. Its report may
+/// still record every selected test passing; the failure is then outside the
+/// test assertions, and the run is not admitted either way.
+#[derive(Debug, thiserror::Error)]
+pub(crate) struct ProcessFailed {
+    runner: String,
+    iteration: usize,
+    status: String,
+    report_passed: bool,
+}
+
+impl std::fmt::Display for ProcessFailed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { runner, iteration, status, report_passed } = self;
+        let report = if *report_passed {
+            "its report recorded every selected test passing, so the failure is outside test assertions (setup, teardown, an unhandled error, a coverage threshold or the memory limit); see the runner output above"
+        } else { "its report shows no selected test running" };
+        write!(formatter, "{runner} process failed at iteration {iteration} ({status}); {report}; no retry")
+    }
+}
+
+/// GH #2308: a selected changed test the runner reported as not run. The
+/// capped name selection did not reach it at runtime, or the source skips it;
+/// it is neither a passing nor a failing result.
+#[derive(Debug, thiserror::Error)]
+#[error("{runner} did not run the selected changed test {path} :: {name} (reported {status}): its capped name selection did not match it at runtime, or the source skips it")]
+pub(crate) struct NotRun {
+    runner: String,
+    path: String,
+    name: String,
+    status: String,
+}
+
 /// Executed count and the environment-gated selected tests every repeat
-/// reported inactive.
+/// reported inactive. `whole_file` runs ran their specs without a name
+/// filter: every other test they report must pass too, and a table template
+/// the source cannot expand must report the same rows in every iteration.
 fn verify_repeats(
     runner: &str,
     repo: &Path,
     tests: &[Identity],
     expected: &BTreeMap<Identity, Expansion>,
-    mut run: impl FnMut(usize) -> Result<(bool, Value)>,
+    whole_file: bool,
+    mut run: impl FnMut(usize) -> Result<(Exit, Value)>,
 ) -> Result<(usize, BTreeSet<Identity>)> {
     let mut count = 0;
     let mut inactive: Option<BTreeSet<Identity>> = None;
+    let mut expected = expected.clone();
     for iteration in 0..if runner == "playwright" || tests.is_empty() { 1 } else { 5 } {
-        let (success, report) = run(iteration)?;
+        let (exit, report) = run(iteration)?;
+        let mut selection = tests.to_vec();
+        if whole_file {
+            let rows = report_rows(repo, &report);
+            selection.extend(rows.iter().filter(|(row, status)| *status == "passed" && !tests.iter().any(|test| test.selects(row)))
+                .map(|(row, _)| row.clone()).collect::<BTreeSet<_>>());
+            if iteration == 0 {
+                for test in tests.iter().filter(|test| test.parameterized && !expected.contains_key(*test)) {
+                    let mut names = Expansion::new();
+                    for (row, _) in rows.iter().filter(|(row, _)| test.selects(row)) { *names.entry(row.name.clone()).or_default() += 1; }
+                    expected.insert(test.clone(), names);
+                }
+            }
+        }
+        let failed = |report_passed| ProcessFailed {
+            runner: runner.into(), iteration: iteration + 1, status: exit.clone().err().unwrap_or_default(), report_passed,
+        };
         let (ran, skipped) = match validate_report_with_inherited(
             runner,
             repo,
             &report,
-            tests,
+            &selection,
             if runner == "playwright" && !tests.is_empty() { 5 } else { 1 },
             &BTreeSet::new(),
             // cas-c1df: Vitest's expanded row names are derived from the
             // source tables and every iteration must produce exactly them.
-            (runner == "vitest").then_some(expected),
+            (runner == "vitest").then_some(&expected),
             &[],
         ) {
-            Err(error) if error.downcast_ref::<ZeroTests>().is_some() && !found_no_tests(runner, success, &report) => {
-                bail!("{runner} stability failed at iteration {}; no retry", iteration + 1)
+            Err(error) if error.downcast_ref::<ZeroTests>().is_some() && !found_no_tests(runner, exit.is_ok(), &report) => {
+                return Err(failed(false).into());
             }
             result => result?,
         };
@@ -2584,14 +2801,21 @@ fn verify_repeats(
             )));
         }
         inactive = Some(skipped);
-        if !success {
-            bail!(
-                "{runner} stability failed at iteration {}; no retry",
-                iteration + 1
-            );
+        if exit.is_err() {
+            return Err(failed(true).into());
         }
     }
     Ok((count, inactive.unwrap_or_default()))
+}
+
+/// Every Vitest, Jest or node:test result row in a report, with its status.
+fn report_rows(repo: &Path, report: &Value) -> Vec<(Identity, String)> {
+    report["testResults"].as_array().into_iter().flatten().filter_map(|file| {
+        let path = report_path(repo, file["name"].as_str()?).ok()?;
+        Some(file["assertionResults"].as_array().into_iter().flatten().filter_map(move |test| Some((
+            Identity::exact(path.clone(), test["fullName"].as_str()?), test["status"].as_str().unwrap_or_default().to_owned(),
+        ))).collect::<Vec<_>>())
+    }).flatten().collect()
 }
 
 fn validate_report(
@@ -2633,7 +2857,15 @@ fn validate_report_with_inherited(
             .flat_map(|(each, project)| ["id", "name"].into_iter()
                 .filter_map(move |key| Some((project.get(key)?.as_str()?, each))))
             .collect();
+        // GH #2503: Playwright runs a selected project's dependency (a setup
+        // project) whatever the file filter. In a run that must execute
+        // `files`, a passing test of a project that ran none of them is that
+        // dependency: it does not count, and it is not an unrelated spec.
+        let required: BTreeSet<String> = projects.keys()
+            .filter(|(identity, _)| files.contains(&identity.path.as_str())).map(|(_, project)| project.clone()).collect();
         for ((identity, project), count) in projects {
+            if !files.is_empty() && !files.contains(&identity.path.as_str()) && !required.contains(&project)
+                && !tests.iter().any(|test| test.selects(&identity)) { continue; }
             let dependency = declared.get(project.as_str()).copied()
                 .filter(|each| *each != repeats as u64);
             if let Some(each) = dependency && !tests.iter().any(|test| test.selects(&identity)) {
@@ -2718,6 +2950,9 @@ fn validate_report_with_inherited(
                         if tests.iter().any(|test| test.environment_gated && test.selects(&id)) => {
                         skipped_rows.insert(id);
                     }
+                    Some(status @ ("pending" | "skipped" | "todo" | "disabled")) => bail!(NotRun {
+                        runner: runner.into(), path: id.path, name: id.name, status: status.into(),
+                    }),
                     _ => bail!("{runner} stability failed: {} :: {}", id.path, id.name),
                 }
             }
@@ -3188,7 +3423,7 @@ mod tests {
         assert_eq!(widened, [super::super::widened::Scope::Package(String::new())]);
         assert_eq!(
             super::super::widened::scope(repo.path(), spec),
-            super::super::widened::Scope::File(spec.into())
+            Some(super::super::widened::Scope::File(spec.into()))
         );
     }
 
@@ -3324,9 +3559,9 @@ mod tests {
         let error = validate_report_with_inherited("playwright", &repo, &report, &[], 1, &BTreeSet::new(), None, &[summary]).unwrap_err();
         assert!(format!("{error:#}").contains("[G-61]"), "{error:#}");
         assert!(validate_report_with_inherited("playwright", &repo, &report, &[], 1, &BTreeSet::new(), None, &[history]).is_ok());
-        assert_eq!(widened::scope(&repo, "e2e/journeys/orphan.ts"), Scope::Package(String::new()));
+        assert_eq!(widened::scope(&repo, "e2e/journeys/orphan.ts"), Some(Scope::Package(String::new())));
         let runtime = "e2e/journeys/hub-double-runtime.ts";
-        let scopes = [widened::scope(&repo, runtime)];
+        let scopes = [widened::scope(&repo, runtime).unwrap()];
         assert_eq!(widened::commands(Path::new("/cas"), &repo, &[runtime.into()], &scopes, &Default::default()),
             [format!("cas factory worker-check --cas-root /cas -- vitest related --run {runtime}")]);
         assert!(related_tests(&repo, "src/shared.ts").is_none());
@@ -3528,6 +3763,10 @@ process.exit(ok ? 0 : 1);
         git(&["commit", "--quiet", "-m", "base"]);
         let base = git(&["rev-parse", "HEAD"]);
         write(&repo.path().join(spec), &source(""));
+        // GH #2526, #2514, #2423: the delivery also edits the config that lists
+        // the spec. A config registers no test: it owes no related run of its
+        // own, and its spec's proof runs under it.
+        write(&sibling, &format!("{}\n// owned by the integration suite\n", std::fs::read_to_string(&sibling).unwrap()));
         git(&["commit", "--quiet", "-am", "head"]);
         let head = git(&["rev-parse", "HEAD"]);
 
@@ -3536,6 +3775,9 @@ process.exit(ok ? 0 : 1);
         assert_eq!(tests, [id(spec, "pool drains")]);
         let cas_root = tempfile::tempdir().unwrap();
         let config = "apps/backend/test/jest-inbox-tools.integration.config.js";
+        assert_eq!(super::super::stability::requirements(repo.path(), &head, &base, &[spec.into(), config.into()], None).unwrap(),
+            (tests.clone(), Vec::new()));
+        assert_eq!(super::super::widened::scope(repo.path(), config), None);
         let passing = || super::super::PassingTests::new(cas_root.path(), repo.path(), &head);
         assert_eq!(super::super::stability::missing(&passing(), &tests), tests);
 
@@ -4182,11 +4424,18 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         write(catalogue, "[[\"sms\", false]]");
         write("src/__scenarios__/legacy.json", "[[\"fax\", true]]");
         write(spec, &source("scenarios.json", ""));
+        // GH #2516, #2483, #2438, #2482: a spec reading the data only inside a
+        // test body, and a module registering no test, register the same tests
+        // whatever the catalogue holds.
+        write("src/__scenarios__/labels.spec.ts", "import cases from './scenarios.json';\nit('names the first channel', () => { expect(cases[0][0]).toBe('sms'); });\n");
+        let helper = "src/__scenarios__/channels.mjs";
+        write(helper, "import cases from './scenarios.json';\nexport const channels = cases.map(([channel]) => channel);\n");
         let base = commit("base");
 
         write(catalogue, "[[\"sms\", false], [\"email\", true]]");
+        write(helper, "import cases from './scenarios.json';\nexport const channels = cases.map(([channel]) => channel);\nexport const count = cases.length;\n");
         let catalogue_only = commit("catalogue only");
-        let required = super::super::stability::requirements(repo.path(), &catalogue_only, &base, &[catalogue.into()], None).unwrap();
+        let required = super::super::stability::requirements(repo.path(), &catalogue_only, &base, &[catalogue.into(), helper.into()], None).unwrap();
         assert_eq!(required, (Vec::new(), vec![Scope::File(spec.into())]));
 
         write(spec, &source("legacy.json", "expect(1).toBe(1);"));
@@ -4197,7 +4446,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         write(spec, &source("scenarios.json", "expect(2).toBe(2);"));
         let both = commit("harness and catalogue");
         assert!(changed_tests(repo.path(), &base, &both, &[spec.into()], None).is_err());
-        assert_eq!(super::super::widened::scope(repo.path(), spec), Scope::File(spec.into()));
+        assert_eq!(super::super::widened::scope(repo.path(), spec), Some(Scope::File(spec.into())));
     }
 
     /// GH #1977, #2000, #1971: park asks only for tests the task's own
@@ -4334,8 +4583,8 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             ("creator keeps input intact", 2), ("creator menu (compact=false)", 1), ("creator menu (compact=true)", 1),
         ]));
         let repo = Path::new("/project");
-        let iterate = |report: &Value, bad: Option<(usize, &Value)>| verify_repeats("vitest", repo, &templates, &expected, |iteration| {
-            Ok((true, bad.filter(|(at, _)| *at == iteration).map_or(report, |(_, bad)| bad).clone()))
+        let iterate = |report: &Value, bad: Option<(usize, &Value)>| verify_repeats("vitest", repo, &templates, &expected, false, |iteration| {
+            Ok((Ok(()), bad.filter(|(at, _)| *at == iteration).map_or(report, |(_, bad)| bad).clone()))
         });
         iterate(&report, None).expect("five complete iterations are accepted");
         // One of two rows sharing a name is gone while its sibling still passes
@@ -4344,7 +4593,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let mut one_duplicate = report.clone();
         one_duplicate["testResults"][0]["assertionResults"].as_array_mut().unwrap().remove(6);
         assert_eq!(one_duplicate["testResults"][0]["assertionResults"].as_array().unwrap().len(), 6);
-        assert!(verify_repeats("vitest", repo, &templates, &expected, |_| Ok((true, one_duplicate.clone()))).is_err());
+        assert!(verify_repeats("vitest", repo, &templates, &expected, false, |_| Ok((Ok(()), one_duplicate.clone()))).is_err());
         for lost in 0..5 {
             assert!(iterate(&report, Some((lost, &one_duplicate))).is_err(), "iteration {lost} lost one duplicate row");
         }
@@ -4364,7 +4613,20 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let variable_expected = source_rows("a.test.ts", variable).unwrap();
         assert!(variable_expected.is_empty());
         validate_report("vitest", repo, &variable_report, &variable_templates, 1).unwrap();
-        assert!(verify_repeats("vitest", repo, &variable_templates, &variable_expected, |_| Ok((true, variable_report.clone()))).is_err());
+        assert!(verify_repeats("vitest", repo, &variable_templates, &variable_expected, false, |_| Ok((Ok(()), variable_report.clone()))).is_err());
+        // GH #2440, #2404: the whole spec, run with no name filter, proves the
+        // template by the rows every iteration reports alike, beside the
+        // spec's other tests; a row lost in a later iteration is refused.
+        let mut whole = variable_report.clone();
+        whole["testResults"][0]["assertionResults"].as_array_mut().unwrap()
+            .extend([json!({"fullName": "unchanged", "status": "passed"}), json!({"fullName": "parked", "status": "skipped"})]);
+        let iterate = |lost: Option<usize>| verify_repeats("vitest", repo, &variable_templates, &variable_expected, true, |iteration| {
+            let mut report = whole.clone();
+            if Some(iteration) == lost { report["testResults"][0]["assertionResults"].as_array_mut().unwrap().remove(1); }
+            Ok((Ok(()), report))
+        });
+        assert_eq!(iterate(None).unwrap().0, 3);
+        assert!(iterate(Some(3)).is_err());
     }
 
     /// The names derived from a source table are the ones Vitest 4.0.18 printed
@@ -4467,6 +4729,21 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             test["results"] = json!([]);
         }
         assert!(validate_report("playwright", repo, &report, &changed, 5).is_err());
+        // GH #2503: a helper's related run of one importing spec also runs that
+        // spec's setup dependency, once; it neither counts nor is an unrelated
+        // spec. A spec outside the requirement in the spec's own project is.
+        let once = |project: &str| json!({"projectId":project,"expectedStatus":"passed","results":[{"status":"passed","retry":0}]});
+        let mut related = json!({"config":{"rootDir":"/project/tests","projects":[
+            {"id":"setup","name":"setup","repeatEach":1}, {"id":"journeys","name":"journeys","repeatEach":1}]},
+            "errors":[],"suites":[
+            {"title":"journeys/auth.setup.ts","file":"journeys/auth.setup.ts","column":0,"line":0,"specs":[
+                {"file":"journeys/auth.setup.ts","title":"seeded session for owner","tests":[once("setup")]}]},
+            {"title":"token-login.spec.ts","file":"token-login.spec.ts","column":0,"line":0,"specs":[
+                {"file":"token-login.spec.ts","title":"token login lands","tests":[once("journeys")]}]}]});
+        let spec = ["tests/token-login.spec.ts"];
+        assert_eq!(validate_report_with_inherited("playwright", repo, &related, &[], 1, &BTreeSet::new(), None, &spec).unwrap().0, 1);
+        related["suites"][0]["specs"][0]["tests"][0]["projectId"] = json!("journeys");
+        assert!(validate_report_with_inherited("playwright", repo, &related, &[], 1, &BTreeSet::new(), None, &spec).is_err());
     }
 
     #[test]
@@ -4506,11 +4783,11 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let tests = [id("a.test.js", "seeded")];
         for fail_at in [None, Some(2)] {
             let mut invocations = 0;
-            let result = verify_repeats("vitest", Path::new("/project"), &tests, &BTreeMap::new(), |index| {
+            let result = verify_repeats("vitest", Path::new("/project"), &tests, &BTreeMap::new(), false, |index| {
                 invocations += 1;
                 let pass = Some(index) != fail_at;
                 Ok((
-                    pass,
+                    if pass { Ok(()) } else { Err("exit status: 1".into()) },
                     json!({"success":pass,"testResults":[{"name":"/project/a.test.js", "status":if pass {"passed"} else {"failed"},
                     "assertionResults":[{"fullName":"seeded","status":if pass {"passed"} else {"failed"}}]}]}),
                 ))
@@ -4518,6 +4795,20 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             assert_eq!(result.is_ok(), fail_at.is_none());
             assert_eq!(invocations, if fail_at.is_some() { 3 } else { 5 });
         }
+        // GH #2548: a nonzero exit beside a passing report is not admitted, and
+        // the refusal is the process failure, not an assertion failure.
+        let passing = json!({"success":true,"testResults":[{"name":"/project/a.test.js","status":"passed",
+            "assertionResults":[{"fullName":"seeded","status":"passed"}]}]});
+        let error = verify_repeats("vitest", Path::new("/project"), &tests, &BTreeMap::new(), false,
+            |_| Ok((Err("exit status: 1".into()), passing.clone()))).unwrap_err();
+        assert!(error.downcast_ref::<ProcessFailed>().is_some_and(|failed| failed.report_passed && failed.iteration == 1), "{error:#}");
+        // GH #2308: a selected test the run skipped did not run; it is not a failed assertion.
+        let mut skipped = passing.clone();
+        skipped["testResults"][0]["assertionResults"][0]["status"] = json!("skipped");
+        let error = validate_report("vitest", Path::new("/project"), &skipped, &tests, 1).unwrap_err();
+        assert!(error.downcast_ref::<NotRun>().is_some(), "{error:#}");
+        skipped["testResults"][0]["assertionResults"][0]["status"] = json!("failed");
+        assert!(validate_report("vitest", Path::new("/project"), &skipped, &tests, 1).unwrap_err().downcast_ref::<NotRun>().is_none());
     }
 
     /// GH #2172/cas-7b09: producer exit must leave readable traces or assertion

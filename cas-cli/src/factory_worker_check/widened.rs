@@ -39,19 +39,45 @@ pub(super) fn valid(proof: &Proof) -> bool {
         }
 }
 
-pub(crate) fn scope(repo: &Path, path: &str) -> Scope {
+/// The one capped run that proves an input no static selection classifies,
+/// shared by park's demand and the runner's execution. `None` when no capped
+/// run can execute a test for it: a runner config, whose listed tests keep
+/// their own proof, or a package that holds no test (a Maizzle email package,
+/// GH #2457, #2465, #2455), where any run would select zero tests.
+pub(crate) fn scope(repo: &Path, path: &str) -> Option<Scope> {
+    if javascript::runner_config_file(path) { return None; }
     if javascript::javascript(path) {
         let runner = javascript::runner_hint(repo, path);
-        if javascript::test_match(path, runner) { return Scope::File(path.into()); }
+        if javascript::test_match(path, runner) { return Some(Scope::File(path.into())); }
         // GH #2352: vitest cannot transform a `.vue` file its config has no Vue
         // plugin for, so `vitest related` would crash; that component proves
         // through its package run, or through the specs that import it.
         let unloadable = path.ends_with(".vue") && runner == Some("vitest") && !javascript::vitest_loads_vue(repo, path);
         if (matches!(runner, Some("jest" | "vitest")) && !unloadable) || javascript::related_tests(repo, path).is_some() {
-            return Scope::Related(path.into());
+            return Some(Scope::Related(path.into()));
+        }
+        // GH #2543: a Playwright support module no spec imports (a fixture
+        // server the config starts) is exercised by the suite of the config
+        // that owns its directory inside its package, run under that config.
+        // A config above the package (GH #2457) does not own it.
+        if runner == Some("playwright")
+            && let (Scope::Package(owner), Scope::Package(home)) = (owning_package(repo, path, "playwright"), package(repo, path))
+            && Path::new(&owner).starts_with(&home)
+        {
+            return holds_tests(repo, &owner).then_some(Scope::Package(owner));
         }
     }
-    package(repo, path)
+    let scope = package(repo, path);
+    match &scope {
+        Scope::Package(directory) if !holds_tests(repo, directory) => None,
+        _ => Some(scope),
+    }
+}
+
+/// Whether the checkout tracks a file under `directory` that may hold tests.
+fn holds_tests(repo: &Path, directory: &str) -> bool {
+    git(repo, &["ls-files", "--", if directory.is_empty() { "." } else { directory }])
+        .map_or(true, |listed| listed.lines().any(|path| javascript::javascript(path) && javascript::test_file(path)))
 }
 
 /// The crate or package that owns `path`, by its nearest manifest.
@@ -128,15 +154,7 @@ fn targets_deployed_host(repo: &Path, spec: &str) -> bool {
     let Some(config) = javascript::runner_root(repo, spec, "playwright").ok().and_then(|(_, config)| config) else {
         return false;
     };
-    let import = regex::Regex::new(r#"(?:\bfrom|\bimport)\s*\(?\s*['"](\.\.?/[^'"\n]+)['"]"#).expect("import pattern");
-    let source = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
-    let config_source = source(&config);
-    let imported = import.captures_iter(&config_source).filter_map(|capture| {
-        let base = config.parent()?.join(&capture[1]);
-        std::iter::once(base.clone()).chain(["ts", "mts", "cts", "js", "mjs", "cjs"].iter()
-            .map(|ext| PathBuf::from(format!("{}.{ext}", base.display())))).find(|path| path.is_file())
-    }).map(|path| source(&path)).collect::<Vec<_>>();
-    !std::iter::once(&config_source).chain(&imported).any(|text| text.contains("webServer"))
+    !javascript::config_sources(&config).iter().any(|text| text.contains("webServer"))
 }
 
 /// What resolved for one widened package's changed inputs (GH #2224, #2266).
@@ -154,13 +172,19 @@ pub(crate) struct Covering {
 pub(crate) fn covering(repo: &Path, head: &str, paths: &[String], scopes: &[Scope]) -> BTreeMap<Scope, Covering> {
     scopes.iter().filter_map(|scope| {
         let Scope::Package(directory) = scope else { return None };
-        let inputs: Vec<&str> = paths.iter().map(String::as_str)
-            .filter(|path| &package(repo, path) == scope).collect();
+        let inputs = package_inputs(repo, paths, scope);
         let resolved = javascript::covering_specs(repo, head, directory, &inputs).ok()?;
         let specs: BTreeSet<String> = resolved.values().flatten().cloned().collect();
         let unresolved = resolved.iter().filter(|(_, specs)| specs.is_empty()).map(|(input, _)| input.clone()).collect();
         (!specs.is_empty()).then(|| (scope.clone(), Covering { specs: specs.into_iter().collect(), unresolved }))
     }).collect()
+}
+
+/// The changed inputs a package scope stands for: those whose own scope it
+/// is. A changed test keeps its own stability proof and a related source its
+/// own related run; neither waits on a spec reading it (GH #2537, #2535).
+fn package_inputs<'a>(repo: &Path, paths: &'a [String], scope: &Scope) -> Vec<&'a str> {
+    paths.iter().map(String::as_str).filter(|path| self::scope(repo, path).as_ref() == Some(scope)).collect()
 }
 
 /// A widened scope is proven by its own pass or, for a package, by a
@@ -216,13 +240,13 @@ pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &
         // Only a JavaScript input reaches the runner; a JSON catalogue or SQL
         // migration in the same package shares the scope but is refused (GH #2224, #2266).
         let path = paths.iter().filter(|path| javascript::javascript(path))
-            .find(|path| &self::scope(repo, path) == scope).map(String::as_str)
+            .find(|path| self::scope(repo, path).as_ref() == Some(scope)).map(String::as_str)
             .or_else(|| if let Scope::File(path) = scope { Some(path.as_str()) } else { None });
         // The inputs nothing covers: some specs read the other inputs, but
         // their passes do not stand in for the whole package.
         let unresolved: Vec<&str> = match found {
             Some(found) => found.unresolved.iter().map(String::as_str).collect(),
-            None => paths.iter().map(String::as_str).filter(|input| &self::package(repo, input) == scope).collect(),
+            None => package_inputs(repo, paths, scope),
         };
         let named = if unresolved.is_empty() { String::new() } else { format!("no spec reads {}; ", unresolved.join(", ")) };
         let Some(path) = path else {
@@ -297,8 +321,17 @@ mod tests {
             std::fs::write(repo.path().join(project).join("components/Foo.vue"), "<template><p /></template>\n").unwrap();
         }
         let (plain, vue) = ("plain/components/Foo.vue", "vue/components/Foo.vue");
-        assert_eq!(scope(repo.path(), vue), Scope::Related(vue.into()));
-        let scopes = [scope(repo.path(), plain)];
+        assert_eq!(scope(repo.path(), vue), Some(Scope::Related(vue.into())));
+        // GH #2537: create-vue's vitest config takes the plugin from `./vite.config`.
+        std::fs::create_dir_all(repo.path().join("merged/components")).unwrap();
+        std::fs::write(repo.path().join("merged/package.json"), "{}").unwrap();
+        std::fs::write(repo.path().join("merged/vite.config.ts"), "import vue from '@vitejs/plugin-vue';\nexport default { plugins: [vue()] };\n").unwrap();
+        std::fs::write(repo.path().join("merged/vitest.config.ts"),
+            "import { mergeConfig } from 'vitest/config';\nimport viteConfig from './vite.config';\nexport default mergeConfig(viteConfig, { test: {} });\n").unwrap();
+        let merged = "merged/components/Foo.vue";
+        std::fs::write(repo.path().join(merged), "<template><p /></template>\n").unwrap();
+        assert_eq!(scope(repo.path(), merged), Some(Scope::Related(merged.into())));
+        let scopes = [scope(repo.path(), plain).unwrap()];
         assert_eq!(scopes, [Scope::Package("plain".into())]);
         let commands = commands(Path::new("/cas"), repo.path(), &[plain.to_string()], &scopes, &Default::default());
         assert!(!commands.is_empty());
@@ -306,8 +339,56 @@ mod tests {
             let args = command.split_once(" -- ").unwrap().1.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
             let files = javascript::invocation(&args).map(|run| run.files).unwrap_or_default();
             assert_eq!(files, [plain], "{command}");
-            assert!(files.iter().all(|file| scope(repo.path(), file) == scopes[0]), "{command}");
+            assert!(files.iter().all(|file| scope(repo.path(), file).as_ref() == Some(&scopes[0])), "{command}");
         }
+    }
+
+    /// GH #2543, #2457: a Playwright fixture server no spec imports proves
+    /// through the suite of the config owning its directory, under that config;
+    /// that config owes no run of its own; a Maizzle email package holding no
+    /// test, below the repository's Playwright config, owes none at all. The
+    /// prescribed command resolves back to the scope park demands.
+    #[test]
+    fn uncertain_inputs_resolve_to_one_runnable_scope_or_none_gh2543() {
+        let repo = tempfile::tempdir().unwrap();
+        let write = |path: &str, body: &str| {
+            std::fs::create_dir_all(repo.path().join(path).parent().unwrap()).unwrap();
+            std::fs::write(repo.path().join(path), body).unwrap();
+        };
+        let git = |args: &[&str]| super::git(repo.path(), &[
+            &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"], args,
+        ].concat()).unwrap();
+        write("package.json", "{}");
+        write("playwright.config.ts", "export default { testDir: 'e2e' };\n");
+        write("e2e/app.spec.ts", "import { test } from '@playwright/test';\ntest('app', () => {});\n");
+        write("tests/vitest.config.ts", "export default {};\n");
+        let config = "tests/chat-history/playwright.chat-history.config.mjs";
+        let (server, shim) = ("tests/chat-history/main.mjs", "tests/chat-history/nuxt-app.mjs");
+        write("tests/chat-history/history.spec.ts", "import { test } from '@playwright/test';\ntest('history', () => {});\n");
+        write("apps/dm/package.json", "{\"scripts\":{\"build\":\"maizzle build\"}}");
+        let email = "apps/dm/emails/receipt.vue";
+        let edit = |marker: &str| {
+            write(config, &format!("export default {{ testDir: '.', webServer: {{ command: 'node main.mjs' }} }}; // {marker}\n"));
+            write(server, &format!("import {{ app }} from './nuxt-app.mjs';\napp('{marker}');\n"));
+            write(shim, &format!("export const app = (name) => name; // {marker}\n"));
+            write(email, &format!("<template><p>{marker}</p></template>\n"));
+            git(&["add", "."]);
+            git(&["commit", "-qm", marker]);
+            git(&["rev-parse", "HEAD"])
+        };
+        git(&["init", "-q", "-b", "main"]);
+        let base = edit("base");
+        let head = edit("delivery");
+        let paths = [server, shim, config, email].map(String::from);
+        let suite = Scope::Package("tests/chat-history".into());
+        assert_eq!(stability::requirements(repo.path(), &head, &base, &paths, None).unwrap(), (Vec::new(), vec![suite.clone()]));
+        assert_eq!((scope(repo.path(), config), scope(repo.path(), email)), (None, None));
+        let commands = commands(Path::new("/cas"), repo.path(), &paths, &[suite.clone()], &Default::default());
+        assert_eq!(commands.len(), 1, "{commands:?}");
+        let args = commands[0].split_once(" -- ").unwrap().1.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+        let run = javascript::invocation(&args).unwrap();
+        assert_eq!((run.runner, run.config.as_deref()), ("playwright", Some(config)));
+        assert!(run.files.iter().all(|file| scope(repo.path(), file).as_ref() == Some(&suite)), "{commands:?}");
     }
 
     /// GH #2266: a migration rename beside a fixture edit widens the package;
@@ -320,7 +401,7 @@ mod tests {
         std::fs::write(repo.path().join("apps/backend/package.json"), "{}").unwrap();
         let paths = ["apps/backend/prisma/migrations/1_init/migration.sql", "apps/backend/src/scenarios.json",
             "apps/backend/test/fixtures/patterns.ts"].map(String::from);
-        let scopes = [scope(repo.path(), &paths[2])];
+        let scopes = [scope(repo.path(), &paths[2]).unwrap()];
         assert_eq!(scopes, [Scope::Package("apps/backend".into())]);
         let commands = commands(Path::new("/cas"), repo.path(), &paths, &scopes, &Default::default());
         assert!(!commands.is_empty());
@@ -335,7 +416,7 @@ mod tests {
         for command in &commands {
             let args = command.split_once(" -- ").unwrap().1.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
             let files = javascript::invocation(&args).map(|run| run.files).unwrap_or_default();
-            assert_eq!(files.iter().map(|file| scope(repo.path(), file)).collect::<Vec<_>>(), scopes, "{command}");
+            assert_eq!(files.iter().map(|file| scope(repo.path(), file).unwrap()).collect::<Vec<_>>(), scopes, "{command}");
         }
     }
 }

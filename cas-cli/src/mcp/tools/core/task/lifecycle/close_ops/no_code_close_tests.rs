@@ -2643,7 +2643,8 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         ("report-republished", TaskType::Spike), ("notes-marker", TaskType::Spike),
         ("published-before-launch", TaskType::Spike), ("peer-report-importing", TaskType::Spike),
         ("report-revoked", TaskType::Spike), ("reference-revised-before-launch", TaskType::Spike),
-        ("active-dispatch-without-recorded-proof", TaskType::Spike), ("update-route", TaskType::Spike),
+        ("active-dispatch-without-recorded-proof", TaskType::Spike), ("legacy-mcp-close", TaskType::Spike),
+        ("update-route", TaskType::Spike),
         ("reference-revised-during-close", TaskType::Spike), ("republished-during-final-write", TaskType::Spike),
         ("revoked-during-update-close", TaskType::Spike), ("withdrawn-after-close-then-replayed", TaskType::Spike),
     ] {
@@ -2683,13 +2684,33 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         } else {
             publish_report(&f, &cloud, id, "report v1\n").await
         };
-        let unrecorded = (case == "active-dispatch-without-recorded-proof").then(|| {
+        let unrecorded = matches!(case, "active-dispatch-without-recorded-proof" | "legacy-mcp-close").then(|| {
             cas_store::create_verification_dispatch_bound(
                 &f.cas_dir(), id, "nocode-supervisor-session", "nocode-supervisor-session",
                 &cas_types::VerificationProofBoundary::task(),
                 chrono::Utc::now() + chrono::Duration::minutes(10), false,
             ).unwrap()
         });
+        if case == "legacy-mcp-close" {
+            let (core, task, dispatch) = (CasCore::with_daemon(f.cas_dir(), None, None), f.task(id), unrecorded.clone().unwrap());
+            let output = f.cas_dir().join("legacy-verdict.json");
+            tokio::task::spawn_blocking(move || {
+                crate::mcp::tools::core::workflow::premerge_verification::launch_verifier_with(
+                    &core, &task, &dispatch, output, |_| panic!("proofless dispatch reached verifier preparation"),
+                ).unwrap().unwrap().join().unwrap();
+            }).await.unwrap();
+            let queue = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
+            let notices = queue.peek_all(50).unwrap();
+            if !notices.iter().any(|row| row.prompt.contains("verifier_dispatch_report_proof_missing:")) {
+                wrong.push(format!("{case}: missing recovery code in {} notice(s)", notices.len()));
+            }
+            let legacy_id = &unrecorded.as_ref().unwrap().id;
+            assert_eq!(
+                cas_store::get_verification_dispatch(&f.cas_dir(), legacy_id).unwrap().state,
+                cas_types::VerificationDispatchState::Invalidated,
+            );
+            assert!(cas_store::get_verification_for_dispatch(&f.cas_dir(), legacy_id).unwrap().is_none());
+        }
         let request = serde_json::json!({"action": "close", "id": id, "reason": "Report published"});
         let pending = call(&f.worker, request.clone()).await;
         let reviewed = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap()
@@ -2699,7 +2720,13 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
             let recorded = crate::mcp::tools::core::task::lifecycle::report_proof::ReportProof::recorded(
                 &f.cas_dir(), &reviewed.id,
             ).unwrap();
-            if retired != cas_types::VerificationDispatchState::Invalidated || reviewed.id == unrecorded.id || recorded.is_none() {
+            let expected = crate::mcp::tools::core::task::lifecycle::report_proof::ReportProof {
+                external_ref: Some(PROOF.into()), artifacts: vec![(published.id.clone(), published.sha256.clone())],
+            };
+            if retired != cas_types::VerificationDispatchState::Invalidated
+                || reviewed.id == unrecorded.id || reviewed.state != cas_types::VerificationDispatchState::Pending
+                || recorded.as_ref() != Some(&expected) || !pending.contains("G-68")
+            {
                 wrong.push(format!(
                     "{case}: unrecorded dispatch is {retired:?}; review {} records {recorded:?}: {pending}", reviewed.id,
                 ));
@@ -2711,7 +2738,7 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
             revised.external_ref = Some("https://example.test/deploys/revised".into());
             f.put(&revised);
         }
-        if matches!(case, "published-before-launch" | "reference-revised-before-launch") {
+        if matches!(case, "published-before-launch" | "reference-revised-before-launch" | "legacy-mcp-close") {
             let later = if case == "published-before-launch" {
                 publish_report(&f, &cloud, id, "report v2\n").await.id
             } else {
@@ -2829,7 +2856,7 @@ async fn revised_no_code_report_needs_a_new_verdict_before_close_gh2417() {
         let closed = f.task(id).status == TaskStatus::Closed;
         let approval_still_covers = matches!(
             case, "unchanged" | "unpublished-draft" | "peer-report-imported" | "peer-report-importing" | "chore"
-                | "active-dispatch-without-recorded-proof" | "update-route" | "withdrawn-after-close-then-replayed"
+                | "active-dispatch-without-recorded-proof" | "legacy-mcp-close" | "update-route" | "withdrawn-after-close-then-replayed"
         );
         if closed != approval_still_covers {
             wrong.push(format!("{case}: closed={closed}: {response}"));

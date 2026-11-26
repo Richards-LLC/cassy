@@ -240,14 +240,31 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
 async fn task_read_default_show_preserves_gate_inputs() {
     let mut env = TestEnvGuard::temp_home();
     let (temp, core) = setup_cas(&mut env);
+    branch_transfer_git(temp.path(), &["init", "-q", "-b", "main"]);
+    let qa_dir = temp.path().join("docs/qa");
+    std::fs::create_dir_all(qa_dir.join("bug-families")).unwrap();
+    std::fs::write(qa_dir.join("journeys.yaml"), "version: 1\n").unwrap();
+    branch_transfer_git(temp.path(), &["add", "docs/qa/journeys.yaml"]);
     let store = open_task_store(&temp.path().join(".cas")).unwrap();
     let mut task = Task::new("cas-show-gates".into(), "Review epic".into());
     task.task_type = cas::types::TaskType::Epic;
     task.demo_statement = "The reviewer sees the delivered dashboard".into();
+    task.description = "Review the 🧪 dashboard".into();
+    task.acceptance_criteria = "The delivered dashboard supports keyboard navigation".into();
     task.design = "Keep the dashboard accessible".into();
+    task.notes = "Dashboard revision reviewed".into();
     task.deliverables.files_changed = vec!["dashboard.rs".into()];
     task.deliverables.commit_hash = Some("a".repeat(40));
     store.add(&task).unwrap();
+    let blocker = Task::new("cas-show-blocker".into(), "Review prerequisite".into());
+    store.add(&blocker).unwrap();
+    store
+        .add_dependency(&cas::types::Dependency::new(
+            task.id.clone(),
+            blocker.id.clone(),
+            cas::types::DependencyType::Blocks,
+        ))
+        .unwrap();
     let service = CasService::new(core, None);
     let request = |full| {
         Parameters(
@@ -280,9 +297,64 @@ async fn task_read_default_show_preserves_gate_inputs() {
             "unmarked omission of {section}: {brief}"
         );
     }
-    let full = extract_text(service.task(request(true)).await.unwrap());
-    assert!(full.contains(&task.design) && full.contains("dashboard.rs"));
-    assert!(full.contains(task.deliverables.commit_hash.as_deref().unwrap()));
+    let result = service.task(request(true)).await.unwrap();
+    let wire = serde_json::to_value(&result).unwrap();
+    let full = extract_text(result);
+    for value in [
+        task.id.as_str(),
+        &task.title,
+        &task.description,
+        &task.acceptance_criteria,
+        &task.design,
+        &task.notes,
+        &task.deliverables.files_changed[0],
+        task.deliverables.commit_hash.as_deref().unwrap(),
+        &blocker.id,
+    ] {
+        assert!(full.contains(value), "missing task data: {value}");
+    }
+
+    let emoji_start = full.find('🧪').unwrap();
+    let mut paged = String::new();
+    let mut offset = 0;
+    let mut limit = emoji_start + 1;
+    loop {
+        let page = extract_text(service.task(Parameters(
+            serde_json::from_value::<cas_mcp::TaskRequest>(
+                serde_json::json!({"action": "show", "id": task.id, "offset": offset, "limit": limit}),
+            ).unwrap(),
+        )).await.unwrap());
+        let (header, text) = page.split_once("\n\n").unwrap();
+        paged.push_str(text);
+        let next = header.split_once("next=").unwrap().1;
+        if next == "end" {
+            break;
+        }
+        offset = next.parse().unwrap();
+        assert_eq!(offset, paged.len());
+        if limit == emoji_start + 1 {
+            assert_eq!(offset, emoji_start);
+            limit = 1600;
+        }
+    }
+    assert_eq!(paged, full);
+    let structured = &wire["structuredContent"];
+    assert_eq!(structured["qa_impact"]["registry"]["present"], true);
+
+    let family = "docs/qa/bug-families/invalid.yaml";
+    std::fs::write(temp.path().join(family), "title: invalid: value\n").unwrap();
+    branch_transfer_git(temp.path(), &["add", family]);
+    let result = service.task(request(true)).await.unwrap();
+    let wire_with_error = serde_json::to_value(&result).unwrap();
+    let full_with_error = extract_text(result);
+    let structured_with_error = &wire_with_error["structuredContent"];
+    assert_eq!(structured_with_error["qa_impact"], serde_json::Value::Null);
+    assert!(structured_with_error["qa_impact_error"].is_string());
+    assert!(full_with_error.contains(&task.acceptance_criteria));
+    assert_eq!(
+        (structured["text"].as_str(), structured_with_error["text"].as_str()),
+        (Some(paged.as_str()), Some(full_with_error.as_str())),
+    );
     // Short notes have no clipped instructions; navigation alone is sufficient.
     let notes = extract_text(
         service

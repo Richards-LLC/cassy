@@ -18401,9 +18401,6 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     run_factory_branch_merge_gate_for_delivery(task, req, parent_branch, repo_path, attribution, None)
 }
 
-// gate[G-55 park integrity]: Delivery merged into its target before close (factory-branch merge state)
-// gate-audit[supervisor_override_reason]: bypass G-58 A validated historical-receipt waiver is tagged by the returned receipt narrative.
-// gate-audit[accepted_by]: close_task_with_dispositions_inner
 fn run_factory_branch_merge_gate_for_delivery(
     task: &Task,
     _req: &TaskCloseRequest,
@@ -18441,6 +18438,9 @@ fn run_factory_branch_merge_gate_for_delivery(
     ))
 }
 
+// gate[G-55 park integrity]: Delivery merged into its target before close (factory-branch merge state)
+// gate-audit[supervisor_override_reason]: bypass G-58 A validated historical-receipt waiver is tagged by the returned receipt narrative.
+// gate-audit[accepted_by]: close_task_with_dispositions_inner
 fn run_factory_branch_merge_gate_inner(
     task: &Task,
     parent_branch: &str,

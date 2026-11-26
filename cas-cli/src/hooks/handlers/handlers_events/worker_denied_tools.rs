@@ -94,7 +94,6 @@ pub(super) fn credential_store_access_denial(input: &HookInput, tool: &str) -> O
         return None;
     }
     if tool.eq_ignore_ascii_case("Bash") && super::operator_credentials::bash_store_reference_needs_unresolved_directory(input) {
-        // GH #2171, #2502: the directory, not a store, is what is unknown.
         return Some("🚫 UNRESOLVED WORKING DIRECTORY (credential guard, GH #1293): a statement runs in a directory Cassy cannot resolve, so its relative and `$VAR` operands could name an operator credential store. No credential access is needed: `cd` to a literal directory, or bind it with a literal assignment, then run the command.".to_string());
     }
     Some(operator_credential_refusal())

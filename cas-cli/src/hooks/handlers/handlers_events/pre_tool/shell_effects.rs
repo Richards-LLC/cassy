@@ -33,13 +33,10 @@ pub(super) fn collect(command: &str, cwd: &Path) -> Result<ShellEffects, &'stati
     Ok(effects)
 }
 
-/// The variables a command inherits from its environment, which every child
-/// shell also inherits.
 fn environment_names() -> HashSet<String> {
     ENVIRONMENT_DIRECTORIES.iter().chain(&["PWD", "OLDPWD"]).map(|name| name.to_string()).collect()
 }
 
-/// Environment variables a directory operand may name.
 const ENVIRONMENT_DIRECTORIES: [&str; 3] = ["HOME", "CDPATH", "CAS_CLONE_PATH"];
 
 /// Opt-in read projection; `None` when the command cannot be projected.
@@ -182,8 +179,6 @@ fn numeric_names(tokens: &[ShellToken]) -> HashSet<String> {
     }
 }
 
-/// Numeric names already bound (or, without `values`, any numeric name) and
-/// `$(date +%s)` evaluate as numbers; anything else must be numeric source.
 fn inert_arithmetic(
     expression: &str,
     names: &HashSet<String>,
@@ -216,10 +211,10 @@ fn inert_arithmetic(
     numeric_arithmetic(&numeric)
 }
 
-/// `test` receives expanded arguments as data; a captured shell exit status
-/// or a bound numeric name is a known integer even though the token is a
-/// variable reference. Keep other unknown operands conservative so `[[ ]]`
-/// and arithmetic evaluation still fail closed.
+/// `test` receives expanded arguments as data; a captured shell exit status is
+/// a known integer even though the token is a variable reference. Keep other
+/// unknown operands conservative so `[[ ]]` and arithmetic evaluation still
+/// fail closed.
 fn numeric_test_operand(
     operand: &str,
     captured_status: &HashSet<String>,
@@ -396,8 +391,7 @@ fn parameter_arithmetic(body: &str) -> Result<(), &'static str> {
 }
 
 /// Extract executable substitutions from a shell word. Arithmetic operands
-/// must be numeric source or bound numeric names, never other values
-/// obtained from shell expansion.
+/// must be numeric source, never values obtained from shell expansion.
 fn substitution_bodies(
     word: &str,
     numeric: (&HashSet<String>, Option<&HashMap<String, Vec<String>>>),
@@ -890,7 +884,6 @@ fn case_syntax(source: &str, lexed: &ShellLexed) -> Result<Vec<CaseSyntax>, &'st
     if cases.is_empty() { Ok(syntax) } else { Err("an unmatched shell scope") }
 }
 
-/// Bind `name`; an assignment that may be skipped only adds alternatives.
 fn bind_alternatives(values: &mut HashMap<String, Vec<String>>, name: &str, expanded: Vec<String>, may_skip: bool) {
     if !may_skip {
         values.insert(name.into(), expanded);
@@ -907,7 +900,6 @@ fn bind_alternatives(values: &mut HashMap<String, Vec<String>>, name: &str, expa
     }
 }
 
-/// The words of an array literal, from just after its `(` to the matching `)`.
 pub(super) fn array_elements(tokens: &[ShellToken]) -> Vec<String> {
     let mut depth = 0;
     let mut elements = Vec::new();
@@ -1203,7 +1195,6 @@ fn collect_script(
         }
     }
     directory_values.insert("PWD".into(), pwd_values(&dirs));
-    // Only exported names reach a child shell's environment.
     let mut exported = inherited_exports.clone();
     let mut export_scopes = Vec::new();
     let conditional_bindings = tokens.iter().any(|token| matches!(token,
@@ -1241,7 +1232,6 @@ fn collect_script(
         known.iter().map(|path| (!path.contains('$')).then(|| PathBuf::from(path))).collect()
     });
     directory_values.insert("OLDPWD".into(), oldpwd_values(&previous_dirs));
-    // Previous directories of a skipped `cd`, which a later `;` join reaches.
     let mut previous_alternatives: Directories = Vec::new();
     let mut list_entry = (dirs.clone(), directory_stack.clone(), previous_dirs.clone());
     // The directories on entry to each open `case`. Only one arm runs, so no arm
@@ -1300,7 +1290,6 @@ fn collect_script(
         let conditional_before = open_blocks.contains(&true);
         let after_operator = matches!(tokens.get(start.wrapping_sub(1)), Some(ShellToken::Operator('&' | '|')));
         let assignment_may_skip = if read_mode { conditional_before } else { conditional_bindings } || after_operator;
-        // A numeric name is bound only by a statement that surely runs.
         let numeric_may_skip = conditional_before || after_operator;
         // Pattern text and `esac` are not operands of anything.
         let visible: Vec<usize> =
@@ -1737,7 +1726,6 @@ fn collect_script(
             if name == Some("set") && args.iter().any(|arg| arg == "allexport" || (arg.starts_with('-') && arg.contains('a'))) {
                 exported.insert("*".into());
             }
-            // Builtins that bind a name from data leave its value unknown.
             let rebound: Vec<&str> = match name {
                 Some("read" | "readarray" | "mapfile" | "unset" | "getopts") => args.iter().map(String::as_str).collect(),
                 Some("printf") => args.iter().enumerate()
@@ -1745,7 +1733,6 @@ fn collect_script(
                     .collect(),
                 _ => Vec::new(),
             };
-            // `NAME=$(...)`: the substitution's output is not a known value.
             let substituted = substitution_scope.then(|| words.last()).flatten()
                 .filter(|word| word.ends_with('$') && assignments.contains(word));
             let unknown = assignments.iter().filter_map(|word| {

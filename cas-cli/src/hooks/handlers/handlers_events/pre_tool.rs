@@ -2983,7 +2983,6 @@ fn collect_git_write_targets(
     targets: &mut Vec<GitCommandTarget>,
 ) {
     let uncertain = || GitCommandTarget { uncertain_scope: true, ..default_target.clone() };
-    // Only a command that can name git can run a git write.
     let mentions_git = command.contains("git");
     let Some(contexts) = (depth <= 6).then(|| shell_read_contexts(command, cwd)).flatten() else {
         if mentions_git {
@@ -2997,7 +2996,6 @@ fn collect_git_write_targets(
         let directories: Vec<Option<std::path::PathBuf>> = context.directories.iter()
             .map(|directory| directory.clone().filter(|directory| !directory.components().any(|part| part.as_os_str() == unknown)))
             .collect();
-        // Whether each word is spelled without any expansion.
         let lexed = factory_shell_lex(&shell_command_without_heredoc_bodies(&context.command), false, 0);
         let mut literal_words = std::collections::HashMap::<String, bool>::new();
         for (token, literal) in lexed.tokens.iter().zip(&lexed.literals) {
@@ -3022,12 +3020,10 @@ fn collect_git_write_targets(
                 continue;
             }
             if matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh") {
-                // Redirections are not shell operands.
                 let argv = argv.unwrap_or_else(|| words.clone());
                 let Some(index) = unwrapped_command_index(&argv) else { continue };
                 let args = &argv[index + 1..];
                 match shell_effects::shell_source(name, args) {
-                    // The projection holds a direct payload's statements.
                     Ok(shell_effects::ShellSource::Command(at)) => if from_find {
                         for directory in &directories {
                             match directory {
@@ -3085,8 +3081,6 @@ fn collect_git_write_targets(
             } else if matches!(operation, "checkout" | "switch") {
                 git_head_action(operation, operands)
             } else { GitHeadAction::Guarded };
-            // Only one known spelling of an option value resolves it; a
-            // quoted literal `'$D'` is not a variable.
             let resolve_path = |base: &std::path::Path, value: &str| {
                 let expanded = match literal_words.get(value) {
                     Some(true) => vec![value.to_string()],
@@ -4674,7 +4668,6 @@ fn factory_shell_variable_values(
             // `R=/artifacts; P=$R/task; mkdir -p $P` must not leave `$R`
             // inside the target. Unknown values still remain unresolved.
             let expanded = match tokens.get(at + 1) {
-                // `NAME=$(...)` is output, not a known value.
                 Some(ShellToken::Operator('(')) if value.ends_with('$') => {
                     values.remove(name);
                     continue;
@@ -4766,7 +4759,6 @@ pub(super) fn expand_factory_shell_word(
             };
             let end = index + 2 + close;
             let name: String = chars[index + 2..end].iter().collect();
-            // `${NAME[i]}`: any element of NAME.
             let name = match name.split_once('[') {
                 Some((base, subscript)) if subscript.ends_with(']') => base.to_string(),
                 _ => name,

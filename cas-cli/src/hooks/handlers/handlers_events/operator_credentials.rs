@@ -145,8 +145,7 @@ fn shell_references_store_with(command: &str, initial_cwd: &Path, depth: usize, 
             let Some(index) = super::pre_tool::unwrapped_command_index(words) else { continue; };
             let executable = Path::new(&words[index]).file_name().and_then(|name| name.to_str())
                 .unwrap_or(&words[index]).to_ascii_lowercase();
-            // Per statement: a listing opens no file. A payload's own pipes
-            // are not visible to the top-level judgement above.
+            // Per statement: a listing opens no file.
             let names_only = names_inert && !context.nested && statements.len() == arguments.len()
                 && arguments.get(at).is_some_and(|argv| {
                     super::pre_tool::unwrapped_command_index(argv).is_some_and(|other| {
@@ -242,7 +241,6 @@ fn statement_references_store(
         .unwrap_or(&words[command_index])
         .to_ascii_lowercase();
     let args = &words[command_index + 1..];
-    // Shell payloads and `eval` arrive as their own projected statements.
     let cwd = &wrapper_cwd(&words[..command_index], cwd);
 
     let descends = invocation_recursively_reads_directories(&executable, args);

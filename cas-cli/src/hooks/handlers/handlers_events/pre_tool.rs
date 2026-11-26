@@ -3012,7 +3012,29 @@ fn collect_git_write_targets(
             .enumerate()
             .map(|(at, words)| (words, paired.then(|| arguments[at].clone()), false))
             .collect();
+        // The projection ran a variable executable as its bound value.
+        let resolve = |mut words: Vec<String>| {
+            for _ in 0..16 {
+                let Some(index) = unwrapped_command_index(&words) else { break };
+                if !words[index].contains(['$', '`']) || literal_words.get(&words[index]) == Some(&true) {
+                    break;
+                }
+                let [value] = expand_factory_shell_word(&words[index], &context.values).try_into().ok()?;
+                if value == words[index] {
+                    return None;
+                }
+                words.splice(index..=index, value.split_whitespace().map(String::from));
+            }
+            Some(words)
+        };
         while let Some((words, argv, from_find)) = pending.pop_front() {
+            let (Some(words), argv) = (resolve(words), argv.map(resolve)) else {
+                if mentions_git {
+                    targets.push(uncertain());
+                }
+                continue;
+            };
+            let argv = argv.flatten();
             let Some(command_index) = unwrapped_command_index(&words) else { continue };
             let name = shell_word_basename(&words[command_index]);
             if matches!(name, "source" | ".") {
@@ -13354,6 +13376,10 @@ mod worker_commit_guard_tests {
             (format!("cd '{linked_path}'; cd '{repo_path}'; cd - >/dev/null; cd - >/dev/null; git commit -m probe"), true),
             (format!("pushd '{repo_path}' >/dev/null; git commit -m probe"), true),
             (format!("env -C '{repo_path}' git commit -m probe"), true),
+            // A variable executable is classified by its bound value.
+            (format!("bash -c '\"$1\" -C {repo_path} commit -m probe' bash git"), true),
+            (format!("G=git; $G -C '{repo_path}' commit -m probe"), true),
+            ("G=git; $G commit -m work".to_string(), false),
             (format!("cd '{repo_path}'; sh -c 'cd \"{linked_path}\" && git commit -m work'"), false),
             // The merged directory resolver also applies inside shell payloads.
             (format!("bash -c 'W=\"{linked_path}\"; cd \"$W\"; git commit -m work'"), false),

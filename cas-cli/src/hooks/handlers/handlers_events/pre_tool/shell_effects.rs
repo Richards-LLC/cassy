@@ -1755,7 +1755,7 @@ fn collect_script(
 
             let mut payload_literal = true;
             // A child shell sees exported names and its own positional
-            // parameters. Credential reads keep every binding as a candidate.
+            // parameters; any other name is unknown there, however it was bound.
             let mut child = None;
             let payload = if matches!(name, Some("sh" | "bash" | "dash" | "zsh" | "ksh")) {
                 match shell_source(name.unwrap_or_default(), args)? {
@@ -1767,7 +1767,7 @@ fn collect_script(
                         let prefix: Vec<&str> = words[..index.unwrap_or(0)].iter()
                             .filter_map(|word| word.split_once('=').map(|(name, _)| name)).collect();
                         let mut values: HashMap<String, Vec<String>> = directory_values.iter()
-                            .filter(|(name, _)| !is_positional(name) && (read_mode || exported.contains("*")
+                            .filter(|(name, _)| !is_positional(name) && (exported.contains("*")
                                 || exported.contains(*name) || prefix.contains(&name.as_str())))
                             .map(|(name, value)| (name.clone(), value.clone()))
                             .collect();

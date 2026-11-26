@@ -552,6 +552,8 @@ fn worker_unresolved_credential_cwd_is_refused_cas_707a2() {
             "cd ~; cd {p}; cd \"$OLDPWD\" && cat .config/neonctl/credentials.json",
             // A payload's positional parameters and quoted substitutions run.
             "bash -c 'cat \"$1/credentials.json\"' bash ~/.config/neonctl",
+            // A child shell does not receive a non-exported variable.
+            "A={p}; bash -c 'cd \"$A$HOME/.config/neonctl\" && cat credentials.json'",
             "echo \"$(cat ~/.config/neonctl/credentials.json)\"",
         ],
         &[

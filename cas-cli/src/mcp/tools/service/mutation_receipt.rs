@@ -18,6 +18,8 @@ pub(crate) struct Receipt {
     /// note, a parked anchor) sets `commit` but never this, so an early
     /// answer can only ever describe the mutation the caller asked for.
     pub terminal: OnceLock<std::time::Instant>,
+    pub close_gate_deadline: OnceLock<crate::bounded_process::Deadline>,
+    pub close_gate_timeout: OnceLock<&'static str>,
     pub outcome: OnceLock<String>,
     /// Each failed park gate's bounded remedy, used if this close answers late.
     pub park_refusal_summary: OnceLock<String>,
@@ -37,6 +39,8 @@ impl Receipt {
             task_id: task_id.map(str::to_string),
             commit: OnceLock::new(),
             terminal: OnceLock::new(),
+            close_gate_deadline: OnceLock::new(),
+            close_gate_timeout: OnceLock::new(),
             outcome: OnceLock::new(),
             park_refusal_summary: OnceLock::new(),
             followup: std::sync::Mutex::new(None),
@@ -304,6 +308,16 @@ impl Drop for Phase {
 }
 
 impl Receipt {
+    pub(crate) fn refuse_running_delivery_gate(&self) -> Option<&'static str> {
+        let phases = self.phases.lock().ok()?;
+        self.close_gate_timeout.get().copied().or_else(|| {
+            let gate = phases.iter().rev().find_map(|&(name, _, elapsed)| {
+                (elapsed.is_none() && matches!(name, "G-55" | "G-56")).then_some(name)
+            })?;
+            Some(*self.close_gate_timeout.get_or_init(|| gate))
+        })
+    }
+
     pub(crate) fn timings(&self) -> String {
         let mut totals = std::collections::BTreeMap::new();
         for name in ["merge-tree", "push", "close_gates", "dispatch", "notes"] {

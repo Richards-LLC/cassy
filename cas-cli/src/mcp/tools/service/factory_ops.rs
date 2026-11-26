@@ -17430,14 +17430,29 @@ mod tests {
     }
 
     #[test]
-    fn spawn_spec_rejects_luna_below_maximum_effort() {
+    fn spawn_spec_accepts_supported_opus_5_5_efforts_and_rejects_minimal() {
         let _home = TestEnvGuard::temp_home();
-        let err = build_spawn_spec_json(Some("codex"), Some("gpt-5.6-luna"), Some("high"))
-            .expect_err("Luna must not be spawned below xhigh");
-
-        assert!(err.contains("gpt-5.6-luna"), "{err}");
-
-        assert!(err.contains("codex_luna"), "{err}");
+        for effort in [
+            cas_mux::Effort::Low,
+            cas_mux::Effort::Medium,
+            cas_mux::Effort::High,
+            cas_mux::Effort::XHigh,
+            cas_mux::Effort::Max,
+        ] {
+            let json = build_spawn_spec_json(
+                Some("claude"),
+                Some("claude-opus-5-5"),
+                Some(&effort.to_string()),
+            )
+            .unwrap();
+            let spec = decoded_spawn_spec(&json);
+            assert_eq!(spec.model.as_deref(), Some("claude-opus-5-5"));
+            assert_eq!(spec.effort, Some(effort));
+        }
+        assert!(
+            build_spawn_spec_json(Some("claude"), Some("claude-opus-5-5"), Some("minimal"))
+                .is_err()
+        );
     }
 
     /// The live #71 case: no `cli=` at all. The model slug is unambiguous, so

@@ -2884,6 +2884,11 @@ bug_families:
     title: A no-code report dispatch without recorded proof names MCP reconnect before retry
     tasks: [cas-fc46]
     journeys: [FACTORY-CLOSE, FACTORY-MERGE]
+  commander-cached-ghost-conversation:
+    title: A cached conversation omitted from a fresh catalog appeared to be waiting for a supervisor
+    tasks: [cas-228f]
+    invariants: [HUB-J12-CATALOG-FOOTER]
+    journeys: [HUB-J12]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

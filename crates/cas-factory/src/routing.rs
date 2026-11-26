@@ -840,14 +840,6 @@ pub fn validate_explicit(
                 Some(model),
             )));
         }
-        if let Err(reason) = validate_model_effort_policy(model, spec.effort) {
-            return Err(RoutingError::Policy(policy_violation_with_alternatives(
-                registry,
-                reason,
-                "allowed effort",
-                None,
-            )));
-        }
         if let Some((recipe_id, recipe)) = registry.recipes.iter().find(|(_, recipe)| {
             recipe.harness == spec.cli
                 && (recipe.model.eq_ignore_ascii_case(model)
@@ -1005,10 +997,6 @@ fn policy_violation_with_alternatives(
         ));
     }
 
-    // A Luna effort violation includes Luna xhigh itself, while a suspension
-    // omits the suspended Terra recipe. Keep the list stable by recipe ID
-    // (the registry is a BTreeMap) and state the rule even if a future
-    // registry has no active alternatives.
     let alternatives = if alternatives.is_empty() {
         "none declared".to_string()
     } else {
@@ -1025,19 +1013,6 @@ pub fn validate_model_is_active(model: &str) -> Result<(), String> {
     if model.trim().eq_ignore_ascii_case("gpt-5.6-terra") {
         return Err(
             "invalid spawn_workers model \"gpt-5.6-terra\": Terra is suspended as a routing target (2026-08-25; operator decision pending); use gpt-5.6-luna with effort=xhigh or another active tier".to_string(),
-        );
-    }
-    Ok(())
-}
-
-/// Enforce the legacy GPT-5.6 Luna recipe's xhigh-only policy.
-///
-/// The GPT-6 Luna light lane defaults to xhigh but supports explicit efforts
-/// from its own registry recipe.
-pub fn validate_model_effort_policy(model: &str, effort: Option<Effort>) -> Result<(), String> {
-    if model.trim().eq_ignore_ascii_case("gpt-5.6-luna") && effort != Some(Effort::XHigh) {
-        return Err(
-            "invalid spawn_workers effort for gpt-5.6-luna: Luna is only permitted at its current maximum, effort=xhigh".to_string(),
         );
     }
     Ok(())
@@ -1414,7 +1389,7 @@ candidates = ["codex_luna"]
         assert_eq!(registry.lanes["supervisor"].candidates, ["claude_opus_5_5"]);
         assert_eq!(registry.lanes["supervisor"].fallbacks, ["claude_fable_high"]);
         assert!(!registry.lanes["supervisor"].no_fallback);
-        assert_eq!(registry.lanes["heavy"].candidates, ["claude_fable_5_2_high"]);
+        assert_eq!(registry.lanes["heavy"].candidates, ["claude_opus_5_5_xhigh"]);
         assert_eq!(
             registry.lanes["heavy"].fallbacks,
             ["claude_opus_5_5", "codex_astra_high"]
@@ -1453,7 +1428,6 @@ candidates = ["codex_luna"]
         assert_eq!(registry.recipes["codex_luna_6"].default_effort, Effort::XHigh);
         assert_eq!(registry.recipes["claude_opus_5_5"].model, "claude-opus-5-5");
         assert_eq!(registry.recipes["claude_opus_5_5"].default_effort, Effort::High);
-        assert_eq!(registry.recipes["claude_opus_5_5"].allowed_efforts, [Effort::Low, Effort::High]);
         assert_eq!(registry.recipes["claude_opus_5_5_low"].default_effort, Effort::Low);
         assert_eq!(registry.recipes["claude_opus"].model, "claude-opus-5");
         let fable = &registry.recipes["claude_fable"];
@@ -1461,16 +1435,11 @@ candidates = ["codex_luna"]
         assert_eq!(fable.provider, "anthropic");
         assert_eq!(fable.model, "claude-fable-5-1");
         assert_eq!(fable.default_effort, Effort::Medium);
-        assert_eq!(fable.allowed_efforts, [Effort::Medium, Effort::High, Effort::Max]);
         assert_eq!(fable.required_capability.as_deref(), Some("claude-account"));
         assert!(registry.recipes.contains_key("codex_astra"));
         let astra_high = &registry.recipes["codex_astra_high"];
         assert_eq!(astra_high.model, "gpt-6-astra");
         assert_eq!(astra_high.default_effort, Effort::High);
-        assert_eq!(
-            astra_high.allowed_efforts,
-            [Effort::High, Effort::XHigh, Effort::Max]
-        );
         assert_eq!(astra_high.required_capability.as_deref(), Some("codex-account"));
         assert!(
             !lane_references(&registry.lanes["taste"])
@@ -1586,34 +1555,20 @@ candidates = ["codex_luna"]
     }
 
     #[test]
-    fn heavy_lane_resolves_fable_5_2_high_then_opus_5_5_then_astra_high() {
+    fn heavy_lane_resolves_opus_5_5_xhigh_or_astra_high_when_opus_is_unavailable() {
         let registry = registry().unwrap();
-        let fable = &registry.recipes["claude_fable_5_2_high"];
         let opus = &registry.recipes["claude_opus_5_5"];
         let astra = &registry.recipes["codex_astra_high"];
         let now = CapabilitySnapshot::now_ms();
 
-        let decision = resolve_lane("heavy", &CapabilitySnapshot::default()).expect("Fable resolves");
-        assert_eq!(decision.recipe_id, "claude_fable_5_2_high");
+        let decision = resolve_lane("heavy", &CapabilitySnapshot::default()).expect("Opus resolves");
+        assert_eq!(decision.recipe_id, "claude_opus_5_5_xhigh");
         assert_eq!(decision.spec.cli, SupervisorCli::Claude);
-        assert_eq!(decision.spec.model.as_deref(), Some("claude-fable-5-2"));
-        assert_eq!(decision.spec.effort, Some(Effort::High));
+        assert_eq!(decision.spec.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(decision.spec.effort, Some(Effort::XHigh));
         assert!(decision.warnings.is_empty());
 
         let mut unavailable = CapabilitySnapshot::default();
-        unavailable.record(
-            recipe_route_identity(fable, "default"),
-            CapabilityEvidence::new(CapabilityAvailability::Unavailable, now)
-                .with_reason("Claude Fable account unavailable"),
-        );
-        unavailable.record(
-            recipe_route_identity(opus, "default"),
-            CapabilityEvidence::new(CapabilityAvailability::Available, now),
-        );
-        let decision = resolve_lane("heavy", &unavailable).expect("Opus fallback resolves");
-        assert_eq!(decision.recipe_id, "claude_opus_5_5");
-        assert_eq!(decision.spec.effort, Some(Effort::High));
-
         unavailable.record(
             recipe_route_identity(opus, "default"),
             CapabilityEvidence::new(CapabilityAvailability::Unavailable, now)
@@ -1671,7 +1626,6 @@ candidates = ["codex_luna"]
             Effort::High
         );
         assert!(validate_model_is_active("gpt-5.6-terra").is_err());
-        assert!(validate_model_effort_policy("gpt-5.6-luna", Some(Effort::High)).is_err());
     }
 
     #[test]
@@ -2149,7 +2103,7 @@ no_fallback = true
 
     #[test]
     fn validate_explicit_preserves_static_rejections() {
-        let spec = WorkerSpec {
+        let mut spec = WorkerSpec {
             name: None,
             cli: SupervisorCli::Codex,
             model: Some("gpt-5.6-luna".to_string()),
@@ -2158,7 +2112,13 @@ no_fallback = true
             requester_config_dir: None,
             requester_secure_storage_dir: None,
         };
-        assert!(validate_explicit(&spec, &CapabilitySnapshot::default()).is_err());
+        let snapshot = CapabilitySnapshot::default();
+        assert!(validate_explicit(&spec, &snapshot).is_ok());
+        spec.effort = Some(Effort::Minimal);
+        assert!(matches!(
+            validate_explicit(&spec, &snapshot),
+            Err(RoutingError::Policy(_))
+        ));
     }
 
     #[test]
@@ -2183,10 +2143,8 @@ no_fallback = true
         );
     }
 
-    /// cas-556a: `max` is accepted exactly where the registry recipe lists it
-    /// (Fable, Opus, Astra, Sol), and legacy Luna keeps its xhigh-only policy.
     #[test]
-    fn max_effort_follows_the_registry_and_luna_stays_xhigh_only() {
+    fn max_effort_is_explicit_only_for_claude_and_codex_recipes() {
         let spec = |cli: SupervisorCli, model: &str| WorkerSpec {
             name: None,
             cli,
@@ -2203,21 +2161,16 @@ no_fallback = true
             (SupervisorCli::Codex, "gpt-6-sol"),
             (SupervisorCli::Codex, "gpt-6-luna"),
             (SupervisorCli::Codex, "gpt-5.6-sol"),
+            (SupervisorCli::Codex, "gpt-5.6-luna"),
             (SupervisorCli::Claude, "claude-fable-5-2"),
             (SupervisorCli::Claude, "claude-fable-5-1"),
             (SupervisorCli::Claude, "claude-sonnet-5-5"),
             (SupervisorCli::Claude, "claude-opus-5"),
+            (SupervisorCli::Claude, "claude-opus-5-5"),
         ] {
             validate_explicit(&spec(cli, model), &CapabilitySnapshot::default())
                 .unwrap_or_else(|error| panic!("{model} must accept effort=max: {error}"));
         }
-        let luna = validate_explicit(
-            &spec(SupervisorCli::Codex, "gpt-5.6-luna"),
-            &CapabilitySnapshot::default(),
-        )
-        .expect_err("Luna max must fail closed")
-        .to_string();
-
         for model in ["haiku", "haiku-4.5", "claude-haiku-4-5-20251001"] {
             let haiku = validate_explicit(
                 &spec(SupervisorCli::Claude, model),
@@ -2235,23 +2188,6 @@ no_fallback = true
                 .all(|recipe| recipe.default_effort != Effort::Max),
             "max must never be a recipe default"
         );
-    }
-
-    #[test]
-    fn validate_explicit_reports_luna_rule_and_active_alternatives() {
-        let luna = WorkerSpec {
-            name: None,
-            cli: SupervisorCli::Codex,
-            model: Some("gpt-5.6-luna".to_string()),
-            effort: Some(Effort::High),
-            config_dir: None,
-            requester_config_dir: None,
-            requester_secure_storage_dir: None,
-        };
-        let error = validate_explicit(&luna, &CapabilitySnapshot::default())
-            .expect_err("Luna below xhigh must fail closed")
-            .to_string();
-
     }
 
     #[test]

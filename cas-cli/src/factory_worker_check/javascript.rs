@@ -3137,6 +3137,35 @@ mod tests {
         assert!(widened.is_empty(), "{widened:?}");
     }
 
+
+    #[test]
+    fn probe_gabber_incidents_requirements() {
+        let source = Path::new("/home/pippenz/Petrastella/gabber-studio");
+        let scratch = tempfile::tempdir().unwrap();
+        let repo = scratch.path().join("g");
+        let run = |dir: &Path, args: &[&str]| {
+            let output = Command::new("git").current_dir(dir).args(args).output().unwrap();
+            assert!(output.status.success(), "{args:?} {output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        run(scratch.path(), &["clone", "--quiet", "--shared", "--no-checkout", source.to_str().unwrap(), "g"]);
+        let mut report = Vec::new();
+        for (issue, first, tip) in [
+            ("#2446", "81dfeb5884", "7465d5ba4a"), ("#2452", "b63c140539", "b63c140539"), ("#2455", "e1487f94ea", "c384996366"),
+            ("#2469", "6b8efee105", "6b8efee105"), ("#2465", "d31e944415", "e9377d324b"), ("#2450", "8bfcf1379f", "c73be3fa89"),
+            ("#2480", "ed685b527a", "91de28fcf3"), ("#2522", "4b1eccb264", "4b1eccb264"),
+        ] {
+            run(&repo, &["checkout", "--quiet", "--force", "--detach", tip]);
+            let base = run(&repo, &["rev-parse", &format!("{first}^")]);
+            let paths: Vec<String> = run(&repo, &["diff", "--name-only", &base, "HEAD"]).lines().map(str::to_owned).collect();
+            let outcome = super::super::stability::requirements(&repo, "HEAD", &base, &paths, None)
+                .map(|(tests, widened)| format!("tests={} widened={widened:?}", tests.len()))
+                .unwrap_or_else(|error| format!("error={error:#}"));
+            report.push(format!("PROBE {issue} {tip} paths={} {outcome}", paths.len()));
+        }
+        panic!("\n{}\n", report.join("\n"));
+    }
+
     #[test]
     fn red_first_playwright_timeout_matches_selected_spec_gh_2422() {
         let report = serde_json::from_str(include_str!("javascript/playwright-timed-out.txt")).unwrap();

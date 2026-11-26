@@ -4437,6 +4437,11 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         // test body, and a module registering no test, register the same tests
         // whatever the catalogue holds.
         write("src/__scenarios__/labels.spec.ts", "import cases from './scenarios.json';\nit('names the first channel', () => { expect(cases[0][0]).toBe('sms'); });\n");
+        // Adversarial: rows derived from the data and registered through a
+        // local factory still come from the catalogue.
+        let derived = "src/__scenarios__/derived.spec.ts";
+        write(derived, "import cases from './scenarios.json';\nconst rows = cases.filter(([, listed]) => !listed);\n\
+            const check = (channel) => it(`sends ${channel}`, () => {});\nfor (const [channel] of rows) check(channel);\n");
         let helper = "src/__scenarios__/channels.mjs";
         write(helper, "import cases from './scenarios.json';\nexport const channels = cases.map(([channel]) => channel);\n");
         let base = commit("base");
@@ -4445,7 +4450,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         write(helper, "import cases from './scenarios.json';\nexport const channels = cases.map(([channel]) => channel);\nexport const count = cases.length;\n");
         let catalogue_only = commit("catalogue only");
         let required = super::super::stability::requirements(repo.path(), &catalogue_only, &base, &[catalogue.into(), helper.into()], None).unwrap();
-        assert_eq!(required, (Vec::new(), vec![Scope::File(spec.into())]));
+        assert_eq!(required, (Vec::new(), vec![Scope::File(spec.into()), Scope::File(derived.into())]));
         // GH #2522: dropping an import the tests only read is an ordinary test edit.
         write("src/__scenarios__/labels.spec.ts", "it('names the first channel', () => { expect('sms').toBe('sms'); });\n");
         let dropped = commit("drop the read-only import");

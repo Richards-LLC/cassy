@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.57.0] - 2026-11-26
+
+### Fixed — Task Verification
+
+- **Automatic verifier pins GPT-6.1 Sol** — Automatic reviews use GPT-6.1 Sol at high effort instead of inheriting the standard worker lane. The existing Claude fallback is unchanged.
+- **Recover no-code reviews after an upgrade** — A report review requested by an older MCP session now tells you to reconnect or restart that session before retrying. Cassy does not review a report whose proof was never recorded.
+
+### Fixed — Verifier
+
+- **Completeness failures stop the review** — The verifier runs the quality phase only after completeness passes, and stops on rejected QA ledger evidence.
+
 ## [4.56.0] - 2026-11-25
 
 ### Fixed — Factory

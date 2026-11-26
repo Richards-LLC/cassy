@@ -720,6 +720,17 @@ pub fn default_user_facing_paths() -> Vec<String> {
         "**/*.svelte",
         "**/*.tsx",
         "**/*.jsx",
+        "**/locales/**",
+        "**/locale/**",
+        "**/localizations/**",
+        "**/i18n/**",
+        "**/*.ftl",
+        "**/*.po",
+        "**/*.mjml",
+        "**/*.hbs",
+        "**/*.handlebars",
+        "**/*.liquid",
+        "**/*.mustache",
     ]
     .into_iter()
     .map(ToOwned::to_owned)

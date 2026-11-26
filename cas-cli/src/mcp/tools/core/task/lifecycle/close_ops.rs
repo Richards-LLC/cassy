@@ -8163,7 +8163,7 @@ impl CasCore {
         result
     }
 
-    // gate-audit[supervisor_override]: bypass G-33,G-35,G-45,G-51,G-53,G-64,G-68,G-71,G-74,G-61,G-76,G-78,G-79,G-83,G-125 Each accepted close waiver is carried to the final response after compaction.
+    // gate-audit[supervisor_override]: bypass G-33,G-35,G-45,G-51,G-53,G-64,G-68,G-71,G-74,G-61,G-76,G-78,G-79,G-83,G-125,G-171 Each accepted close waiver is carried to the final response after compaction.
     // gate-audit[stranded_branch_override]: bypass G-125 A live supervisor accepts measured stranded children; malformed waiver authority still refuses.
     // gate-audit[skip_verification]: selector Derived waiver outcome; the external supervisor_override acceptor supplies G-68 exactly once.
     // gate-audit[bypass_close_gates]: selector A measured non-delivery disposition selects applicable checks; it does not waive a delivered-code check.
@@ -9759,6 +9759,7 @@ impl CasCore {
         // merge queue runs the journeys once.
         let mut registry_upkeep_notices = Vec::new();
         let mut fast_lane_receipt_passed = false;
+        let mut visual_park_files = Vec::new();
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             && (has_delivery_to_measure(&task) || req.commit_receipt.is_some())
@@ -9878,8 +9879,14 @@ impl CasCore {
             let fast_lane_qa = match &fast_lane_stage {
                 fast_lane_gate::LaneClose::Off => None,
                 fast_lane_gate::LaneClose::Park => {
-                    close_notes.record(&mut task, "FAST LANE: QA evidence is deferred to the post-merge receipt.");
-                    Some(Ok(Vec::new()))
+                    let proof = super::qa_evidence_gate::fast_lane_visual_park_gate(
+                        &self.cas_root, &task, &evidence_repo, &resolved_parent_branch,
+                        qa_receipt, attributed_paths.as_deref(), qa_base.as_deref(),
+                    );
+                    if proof.is_ok() {
+                        close_notes.record(&mut task, "FAST LANE: QA evidence is deferred to the post-merge receipt.");
+                    }
+                    Some(proof.map_err(|message| crate::gates::tag("G-53", message)))
                 }
                 fast_lane_gate::LaneClose::Merged { .. } => {
                     let ledger = crate::config::Config::load(&self.cas_root)
@@ -9893,7 +9900,7 @@ impl CasCore {
                     ) {
                         fast_lane_gate::ReceiptGate::Passed => {
                             fast_lane_receipt_passed = true;
-                            Some(Ok(Vec::new()))
+                            Some(Ok(super::qa_evidence_gate::DeliveryEvidence::default()))
                         }
                         // gate[G-54 close-after-merge as-of]: Fast-lane post-merge receipt (pending, failed, unreadable, revert needed, walk failed)
                         fast_lane_gate::ReceiptGate::Hold(message) => Some(Err(crate::gates::tag("G-54", message))),
@@ -9921,13 +9928,17 @@ impl CasCore {
                 attributed_paths.as_deref(),
                 qa_base.as_deref(),
             ).map_err(|message| crate::gates::tag("G-53", message))) {
-                Ok(notes) => {
-                    for note in notes {
+                Ok(evidence) => {
+                    visual_park_files = evidence.visual_files;
+                    for note in evidence.notes {
                         close_notes.record(&mut task, &note);
                     }
                 }
                 Err(message) if supervisor_override => {
                     accepted_override_codes.push("G-53");
+                    if crate::gates::codes_in(&message).contains(&"G-171") {
+                        accepted_override_codes.push("G-171");
+                    }
                     close_notes.record(
                         &mut task,
                         &format!(
@@ -10243,9 +10254,10 @@ impl CasCore {
                     if gate_refusals.is_empty() {
                         let mut evidence_task = task.clone();
                         evidence_task.deliverables.parked_close_reason = req.reason.clone();
-                        if let Err(refusal) = crate::artifacts::proof::publish_routed_evidence(
+                        if let Err(refusal) = crate::artifacts::proof::publish_park_evidence(
                             &self.cas_root, &evidence_task,
                             worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
+                            &visual_park_files,
                         ) {
                             gate_refusals.push(refusal);
                         }

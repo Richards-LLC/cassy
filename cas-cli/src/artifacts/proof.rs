@@ -767,10 +767,20 @@ fn cites_file(token: &str, path: &Path, build_tree: &Path, evidence_dir: &Path) 
 /// Publish close-reason citations for a reviewer on either machine. Routed
 /// builds additionally require their ledger evidence and strict restoration;
 /// uncited ordinary QA captures remain best effort (cas-dae1, cas-2de9).
-pub(crate) fn publish_routed_evidence(
+#[cfg(test)]
+fn publish_routed_evidence(
     cas_root: &Path,
     task: &cas_types::Task,
     proof_repo: &Path,
+) -> Result<(), String> {
+    publish_park_evidence(cas_root, task, proof_repo, &[])
+}
+
+pub(crate) fn publish_park_evidence(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    proof_repo: &Path,
+    visual_files: &[PathBuf],
 ) -> Result<(), String> {
     let source = crate::factory_build_routing::routed_from(task);
     let machine_id = cas_types::Agent::get_or_generate_machine_id();
@@ -786,6 +796,17 @@ pub(crate) fn publish_routed_evidence(
     } else { (Vec::new(), Vec::new()) };
     let mut unpublished = Vec::new();
     let mut cited_names = std::collections::BTreeSet::new();
+    if !visual_files.is_empty() {
+        let root = dir.canonicalize().map_err(|error| fail(error.to_string()))?;
+        for file in visual_files {
+            let name = file.strip_prefix(&root).ok().and_then(Path::to_str)
+                .ok_or_else(|| fail(format!("required visual evidence is outside the task directory: {}", file.display())))?;
+            if !paths.iter().any(|(path, _)| path == name) {
+                return Err(fail(format!("required visual evidence is missing from the park: {name}")));
+            }
+            cited_names.insert(name.to_owned());
+        }
+    }
     // A close can also cite a capped runner log in the worker checkout.
     // Publish only evidence locations, never arbitrary source mentions.
     for (index, segment) in task.deliverables.parked_close_reason.as_deref().unwrap_or_default().split('`').enumerate() {
@@ -941,7 +962,7 @@ pub(crate) fn publish_routed_evidence(
     } else {
         let artifact_id = match upload(&report_path) {
             Ok(id) => Some(id),
-            Err(error) if routed => return Err(fail(format!("{summary}\nManifest publication: {error}"))),
+            Err(error) if routed || !visual_files.is_empty() => return Err(fail(format!("{summary}\nManifest publication: {error}"))),
             Err(_) => None, // Ordinary evidence remains best effort.
         };
         serde_json::to_string(&EvidenceSync {
@@ -1696,14 +1717,18 @@ mod tests {
             | id | cell | expected | observed | verdict | label | evidence path | defect task |\n\
             | --- | --- | --- | --- | --- | --- | --- | --- |\n{}{}{}",
             row("M01", "web-green.log"), row("M02", &absolute.display().to_string()), row("M03", foreign));
-        let evidence: [(&str, &[u8]); 5] = [("proof/shot.png", b"\x89PNG capture"),
+        let tip_report = "visual-qa/visual-qa.json";
+        let base_report = "visual-qa-baseline/visual-qa.json";
+        let evidence: [(&str, &[u8]); 7] = [("proof/shot.png", b"\x89PNG capture"),
             ("proof/second.png", b"\x89PNG second"), ("web-green.log", b"web: PASS\n"),
-            ("LEDGER.md", ledger.as_bytes()), ("terminal-qa/status/report.md", b"terminal-qa: PASS\n")];
+            ("LEDGER.md", ledger.as_bytes()), ("terminal-qa/status/report.md", b"terminal-qa: PASS\n"),
+            (tip_report, include_bytes!("../../../scripts/visual-qa-fixtures/batch-park/scoped-tip/visual-qa.json")),
+            (base_report, include_bytes!("../../../scripts/visual-qa-fixtures/batch-park/scoped-base/visual-qa.json"))];
         let raw = "raw/requests/0001.json";
         for (index, (name, bytes)) in evidence.iter().enumerate() {
             let leaf = Path::new(name).file_name().unwrap().to_str().unwrap();
             Mock::given(method("POST")).and(path("/api/artifacts/begin"))
-                .and(body_partial_json(serde_json::json!({"name": leaf})))
+                .and(body_partial_json(serde_json::json!({"name": leaf, "sha256": format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes))})))
                 .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                     "artifact_id": format!("cloud-{index}"),
                     "upload_url": format!("{}/blob/{index}", server.uri()), "required_headers": {}})))
@@ -1732,7 +1757,8 @@ mod tests {
         let checked = crate::qa_ledger::check(&parking.evidence_dir().join("LEDGER.md"), 0);
         assert!(checked.ok, "{:?}", checked.diagnostics);
         let (parked, parking_dir) = tokio::task::spawn_blocking(move || {
-            publish_routed_evidence(&parking.root, &parking.task, &parking.repo).unwrap();
+            let required = [tip_report, base_report].map(|name| parking.evidence_dir().join(name).canonicalize().unwrap());
+            publish_park_evidence(&parking.root, &parking.task, &parking.repo, &required).unwrap();
             let parked = crate::store::open_task_store(&parking.root).unwrap().get(&parking.task.id).unwrap();
             (parked, parking.evidence_dir())
         }).await.unwrap();

@@ -60,9 +60,9 @@ follow [cross-machine proof logs](close-gate.md#cross-machine-proof-logs).
 ## Batch QA
 
 In qa.mode=batch (the default) the release's batch QA round at the frozen tip
-is the only walk; per-task QA evidence applies only in the opt-in
-qa.mode=per_task. A batch park opens no per-task round. Capture
-visual before/after evidence while building. The supervisor owns the release's one
+is the only journey walk. A rendered delivery still needs a strict visual sweep
+and a PASS or FAIL ledger row citing its changed-state screenshot at park.
+A batch park opens no per-task round. The supervisor owns the release's one
 epic-tip candidate, shared PASS ledger and `verification action=batch_receipt`.
 In qa.mode=batch, QA receipts retry ordinary close using existing merge approvals. A QA receipt cannot replace a missing code approval; the worker does nothing.
 Explicit `qa_request` reviews remain available.

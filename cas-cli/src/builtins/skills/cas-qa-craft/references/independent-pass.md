@@ -12,7 +12,7 @@ rejection bar. Mark cells unrun at the deadline `NOT EXERCISED: <reason>`.
 
 ## Batch default
 
-In `qa.mode=batch` capture before/after evidence during implementation. The
+In `qa.mode=batch` a rendered delivery must cite a changed-state screenshot from its strict visual sweep in a PASS or FAIL ledger row before park. The
 supervisor builds one candidate per release at the exact frozen tip and walks
 one combined matrix. Initialize the batch ledger with `cas qa ledger init --task <qa-task>
 --covers <delivery-a>,<delivery-b>` using every intended receipt task ID, and

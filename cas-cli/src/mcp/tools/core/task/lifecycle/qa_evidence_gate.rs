@@ -5,7 +5,7 @@
 //! A user-facing delivery can then neither park for merge (and so never gets
 //! an independent reviewer spawned, cas-619f) nor finish its post-merge
 //! re-close without valid implementer evidence for the delivered head. The
-//! batch mode defers that evidence to the staging receipt. The
+//! batch mode requires visual evidence at park and defers the journey walk to the staging receipt. The
 //! same check refuses any delivery that adds test skip/focus markers without
 //! a `cas-allow-skip:` reason.
 //!
@@ -175,7 +175,7 @@ pub(crate) fn qa_evidence_close_gate(
         commit_receipt,
         None,
         None,
-    )
+    ).map(|pass| pass.notes)
 }
 
 fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
@@ -208,6 +208,53 @@ pub(crate) fn task_evidence_dir(cas_root: &Path, task: &Task) -> Result<PathBuf,
         config.factory().artifacts_root.as_deref(),
     );
     Ok(task_qa_artifacts_dir(cas_root, &paths.base, task))
+}
+
+pub(crate) fn check_batch_visual_evidence(
+    task: &Task,
+    dir: &Path,
+    repo: &Path,
+    head: &str,
+    base: Option<&str>,
+) -> Result<Vec<PathBuf>, String> {
+    let not_before = crate::qa_evidence::committer_time(repo, head)
+        .ok_or_else(|| format!("cannot measure the delivered commit time for {head}"))?;
+    let base = base.and_then(|reference| resolve_branch_sha(repo, &format!("{reference}^{{commit}}")));
+    let (mut reports, screenshots) = crate::qa_evidence::batch_visual_evidence(dir, not_before, head, base.as_deref())?;
+    reports.extend(crate::qa_ledger::check_visual_capture(dir, task, &screenshots)?);
+    Ok(reports)
+}
+
+fn batch_visual_refusal(repo: &Path, dir: &Path, task: &Task, head: &str, problem: String) -> String {
+    let relative = "skills/cas-ui-craft/scripts/visual-qa.mjs";
+    let mut scripts = vec![repo.join("scripts/visual-qa.mjs")];
+    scripts.extend([".claude", ".codex", ".grok", ".opencode", "cas-cli/src/builtins"]
+        .into_iter().map(|base| repo.join(base).join(relative)));
+    if let Some(home) = dirs::home_dir() {
+        scripts.extend([".cas/claude-base", ".cas/codex-base", ".claude", ".codex", ".grok", ".config/opencode", ".opencode"]
+            .into_iter().map(|base| home.join(base).join(relative)));
+    }
+    scripts.extend(["CLAUDE_CONFIG_DIR", "CODEX_HOME"].into_iter().filter_map(std::env::var_os)
+        .map(|base| PathBuf::from(base).join(relative)));
+    if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
+        scripts.push(PathBuf::from(config).join("opencode").join(relative));
+    }
+    let sweep = dir.join("visual-qa");
+    let sweep = sweep.to_string_lossy();
+    let sweep = shell_words::quote(&sweep);
+    let command = scripts.iter().find(|path| path.is_file()).map(|path| {
+        let script = path.to_string_lossy();
+        let script = shell_words::quote(&script);
+        format!("printf 'Delivered local URL: '; IFS= read -r qa_url && npm exec --yes --package=playwright -- node {script} --strict --require-build --artifact-dir {sweep} \"$qa_url\"")
+    }).unwrap_or_else(|| "Install or refresh the cas-ui-craft skill to obtain the runnable visual-qa.mjs sweep.".into());
+    // gate[G-171 park as-of]: Batch visual evidence for a rendered delivery
+    crate::gates::tag("G-171", format!(
+        "QA EVIDENCE REJECTED: {problem}. Serve the delivered build and run the strict sweep:\n\n\
+         {command}\n\n\
+         Use --journey for interaction states. If the sweep has existing findings, sweep the same pages on the measured base into visual-qa-baseline. Cite the changed-state PNG in a PASS or FAIL row in LEDGER.md; use the URL path as the cell, followed by [state] for journey captures.\n\n\
+         If the sweep cannot be run, only a logged supervisor waiver is accepted: `{}verification action=qa_waive task_id={} head_sha={head} summary=\"<reason>\"`.",
+        crate::mcp::tools::core::guidance::caller_prefix(), task.id
+    ))
 }
 
 /// Format preflight before either verification-dispatch path mutates state.
@@ -511,6 +558,12 @@ pub(super) fn approved_receipt_bundle(
     })
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct DeliveryEvidence {
+    pub notes: Vec<String>,
+    pub visual_files: Vec<PathBuf>,
+}
+
 /// [`qa_evidence_close_gate`] judged on `attributed_paths`: the paths this
 /// task's own delivery commits changed, as selected by the close path's task
 /// attribution (cas-bde8, GH #978).
@@ -531,26 +584,77 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     commit_receipt: Option<&str>,
     attributed_paths: Option<&[String]>,
     recorded_base: Option<&str>,
-) -> Result<Vec<String>, String> {
+) -> Result<DeliveryEvidence, String> {
+    delivery_evidence_gate(
+        cas_root, task, repo, target_branch, commit_receipt, attributed_paths, recorded_base, false,
+    )
+}
+
+pub(super) fn fast_lane_visual_park_gate(
+    cas_root: &Path,
+    task: &Task,
+    repo: &Path,
+    target_branch: &str,
+    commit_receipt: Option<&str>,
+    attributed_paths: Option<&[String]>,
+    recorded_base: Option<&str>,
+) -> Result<DeliveryEvidence, String> {
+    delivery_evidence_gate(
+        cas_root, task, repo, target_branch, commit_receipt, attributed_paths, recorded_base, true,
+    )
+}
+
+fn exact_qa_waiver(cas_root: &Path, task_id: &str, head: &str) -> Result<Option<cas_types::QaPass>, String> {
+    Ok(cas_store::satisfying_qa_passes(cas_root, task_id)
+        .map_err(|err| format!("QA EVIDENCE REJECTED: cannot read QA waivers: {err}"))?
+        .into_iter()
+        .find(|pass| pass.bound_head == head && pass.state == cas_types::QaPassState::Waived))
+}
+
+fn waiver_note(evidence: &str, waiver: &cas_types::QaPass) -> String {
+    format!(
+        "QA evidence {evidence} waived: head={} waiver={} supervisor={} reason={}",
+        waiver.bound_head, waiver.id, waiver.issuer_agent_id.as_deref().unwrap_or(""),
+        waiver.summary.as_deref().unwrap_or("")
+    )
+}
+
+// gate-audit[exact_qa_waiver]: bypass G-171 An authenticated supervisor waiver for the exact delivered tip is accepted and logged.
+// gate-audit[fast_lane_visual_only]: selector Routes other QA checks to the existing post-merge receipt without bypassing rendered batch visual proof.
+#[allow(clippy::too_many_arguments)]
+fn delivery_evidence_gate(
+    cas_root: &Path,
+    task: &Task,
+    repo: &Path,
+    target_branch: &str,
+    commit_receipt: Option<&str>,
+    attributed_paths: Option<&[String]>,
+    recorded_base: Option<&str>,
+    fast_lane_visual_only: bool,
+) -> Result<DeliveryEvidence, String> {
+    let mut evidence = DeliveryEvidence::default();
     let Ok(config) = crate::config::Config::load(cas_root) else {
-        return Ok(Vec::new());
+        return Ok(evidence);
     };
     let qa = config.qa();
     let batch_mode = qa.mode == crate::config::QaMode::Batch;
-    let deferred = cas_store::has_qa_batch_deferral(cas_root, &task.id)
+    if fast_lane_visual_only && !batch_mode {
+        return Ok(evidence);
+    }
+    let deferred = !fast_lane_visual_only && cas_store::has_qa_batch_deferral(cas_root, &task.id)
         .map_err(|e| format!("QA EVIDENCE REJECTED: cannot read batch deferral: {e}"))?;
     if (!qa.evidence_gate
         || task.task_type == TaskType::Epic
         || task.execution_note.as_deref() == Some("no-code"))
         && !deferred
     {
-        return Ok(Vec::new());
+        return Ok(evidence);
     }
     let Some(head) = delivered_head(task, repo, target_branch, commit_receipt) else {
         if deferred {
             return Err("QA EVIDENCE REJECTED: deferred batch delivery has no resolvable head; restore its delivery anchor and record a batch_receipt".into());
         }
-        return Ok(Vec::new());
+        return Ok(evidence);
     };
     let carried_bundle =
         approved_receipt_bundle(cas_root, task, repo, target_branch, commit_receipt);
@@ -624,12 +728,10 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     let terminal_render = changed
         .as_deref()
         .is_some_and(|paths| requires_terminal_qa(paths, &qa));
-    let markers: Vec<SkipMarker> = match (range.as_ref(), changed.as_deref()) {
-        (Some((from, to)), Some(paths)) => delivery_test_diff(repo, from, to, paths)
-            .map(|diff| added_skip_markers(&diff))
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    };
+    let tier = evidence_tier(&reasons, terminal_render);
+    if fast_lane_visual_only && tier != EvidenceTier::Bundle {
+        return Ok(evidence);
+    }
     let paths = crate::config::resolved_factory_artifact_paths(
         cas_root,
         config.factory().artifacts_root.as_deref(),
@@ -640,6 +742,23 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     {
         return Err("QA EVIDENCE REJECTED: task artifact directory aliases another project's namespace or escapes its configured base".into());
     }
+    let visual_base = recorded_base.or_else(|| range.as_ref().map(|(base, _)| base.as_str()));
+    let require_visual = || check_batch_visual_evidence(task, &artifacts_dir, repo, &head, visual_base)
+        .map_err(|problem| batch_visual_refusal(repo, &artifacts_dir, task, &head, problem));
+    if fast_lane_visual_only {
+        if let Some(waiver) = exact_qa_waiver(cas_root, &task.id, &head)? {
+            evidence.notes.push(crate::gates::override_tag("G-171", waiver_note("batch visual evidence", &waiver)));
+            return Ok(evidence);
+        }
+        evidence.visual_files = require_visual()?;
+        return Ok(evidence);
+    }
+    let markers: Vec<SkipMarker> = match (range.as_ref(), changed.as_deref()) {
+        (Some((from, to)), Some(paths)) => delivery_test_diff(repo, from, to, paths)
+            .map(|diff| added_skip_markers(&diff))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
     if let Some(refusal) = changed
         .as_deref()
         .and_then(|changed| adversarial_probe_refusal(&task.id, &artifacts_dir.join("LEDGER.md"), changed))
@@ -660,7 +779,6 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
             .is_some_and(|capture| capture.is_configured().unwrap_or(true)),
         rebind_scope: changed.as_deref().map(|files| (&qa, files)),
     };
-    let tier = evidence_tier(&reasons, terminal_render);
     let carried_bundle = carried_bundle.filter(|_| tier == EvidenceTier::Bundle);
     let batch_receipt = if deferred {
         crate::qa_batch::satisfying_deferred_receipt(cas_root, task, repo, target_branch, &head)
@@ -715,10 +833,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     // waivers do not do so; skip/focus markers still run below.
     // None-tier evidence needs a waiver only when declared coverage failed.
     let waiver = if tier != EvidenceTier::None || pair_coverage.is_err() {
-        cas_store::satisfying_qa_passes(cas_root, &task.id)
-            .map_err(|err| format!("QA EVIDENCE REJECTED: cannot read QA waivers: {err}"))?
-            .into_iter()
-            .find(|pass| pass.bound_head == head && pass.state == cas_types::QaPassState::Waived)
+        exact_qa_waiver(cas_root, &task.id, &head)?
     } else {
         None
     };
@@ -762,6 +877,9 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
                 refusal.problem, refusal.command
             )
         })?;
+        if batch_defer && tier == EvidenceTier::Bundle {
+            evidence.visual_files = require_visual()?;
+        }
     }
     let mut pass = run_close_gate_with_write_dir(
         &ctx,
@@ -827,13 +945,12 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
             EvidenceTier::Ledger { .. } => "ledger",
             EvidenceTier::None => "pair coverage",
         };
-        pass.notes.push(format!(
-            "QA evidence {evidence} waived: head={} waiver={} supervisor={} reason={}",
-            head,
-            waiver.id,
-            waiver.issuer_agent_id.as_deref().unwrap_or(""),
-            waiver.summary.as_deref().unwrap_or("")
-        ));
+        let note = waiver_note(evidence, &waiver);
+        pass.notes.push(if batch_defer && tier == EvidenceTier::Bundle {
+            crate::gates::override_tag("G-171", note)
+        } else {
+            note
+        });
     }
     if !pass.deferred_deployed.is_empty() {
         let agents = crate::store::open_agent_store(cas_root)
@@ -861,7 +978,8 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
             ));
         }
     }
-    Ok(pass.notes)
+    evidence.notes = pass.notes;
+    Ok(evidence)
 }
 
 #[cfg(test)]
@@ -912,14 +1030,26 @@ mod tests {
                 let check = || qa_evidence_close_gate_for_paths(
                     &root, &task, repo, target, Some(&head), Some(&changed), Some(&base),
                 );
-                let result = check();
                 let batch_park = expected == crate::config::QaMode::Batch
                     && integration != Some(true);
+                if batch_park {
+                    cas_store::waive_qa_pass(
+                        &root, &task.id, "supervisor", "worker", "factory/worker", &base,
+                        "Reviewed the prior tip", chrono::Utc::now(),
+                    ).unwrap();
+                    assert_eq!(crate::gates::codes_in(&check().unwrap_err()), ["G-171"]);
+                    cas_store::waive_qa_pass(
+                        &root, &task.id, "supervisor", "worker", "factory/worker", &head,
+                        "Reviewed the exact delivery", chrono::Utc::now(),
+                    ).unwrap();
+                }
+                let result = check();
                 assert_eq!(result.is_ok(), batch_park,
                     "mode={expected}, integration={integration:?}: {result:?}");
                 assert_eq!(cas_store::has_qa_batch_deferral(&root, &task.id).unwrap(),
                     batch_park);
                 if batch_park {
+                    assert_eq!(crate::gates::override_codes_in(&result.unwrap().notes.join("\n")), ["G-171"]);
                     assert!(check().is_ok());
                     // Once integrated, recorded staging evidence remains due.
                     git(repo, &["branch", "-f", "main", &head]);

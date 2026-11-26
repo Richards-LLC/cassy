@@ -42,6 +42,31 @@ user-facing change they never ran.
 | Bypass | `supervisor_override=true` with a non-empty reason from a live supervisor (the existing mechanism). It is logged as a `✅ DECISION` note that names the gate. |
 | Config | `qa.evidence_gate` (bool, default `true`) in cas-619f's `[qa]` section. |
 
+### Batch park: rendered surfaces (G-171)
+
+In `qa.mode=batch`, a rendered change, including a rendered fast-lane delivery,
+needs a strict worker sweep before park. Only the journey walk is deferred.
+API-only and demo-only changes do not owe this sweep. An explicit project
+`qa.evidence_gate=false` opts out. Otherwise only a logged supervisor waiver
+can waive the check for the exact delivery.
+
+Serve the exact build, including its `RECEIPT.json`, from one local HTTP
+origin. For Cassy, the exact-revision candidate builder packages the receipt
+and the Commander assets verified against the candidate binary in `web/`.
+Serve that directory on loopback and sweep `/commander/`. The sweep's
+`--strict --require-build` reads the receipt and hashes the entry document
+and main module loaded by Chromium. `build.revision` must name the delivered
+SHA, `build.sha256` identifies the candidate, and `observedAssets` must match
+`build.assets`. The worker can report pre-existing findings by sweeping the
+same pages from the measured delivery base into `visual-qa-baseline/`.
+
+In `LEDGER.md`, use the captured URL's path (including query and fragment, if
+present) as the cell name. For a journey state append the state in brackets, for example
+`/commander/ [ranking expanded]`. A PASS or FAIL row must cite the PNG for
+that cell from `visual-qa/`. Park verifies the capture hash and decodes the
+image, then publishes the ledger, cited PNG and accepted run report(s) at
+their task-relative paths. An all-NOT-EXERCISED ledger is not enough.
+
 Independent reviewer bundles use the separate `qa-review-bundle:` citation on
 the delivery task. Producer close resolves only `qa-bundle:` evidence; the
 reviewer's QA record retains its own ledger and bundle regardless of which

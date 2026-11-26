@@ -2880,6 +2880,10 @@ bug_families:
     tasks: [cas-75ce]
     invariants: [HUB-J27-CONFIRM-SHEET, HUB-J27-RELOAD-PROOF]
     journeys: [HUB-J5, HUB-J27]
+  legacy-mcp-no-code-report-proof:
+    title: A no-code report dispatch without recorded proof names MCP reconnect before retry
+    tasks: [cas-fc46]
+    journeys: [FACTORY-CLOSE, FACTORY-MERGE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

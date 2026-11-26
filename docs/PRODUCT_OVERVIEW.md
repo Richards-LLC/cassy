@@ -1050,6 +1050,8 @@ At the same threshold, Cassy detaches the task from its release train, retargets
 
 When a peer replaces a stale worker, Cassy syncs the reset and the new delivery binding to the train owner. An earlier park no longer hides the new assignee and branch.
 
+If a no-code report review has no recorded proof, Cassy stops the review without a verdict and asks you to reconnect or restart the requesting MCP session on the installed binary before retrying.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

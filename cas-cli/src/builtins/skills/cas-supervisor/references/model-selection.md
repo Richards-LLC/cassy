@@ -44,7 +44,7 @@ Score each task while breaking down the EPIC:
 
 Why: Oct 24 to Nov 24, 183 of 563 spawns were Opus 5.5 high, and about 20% of those were QA passes, release mechanics or docs.
 
-`effort=high` is the ceiling except for the standard lane's Sol/xhigh and an explicit operator request for `max` on a recipe that lists it, after a task already failed at `high`/`xhigh`. Claude Sonnet is a worker only as the standard lane's Codex-out fallback. If a route is unavailable, report it and choose another active registry lane deliberately; never invent a fallback.
+`effort=high` is the ceiling except for the standard lane's Sol/xhigh, the heavy lane's Opus 5.5/xhigh, and an explicit operator request for `max` on a recipe that lists it, after a task already failed at `high`/`xhigh`. Claude Sonnet is a worker only as the standard lane's Codex-out fallback. If a route is unavailable, report it and choose another active registry lane deliberately; never invent a fallback.
 
 ## Workflow
 

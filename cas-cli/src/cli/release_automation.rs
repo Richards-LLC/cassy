@@ -1759,10 +1759,9 @@ pub(super) mod tests {
             child.status = TaskStatus::AwaitingMerge;
             child.origin_project = Some(identity.clone());
             child.assignee = Some("implementer".into());
-            child.deliverables.work_target = Some(WorkTarget {
-                repo_selector: "remote:github.com/example/repo".into(),
-                target_branch: train.branch.clone().unwrap(),
-            });
+            child.deliverables.work_target = crate::mcp::tools::core::task::repo_context::declare_work_target(
+                &root, None, train.branch.as_deref(),
+            ).unwrap();
             child.deliverables.factory_branch_anchor = Some(track.commit.clone());
             let tasks = open_task_store(&root).unwrap();
             tasks.add(&child).unwrap();

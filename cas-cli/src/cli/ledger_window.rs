@@ -233,10 +233,12 @@ mod tests {
             db.execute("INSERT INTO events(event_type,entity_type,entity_id,summary,metadata,created_at) VALUES ('gate_refused','gate',?1,'',?2,?3)",
                 rusqlite::params![code, metadata.to_string(), at.to_rfc3339()]).unwrap();
         }
+        cas_store::observed_delivery_merges(root).unwrap();
         for n in 0..2 {
-            cas_store::record_observed_delivery_merge(root, &format!("cas-{n}"), "factory/test", "epic/test", &format!("source-{n}"), &format!("merge-{n}"), "actor").unwrap();
+            db.execute("INSERT INTO observed_delivery_merges(task_id,source_branch,target_branch,source_commit_sha,merge_commit_sha,actor_agent_id,created_at)
+                VALUES (?1,'factory/test','epic/test',?2,?3,'actor',?4)", rusqlite::params![
+                format!("cas-{n}"), format!("source-{n}"), format!("merge-{n}"), since.to_rfc3339()]).unwrap();
         }
-        db.execute("UPDATE observed_delivery_merges SET created_at=?1", [since.to_rfc3339()]).unwrap();
         for (n, at, actor) in [(1, since, Some("actor")), (2, since + Duration::minutes(2), None), (3, until, Some("actor"))] {
             assert!(crate::quality_ledger::issue_filed(root, &format!("https://github.com/org/repo/issues/{n}"), "issue", at, actor));
         }

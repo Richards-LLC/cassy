@@ -285,9 +285,14 @@ mod tests {
         assert_eq!(settings["skillOverrides"]["init"], "user-invocable-only");
         assert!(settings["skillOverrides"].get("cas-worker").is_none());
         assert!(settings["skillOverrides"].get(".trash").is_none());
+        assert_eq!(settings["autoMemoryEnabled"], false);
+        assert_eq!(settings["claudeMdExcludes"], serde_json::json!(["**/skills/exa-search/**"]));
 
         let codex = worker_config(SupervisorCli::Codex, dir.path(), &account);
         assert!(codex.args.windows(2).any(|pair| pair == ["-c", "skills.include_instructions=false"]));
+        for setting in ["features.apps=false", "features.plugins=false", "features.memories=false"] {
+            assert!(codex.args.windows(2).any(|pair| pair == ["-c", setting]), "{setting}");
+        }
 
         let worktree = dir.path().join(".cas/worktrees/probe");
         let grok = worker_config(SupervisorCli::Grok, &worktree, &account);

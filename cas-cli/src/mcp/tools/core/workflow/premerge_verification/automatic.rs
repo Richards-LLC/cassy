@@ -1136,6 +1136,9 @@ mod tests {
         );
         assert_eq!(servers.map(|servers| servers.len()), Some(1), "{config:?}");
         assert!(args.windows(2).any(|pair| pair[0] == "--sandbox" && pair[1] == "read-only"));
+        for (section, key) in [("features", "apps"), ("features", "plugins"), ("features", "memories"), ("skills", "include_instructions")] {
+            assert_eq!(config[section][key].as_bool(), Some(false));
+        }
     }
 
     #[cfg(target_os = "linux")]

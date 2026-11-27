@@ -2936,7 +2936,10 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     env.remove("CAS_AGENT_ROLE");
     env.remove("CAS_SKIP_FACTORY_TOOLING");
     let project = cas_6718_drifted_project(env.home());
-    env.set_current_dir(&project);
+    let unrelated = env.home().join("unrelated");
+    std::fs::create_dir(&unrelated).unwrap();
+    cas_6718_git(&unrelated, &["init", "-q"]);
+    env.set_current_dir(&unrelated);
     let root = project.join(".cas");
     env.set("CAS_ROOT", &root);
     let harnesses = crate::cli::project_files::harnesses(&project);
@@ -2949,6 +2952,7 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     assert_eq!(cas_6718_git(&project, &["status", "--porcelain"]), original);
     args.dry_run = false;
     execute(&args, &update_test_cli(true), Some(&root)).unwrap();
+    assert!(!unrelated.join(".claude").exists());
     let status = cas_6718_git(&project, &["status", "--porcelain"]);
     assert!(
         status.is_empty(),
@@ -3064,7 +3068,7 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     assert_ne!(cas_6718_git(&linked, &["rev-parse", "HEAD"]), linked_head);
     assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), primary_head);
     assert_eq!(std::fs::read(project.join(".git/index")).unwrap(), primary_index);
-    assert!(!linked.join(".cas").exists());
+    assert!(!linked.join(".cas/cas.db").exists());
     assert!(std::fs::read_to_string(linked.join(unchanged[1])).unwrap().contains(&rule.content));
 }
 

@@ -1566,12 +1566,6 @@ impl CasCore {
         }
         let task_store = self.open_task_store()?;
 
-        let id = task_store.generate_id().map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to generate ID: {e}")),
-            data: None,
-        })?;
-
         let task_type: TaskType = req.task_type.parse().unwrap_or(TaskType::Task);
         let labels: Vec<String> = req
             .labels
@@ -1695,6 +1689,12 @@ impl CasCore {
             }
             _ => epic_id.or_else(|| release_train.clone()),
         };
+
+        let id = task_store.generate_id().map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to generate ID: {e}")),
+            data: None,
+        })?;
 
         // Set when the new task overlaps a sibling under its own epic; shown
         // in the create receipt, never a reason to refuse the write.
@@ -5076,13 +5076,11 @@ mod related_recall_response_tests {
                     CandidateReplay::Disabled => self.inner.generate_id(),
                     CandidateReplay::CaptureNext => {
                         let id = self.inner.generate_id()?;
-                        eprintln!("[cas-78cf] captured candidate={id}");
                         *replay = CandidateReplay::Reoffer(id.clone());
                         Ok(id)
                     }
                     CandidateReplay::Reoffer(id) => match self.inner.get(&id) {
                         Err(StoreError::TaskNotFound(_)) => {
-                            eprintln!("[cas-78cf] reoffered absent candidate={id}");
                             Ok(id)
                         }
                         Ok(_) => self.inner.generate_id(),
@@ -5098,7 +5096,6 @@ mod related_recall_response_tests {
                 epic_id: Option<&str>,
                 created_by: Option<&str>,
             ) -> StoreResult<()> {
-                eprintln!("[cas-78cf] create_atomic id={} type={:?} title={:?}", task.id, task.task_type, task.title);
                 self.inner.create_atomic(task, blocked_by, epic_id, created_by)
             }
 

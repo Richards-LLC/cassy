@@ -388,17 +388,12 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     assert_eq!(metadata["harness"], "codex");
     assert_eq!(metadata["tool"], "task");
     assert_eq!(metadata["action"], "show");
-    tasks.add(&Task::new("cas-does-not-exist".into(), "Now recorded".into())).unwrap();
-    let request = serde_json::from_value(serde_json::json!({
-        "name":"task", "arguments":{"action":"show", "id":"cas-does-not-exist"},
-    })).unwrap();
-    let response = client.call_tool(request).await.unwrap();
-    assert_ne!(response.is_error, Some(true));
-    work.wait_idle().await;
-    let db = rusqlite::Connection::open(dir.path().join("cas.db")).unwrap();
-    let recoveries: i64 = db.query_row("SELECT count(*) FROM efficiency_observations WHERE kind='refusal_recovered' AND observation_key=?1",
-        [&refusal_id], |row| row.get(0)).unwrap();
-    assert_eq!(recoveries, 1);
+    let retry_args = serde_json::json!({"action":"close","id":task.id});
+    facts::observe_tool_result_as(dir.path(), retry_args.as_object(),
+        &Ok(rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(tag("G-68","fixture"))])),
+        Some(&crate::agent_model::AgentModel::from_agent(&actor)), Some("task"));
+    let retry_refusal = store.list_by_type(cas_types::EventType::GateRefused, 100).unwrap().into_iter()
+        .find(|event| event.entity_id == "G-68" && event.metadata.as_ref().is_some_and(|m| m["task_id"] == task.id)).unwrap().id.to_string();
 
     // The real task-close producer must identify the verification gate it
     // waived, and the common MCP observer must persist exactly one fact.
@@ -413,7 +408,12 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     // handler-drain signal, including its observer, rather than polling facts.
     work.wait_idle().await;
     assert_eq!(facts::summarize(&store, before).unwrap().get("G-68"),
-        Some(&facts::Counts { refused: 0, overridden: 1, false_positive: 0, shadowed: 0 }), "{response:?}; {:?}", tasks.get(&task.id).unwrap().notes);
+        Some(&facts::Counts { refused: 1, overridden: 1, false_positive: 0, shadowed: 0 }), "{response:?}; {:?}", tasks.get(&task.id).unwrap().notes);
+    let db = rusqlite::Connection::open(dir.path().join("cas.db")).unwrap();
+    let recovered = |id: &str| db.query_row("SELECT count(*) FROM efficiency_observations WHERE kind='refusal_recovered' AND observation_key=?1",
+        [id], |row| row.get::<_,i64>(0)).unwrap();
+    assert_eq!(recovered(&retry_refusal),1);
+    assert_eq!(recovered(&refusal_id),0);
     client.cancel().await.unwrap();
     server.await.unwrap();
     assert_eq!(facts::summarize(&store, before).unwrap().get("G-116"),

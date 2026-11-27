@@ -985,7 +985,7 @@ pub(crate) fn prepare_receipt(
         };
     let mut heads = BTreeMap::new();
     let mut overrides = BTreeMap::new();
-    let mut production_candidate = None;
+    let mut production: Option<(cas_store::ProductionCandidate, PathBuf)> = None;
     let mut production_journeys = Vec::new();
     for id in task_ids {
         let task = tasks.get(id).map_err(|e| format!("task {id}: {e}"))?;
@@ -1023,16 +1023,16 @@ pub(crate) fn prepare_receipt(
         if batch_report.is_some()
             && let Some((candidate, journeys)) = production::recording_candidate(root, &repo, &task, &anchor, &staging)?
         {
-            if production_candidate.as_ref().is_some_and(|existing| existing != &candidate) {
+            if production.as_ref().is_some_and(|(existing, _)| existing != &candidate) {
                 return Err(format!("PRODUCTION_BATCH_QA_BUILD_MISMATCH candidate_sha={staging}"));
             }
-            production_candidate = Some(candidate);
+            production = Some((candidate, repo.clone()));
             production_journeys.extend(journeys);
         }
         heads.insert(id.clone(), anchor);
     }
-    if production_candidate.is_some() && let Some(report) = &batch_report {
-        production::validate_recording_ledger(staging, &production_journeys, &body, &ledger, report)?;
+    if let (Some((candidate, repo)), Some(report)) = (&production, &batch_report) {
+        production::validate_recording_ledger(repo, candidate, staging, &production_journeys, &body, &ledger, report)?;
     }
     Ok(QaBatchReceipt {
         schema_version: schema,
@@ -1043,7 +1043,7 @@ pub(crate) fn prepare_receipt(
         ledger_sha256: artifact.sha256,
         ledger_size_bytes: artifact.size_bytes,
         staging_sha: staging.to_ascii_lowercase(),
-        production_candidate,
+        production_candidate: production.map(|(candidate, _)| candidate),
         task_heads: heads,
         recorder_agent_id: recorder.id.clone(),
         recorded_at: chrono::Utc::now().to_rfc3339(),

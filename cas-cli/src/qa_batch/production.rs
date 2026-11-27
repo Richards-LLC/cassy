@@ -8,7 +8,7 @@ use crate::qa_ledger::{Report, Verdict, evidence_cell_path};
 use crate::store::open_task_store;
 use cas_store::ProductionCandidate;
 use cas_types::Task;
-use std::{io::Read, path::Path};
+use std::path::Path;
 
 pub(crate) fn branch(root: &Path, repo: &Path) -> Option<String> {
     let default = repo_context::resolve_default_branch(repo).ok()?;
@@ -19,7 +19,7 @@ pub(crate) fn branch(root: &Path, repo: &Path) -> Option<String> {
 }
 
 pub(super) fn rendered_journeys(
-    root: &Path, repo: &Path, task: &Task, anchor: &str, target: &str,
+    root: &Path, repo: &Path, task: &Task, anchor: &str, target: &str, assembled: &str,
 ) -> Result<Option<Vec<String>>, String> {
     let qa = Config::load(root).map_err(|error| error.to_string())?.qa();
     let history = crate::store::open_agent_store(root).map_err(|error| error.to_string())?
@@ -37,7 +37,7 @@ pub(super) fn rendered_journeys(
     if rendered_paths.is_empty() {
         return Ok(None);
     }
-    let journeys = crate::qa_evidence::journeys::journeys_for_paths_at(repo, anchor, &rendered_paths)?;
+    let journeys = crate::qa_evidence::journeys::journeys_for_paths_at(repo, assembled, &rendered_paths)?;
     let reasons = crate::qa_pass::user_facing_reasons(task, &qa, Some(&paths), &journeys).reasons;
     Ok((evidence_tier(&reasons, false) == EvidenceTier::Bundle).then_some(journeys))
 }
@@ -55,7 +55,7 @@ pub(super) fn recording_candidate(
     let base = commit(repo, &format!("refs/remotes/origin/{branch}"))
         .or_else(|| commit(repo, &format!("refs/heads/{branch}")))
         .ok_or_else(unresolved)?;
-    let Some(journeys) = rendered_journeys(root, repo, task, anchor, &branch)? else { return Ok(None) };
+    let Some(journeys) = rendered_journeys(root, repo, task, anchor, &branch, head)? else { return Ok(None) };
     if ancestor(repo, &base, head) != Some(true) {
         return Err(unresolved());
     }
@@ -70,25 +70,26 @@ pub(super) fn recording_candidate(
     Ok(Some((ProductionCandidate { base_sha: base, source_sha: source.into(), tree }, journeys)))
 }
 
-pub(super) fn validate_recording_ledger(head: &str, journeys: &[String], body: &str, ledger: &Path, report: &Report) -> Result<(), String> {
+pub(super) fn validate_recording_ledger(
+    repo: &Path, candidate: &ProductionCandidate, head: &str, journeys: &[String], body: &str, ledger: &Path, report: &Report,
+) -> Result<(), String> {
     let mut builds = body.lines().filter_map(|line| line.strip_prefix("build: ")).map(str::trim);
     if builds.next() != Some(head) || builds.next().is_some() {
         return Err(format!("PRODUCTION_BATCH_QA_BUILD_MISMATCH candidate_sha={head}"));
     }
-    let browser_pass = |row: &&crate::qa_ledger::Row| {
+    let refused = |problem: String| format!("PRODUCTION_BATCH_QA_BROWSER_PASS_REQUIRED candidate_sha={head} — {problem}");
+    let dir = ledger.parent().ok_or("ledger has no directory")?.canonicalize().map_err(|error| refused(error.to_string()))?;
+    let not_before = crate::qa_evidence::committer_time(repo, head).ok_or_else(|| refused("cannot read the candidate commit time".into()))?;
+    let (_, captures) = crate::qa_evidence::batch_visual_evidence(&dir, not_before, head, Some(&candidate.base_sha)).map_err(refused)?;
+    let captured = |row: &&crate::qa_ledger::Row| {
         row.verdict == Verdict::Pass
-            && row.label == "real-build"
-            && row.observed.starts_with("visible:")
-            && ledger.parent().and_then(|directory| evidence_cell_path(directory, &row.evidence_path))
-                .is_some_and(|capture| {
-                    let mut signature = [0; 8];
-                    std::fs::File::open(capture).and_then(|mut file| file.read_exact(&mut signature)).is_ok()
-                        && signature == *b"\x89PNG\r\n\x1a\n"
-                })
+            && evidence_cell_path(&dir, &row.evidence_path).is_some_and(|path| captures.iter().any(|shot| {
+                shot.path == path && shot.cell == row.cell && crate::qa_ledger::capture_matches(&path, &shot.sha256)
+            }))
     };
-    let passed: Vec<_> = report.rows.iter().filter(browser_pass).map(|row| row.id.as_str()).collect();
+    let passed: Vec<_> = report.rows.iter().filter(captured).map(|row| row.id.as_str()).collect();
     if passed.is_empty() || journeys.iter().any(|journey| !passed.contains(&journey.as_str())) {
-        return Err(format!("PRODUCTION_BATCH_QA_BROWSER_PASS_REQUIRED candidate_sha={head}"));
+        return Err(refused("each affected rendered journey needs a PASS row citing a capture from this candidate's browser run".into()));
     }
     Ok(())
 }
@@ -122,7 +123,7 @@ pub(crate) fn affected_deliveries(
         let Some(anchor) = super::resolved_delivery_anchor(repo, &task, target) else { continue };
         let reachability = |head| ancestor(repo, &anchor, head)
             .ok_or_else(|| format!("cannot resolve delivery {} at {head}", task.id));
-        if reachability(source)? && !reachability(base)? && rendered_journeys(root, repo, &task, &anchor, target)?.is_some() {
+        if reachability(source)? && !reachability(base)? && rendered_journeys(root, repo, &task, &anchor, target, source)?.is_some() {
             deliveries.push((id, anchor));
         }
     }

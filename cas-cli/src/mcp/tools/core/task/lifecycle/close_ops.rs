@@ -8223,6 +8223,14 @@ impl CasCore {
             if let Some(target) = effective_close_work_target(&task, parent.as_ref())
                 && let Err(message) = super::super::release_train::check_cut_merge(&self.cas_root, &target.target_branch, Some(&task.id))
                 && published_delivery_proof(&self.cas_root, &task, req.commit_receipt.as_deref()).is_none()
+                && !{
+                    let mut no_code = task.clone();
+                    prepare_no_code_close_metadata(&mut no_code, req.execution_note.as_deref(), req.external_ref.as_deref()).is_ok()
+                        && crate::mcp::tools::core::task::repo_context::resolve_repo_context(&self.cas_root, &target)
+                            .is_ok_and(|context| no_code_task_without_own_commits(
+                                &context.repo_root, &no_code, &target.target_branch, req.commit_receipt.as_deref(),
+                            ))
+                }
             {
                 let successor = super::super::release_train::successor_for_target(&self.cas_root, &target.target_branch)
                     .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
@@ -30617,6 +30625,12 @@ mod merge_state_gate_tests {
         f.store.add(&artifact_only).unwrap();
         f.store.add_dependency(&cas_types::Dependency::new(artifact_only.id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
         let proof = format!("https://example.test/qa/{}", f.local);
+        let mut frozen_qa = artifact_only.clone();
+        frozen_qa.id = "cas-artifact-frozen-qa".into();
+        frozen_qa.execution_note = Some("no-code".into());
+        frozen_qa.external_ref = Some(proof.clone());
+        f.store.add(&frozen_qa).unwrap();
+        f.store.add_dependency(&cas_types::Dependency::new(frozen_qa.id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
         let close = serde_json::json!({"action":"close", "id":f.task_id, "reason":"ready for review"});
         for (index, label) in ["release-train-cut".to_string(), format!("release-train-frozen:{}:{}", chrono::Utc::now().timestamp(), f.local)].into_iter().enumerate() {
             train.labels = vec!["release-train".into(), label, format!("release-train-successor:{}", next.id)];
@@ -30632,22 +30646,37 @@ mod merge_state_gate_tests {
             let mut own_code = f.store.get(&f.task_id).unwrap();
             own_code.execution_note = Some("no-code".into());
             own_code.external_ref = Some(proof.clone());
+            let anchor = own_code.deliverables.factory_branch_anchor.take();
             f.store.update(&own_code).unwrap();
             let refused = f.service.task(Parameters(serde_json::from_value(close.clone()).unwrap())).await.unwrap();
             assert_eq!(refused.structured_content.unwrap_or_default()["code"], "G-100");
             assert!(cas_store::get_latest_verification_dispatch(&root, &f.task_id).unwrap().is_none());
             own_code.execution_note = None;
             own_code.external_ref = None;
+            own_code.deliverables.factory_branch_anchor = anchor;
             f.store.update(&own_code).unwrap();
 
-            let mut qa = artifact_only.clone();
-            if index > 0 {
-                qa.id = "cas-artifact-frozen-qa".into();
-                qa.execution_note = Some("no-code".into());
-                qa.external_ref = Some(proof.clone());
-                f.store.add(&qa).unwrap();
-                f.store.add_dependency(&cas_types::Dependency::new(qa.id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+            let qa = if index == 0 { artifact_only.clone() } else { frozen_qa.clone() };
+            for invalid in ["missing-proof", "local-proof", "wrong-repository", "unknown-anchor"] {
+                let mut invalid_qa = qa.clone();
+                invalid_qa.execution_note = Some("no-code".into());
+                invalid_qa.external_ref = match invalid {
+                    "missing-proof" => None,
+                    "local-proof" => Some("/tmp/qa-receipt.md".into()),
+                    _ => Some(proof.clone()),
+                };
+                if invalid == "wrong-repository" {
+                    invalid_qa.deliverables.work_target.as_mut().unwrap().repo_selector = "project:unknown-repository".into();
+                }
+                if invalid == "unknown-anchor" {
+                    invalid_qa.deliverables.factory_branch_anchor = Some("bad-anchor".into());
+                }
+                f.store.update(&invalid_qa).unwrap();
+                let refused = f.service.task(Parameters(serde_json::from_value(serde_json::json!({"action":"close", "id":qa.id, "reason":"Evidence review"})).unwrap())).await.unwrap();
+                assert_eq!(refused.structured_content.unwrap_or_default()["code"], "G-100", "{invalid}");
+                assert!(cas_store::get_latest_verification_dispatch(&root, &qa.id).unwrap().is_none());
             }
+            f.store.update(&qa).unwrap();
             let mut request = serde_json::json!({"action":"close", "id":qa.id, "reason":"Frozen source evidence complete"});
             if index == 0 {
                 request["execution_note"] = "no-code".into();

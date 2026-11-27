@@ -1,0 +1,4 @@
+title: Artifact-only review retains its frozen source
+statement: A pre-freeze artifact-only task with validated portable no-code proof and no owned commits reaches independent review without retargeting its proof source. Missing or local proof, an unresolved repository, unknown anchors and owned code retain the frozen-target refusal.
+tasks: [cas-955a]
+journeys: [FACTORY-CLOSE]

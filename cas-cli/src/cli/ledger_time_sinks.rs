@@ -16,7 +16,7 @@ type Time = DateTime<Utc>;
 type Span = (Time, Time);
 
 #[derive(Serialize, Default)]
-pub(super) struct Distribution {
+struct Distribution {
     samples: usize,
     total: f64,
     median: Option<f64>,
@@ -1126,7 +1126,9 @@ mod tests {
         worker.last_heartbeat = Utc::now() + Duration::hours(2);
         agents.register(&worker).unwrap();
         agents.try_claim(&task.id, &worker.id, 7200, None).unwrap();
-        let at = agents.get_lease_history(&task.id, None).unwrap()[0].timestamp;
+        let claimed = agents.get_lease_history(&task.id, None).unwrap()[0].timestamp;
+        let at = Time::from_timestamp(claimed.timestamp() + 1, 0).unwrap();
+        let pre_start_lease = minutes((claimed, at));
         let window = (at - Duration::minutes(10), at + Duration::minutes(60));
         let events = crate::store::open_event_store(&root).unwrap();
         for (kind, offset) in [
@@ -1393,9 +1395,9 @@ mod tests {
         };
         near(&w["observed_alive"], 70.0);
         near(&w["in_turn"], 16.0);
-        near(&w["leased_out_of_turn"], 28.0);
+        near(&w["leased_out_of_turn"], 28.0 + pre_start_lease);
         near(&w["blocked_or_waiting"], 20.0);
-        near(&w["unassigned"], 6.0);
+        near(&w["unassigned"], 6.0 - pre_start_lease);
         let partition: f64 = [
             "in_turn",
             "leased_out_of_turn",

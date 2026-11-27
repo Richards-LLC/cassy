@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """Report release budget misses without creating tasks.
 
-Usage: release-budget-breach.py <tag> <run-dir> [--cas-bin <legacy-unused-path>]
+Usage: release-budget-breach.py <tag> <run-dir>
 """
 from pathlib import Path
 import sys
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) == 4 and argv[2] == "--cas-bin":
-        argv = argv[:2]
     if len(argv) != 2:
         print(__doc__.strip().splitlines()[-1], file=sys.stderr)
         return 2

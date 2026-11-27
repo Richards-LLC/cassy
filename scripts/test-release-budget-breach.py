@@ -61,7 +61,8 @@ class BudgetBreach(unittest.TestCase):
 
     def file_breach(self, events: str) -> subprocess.CompletedProcess:
         (self.run_dir / "stage-events.tsv").write_text(events)
-        env = dict(os.environ, FAKE_CAS_LOG=str(self.log),
+        env = dict(os.environ, PATH=f"{self.tmp}{os.pathsep}{os.environ['PATH']}",
+                   FAKE_CAS_LOG=str(self.log),
                    LANDED=str(self.run_dir / "landed-main.sha"), GH_BIN=str(self.gh))
         measured = subprocess.run(
             ["bash", str(SCRIPTS / "release-latency-receipt.sh"), "v9.99.8",
@@ -69,7 +70,7 @@ class BudgetBreach(unittest.TestCase):
         self.assertEqual(measured.returncode, 0, measured.stdout + measured.stderr)
         return subprocess.run(
             [sys.executable, str(SCRIPTS / "release-budget-breach.py"), "v9.99.8",
-             str(self.run_dir), "--cas-bin", str(self.cas)],
+             str(self.run_dir)],
             cwd=self.tmp, env=env, capture_output=True, text=True)
 
     def calls(self) -> list[dict]:

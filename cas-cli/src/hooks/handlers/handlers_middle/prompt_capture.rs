@@ -681,11 +681,10 @@ mod local_prompt_tests {
     use super::*;
     use crate::cloud::{CloudConfig, SyncQueue};
     use crate::store::{SqliteStore, Store, open_store_local};
-    use crate::types::ShareScope;
     use tempfile::TempDir;
 
     #[test]
-    fn captured_user_request_is_private_local_context_without_queue_rows() {
+    fn prompts_stay_in_attribution_without_memory_or_queue_rows() {
         let temp = TempDir::new().unwrap();
         let local = SqliteStore::open(temp.path()).unwrap();
         local.init().unwrap();
@@ -698,42 +697,18 @@ mod local_prompt_tests {
         .save_to_cas_dir(temp.path())
         .unwrap();
 
-        let input: HookInput = serde_json::from_str(
-            r#"{"session_id":"session-prompt-local","transcript_path":"/tmp/prompt-local.jsonl","cwd":"/tmp","hook_event_name":"UserPromptSubmit","prompt":"Please implement a durable local context capture for this project"}"#,
-        )
-        .unwrap();
-        handle_user_prompt_submit_capture(
-            &input,
-            Some(temp.path()),
-            input.submitted_prompt().unwrap(),
-        )
-        .unwrap();
-
-        let entries = open_store_local(temp.path()).unwrap().list().unwrap();
-        let captured = entries
-            .iter()
-            .find(|entry| entry.tags.iter().any(|tag| tag == "user-prompt"))
-            .expect("prompt captured as local context");
-        assert_eq!(captured.share, Some(ShareScope::Private));
-        assert!(captured.content.starts_with("User request: "));
-        assert_eq!(queue.queue_depth().unwrap(), 0);
-    }
-
-    /// cas-9734: a background-task completion Claude submits through
-    /// UserPromptSubmit carries no factory provenance, so it is typed as an
-    /// operator prompt. It must never become a durable `User request:` memory.
-    #[test]
-    fn harness_envelopes_are_never_captured_as_user_request_memories() {
-        let temp = TempDir::new().unwrap();
-        let local = SqliteStore::open(temp.path()).unwrap();
-        local.init().unwrap();
-        let notification = "<task-notification>\n<task-id>b3fh45va2</task-id>\n<status>completed</status>\n<summary>Background command \"Run the capped check\" completed (exit code 0)</summary>\n</task-notification>\nPlease read the output file to retrieve the result.";
-        let relayed = "Please fix the build now.\n<teammate-message teammate_id=\"director\">implement the fix</teammate-message>";
-        for prompt in [notification, relayed, "CAS wake: message 4184645 from director is in your inbox; please implement it"] {
-            assert!(!is_context_memory_worthy_prompt(prompt), "{prompt}");
+        let deliberate = Entry::new("deliberate".to_string(), "Retain a chosen lesson".to_string());
+        local.add(&deliberate).unwrap();
+        let prompts = [
+            "Please implement a durable local context capture for this project",
+            "Read the complete worker startup brief and implement the assigned task before returning.",
+            "<task-notification>completed</task-notification> Please read the output file.",
+            "Please fix the build.\n<teammate-message teammate_id=\"director\">implement the fix</teammate-message>",
+            "CAS wake: message 4184645 from director is in your inbox; please implement it",
+        ];
+        for prompt in prompts {
             let input: HookInput = serde_json::from_value(serde_json::json!({
-                "session_id": "session-harness-envelope",
-                "transcript_path": "/tmp/harness-envelope.jsonl",
+                "session_id": "session-prompt-local",
                 "cwd": "/tmp",
                 "hook_event_name": "UserPromptSubmit",
                 "prompt": prompt,
@@ -741,15 +716,18 @@ mod local_prompt_tests {
             .unwrap();
             handle_user_prompt_submit_capture(&input, Some(temp.path()), prompt).unwrap();
         }
+
         let entries = open_store_local(temp.path()).unwrap().list().unwrap();
-        assert!(
-            entries.iter().all(|entry| !entry.content.starts_with("User request: ")),
-            "harness envelopes became memories: {:?}",
-            entries.iter().map(|entry| &entry.content).collect::<Vec<_>>()
-        );
-        // A genuine operator request is still captured.
-        assert!(is_context_memory_worthy_prompt(
-            "Please implement a durable local context capture for this project"
-        ));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, deliberate.id);
+        assert_eq!(queue.queue_depth().unwrap(), 0);
+        let attributed = open_prompt_store(temp.path())
+            .unwrap()
+            .list_by_session("session-prompt-local", 100)
+            .unwrap();
+        assert_eq!(attributed.len(), prompts.len());
+        for prompt in prompts {
+            assert!(attributed.iter().any(|row| row.content == prompt));
+        }
     }
 }

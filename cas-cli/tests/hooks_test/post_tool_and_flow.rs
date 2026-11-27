@@ -221,56 +221,23 @@ fn test_stop_handles_empty_session() {
 }
 
 #[test]
-fn test_stop_synthesizes_matching_buffered_observations_component() {
+fn test_stop_discards_buffer_without_creating_memories() {
     let temp = TempDir::new().unwrap();
     init_cas_dev_mode(&temp);
-
     let session_id = "summary-session";
-
-    // Seed matching-session observations in the current tracer store. Stop's
-    // production path reads these rows, synthesizes learnings, and clears the
-    // buffer after processing it.
-    seed_buffered_observation(
-        &temp,
-        session_id,
-        "Write",
-        "Write: /src/main.rs",
-        None,
-        false,
-    );
-    seed_buffered_observation(
-        &temp,
-        session_id,
-        "Bash",
-        "Bash: cargo build",
-        Some(0),
-        false,
-    );
-    let before_stop = count_entries(&temp);
-
-    // End session
+    for (tool, content, error) in [
+        ("Write", "Write: /src/main.rs", false),
+        ("Edit", "Edit: /src/a.rs", false),
+        ("Edit", "Edit: /src/b.rs", false),
+        ("Edit", "Edit: /src/c.rs", false),
+        ("Bash", "Bash: cargo build", false),
+        ("Bash", "Bash: cargo test", true),
+    ] {
+        seed_buffered_observation(&temp, session_id, tool, content, Some(i32::from(error)), error);
+    }
     send_hook(&temp, "Stop", &stop_input(session_id));
-
-    // Stop should synthesize a durable learning from matching rows and clear
-    // only the rows it consumed.
-    let count = count_entries(&temp);
-    assert!(
-        count > before_stop,
-        "Stop should create a session learning. Before: {before_stop}, after: {count}"
-    );
-    assert_eq!(
-        count_buffered_observations(&temp),
-        0,
-        "Stop should clear the matching observation buffer"
-    );
-    let entries = open_entries(&temp);
-    assert!(
-        entries.iter().any(|entry| {
-            entry.session_id.as_deref() == Some(session_id)
-                && entry.tags.iter().any(|tag| tag == "build-success")
-        }),
-        "Stop synthesis should retain the source session"
-    );
+    assert_eq!(count_entries(&temp), 0);
+    assert_eq!(count_buffered_observations(&temp), 0);
 }
 
 // =============================================================================

@@ -150,6 +150,167 @@ fn tip_receipt(repo: &Path, cas_dir: &Path, outcome: &str) {
     std::fs::write(dir.join("state.json"), state.to_string()).unwrap();
 }
 
+#[test]
+fn production_cut_proposal_requires_pass_for_the_frozen_candidate() {
+    let _env = TestEnvGuard::temp_home();
+    let (dir, origin) = repo_with_origin();
+    let repo = dir.path();
+    let cas_dir = train(repo, &[("cas-a", TaskStatus::AwaitingMerge)]);
+    let config = "[project]\ncanonical_id='candidate-fixture'\n[release]\nauto_cut_max_per_day=0\n";
+    let configure = |extra: &str| std::fs::write(cas_dir.join("config.toml"), format!("{config}{extra}")).unwrap();
+    configure("");
+    merge_child(repo, &cas_dir, "cas-a", &["index.html"]);
+    let stale = run(repo, &["rev-parse", TRAIN]);
+    run(repo, &["commit", "--allow-empty", "-qm", "refresh candidate"]);
+    let candidate = run(repo, &["rev-parse", TRAIN]);
+    crate::mcp::tools::core::workflow::release_freeze::freeze(&cas_dir, EPIC, "operator", None).unwrap();
+    tip_receipt(repo, &cas_dir, "PASS");
+
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get("cas-a").unwrap();
+    task.origin_project = Some("candidate-fixture".into());
+    let anchor = run(repo, &["rev-parse", "factory/cas-a"]);
+    task.deliverables.factory_branch_anchor = Some(anchor.clone());
+    tasks.update(&task).unwrap();
+    cas_store::defer_qa_batch_evidence(&cas_dir, &task.id, &anchor).unwrap();
+    let mut epic = tasks.get(EPIC).unwrap();
+    epic.origin_project = task.origin_project.clone();
+    tasks.update(&epic).unwrap();
+    let recorder = open_agent_store(&cas_dir).unwrap().get("sup-id").unwrap();
+    let artifacts = cas_store::SqliteArtifactStore::open(&cas_dir).unwrap();
+    std::fs::write(repo.join("capture.png"), include_bytes!("../../vendor/ghostty/images/icons/icon_16.png")).unwrap();
+    let receive = |head: &str, build: &str, passed: bool| {
+        let ledger = repo.join("LEDGER.md");
+        let (count, row) = if passed {
+            ("PASS=1; NOT EXERCISED=0", "| M01 | browser | page visible (index.html:1) | visible: page | PASS | real-build | capture.png | - |")
+        } else {
+            ("PASS=0; NOT EXERCISED=1", "| M01 | browser | page visible | not run | NOT EXERCISED: browser unavailable | real-build | - | - |")
+        };
+        std::fs::write(&ledger, format!("schema: 2\nbuild: {build}\ncovers: cas-a\ncells=1; FAIL=0; {count}\nlabels: real-build=1\n{}\n{row}\n", crate::qa_ledger::HEADER)).unwrap();
+        let context = crate::artifacts::PublishContext {
+            store: &artifacts,
+            roots: crate::artifacts::paths::PublishRoots::new(&cas_dir, &repo.join("artifacts"), EPIC),
+            task_id: EPIC.into(), cloud: None,
+        };
+        let artifact = crate::artifacts::publish(&context, &ledger).unwrap().artifact;
+        let receipt = crate::qa_batch::prepare_receipt(
+            &cas_dir, &recorder, "external-reviewer", &["cas-a".into()], head, &artifact.id,
+            &ledger, cas_store::QA_BATCH_RECEIPT_SCHEMA,
+        )?;
+        cas_store::record_qa_batch_receipt(&cas_dir, &receipt).map_err(|error| error.to_string())
+    };
+    let propose = || notify_train_cuts(&cas_dir, &BTreeSet::new(), Utc::now() + chrono::Duration::hours(3)).unwrap();
+
+    configure("[qa]\napi_paths=['index.html']\n");
+    admit_cut_candidate(&cas_dir, &epic, &candidate).unwrap();
+    configure("[factory]\nepic_base_branch='staging'\n");
+    admit_cut_candidate(&cas_dir, &epic, &candidate).unwrap();
+    configure("");
+    let refused = || {
+        let reason = admit_cut_candidate(&cas_dir, &epic, &candidate).unwrap_err();
+        assert!(reason.contains("PRODUCTION_BATCH_QA_REQUIRED"));
+        assert_eq!(reason.split_ascii_whitespace().nth(1).and_then(|field| field.strip_prefix("candidate_sha=")), Some(candidate.as_str()));
+    };
+    refused();
+    assert_eq!(propose(), 0);
+    receive(&stale, &stale, true).unwrap();
+    assert_eq!(propose(), 0);
+    assert!(receive(&candidate, &stale, true).unwrap_err().contains("PRODUCTION_BATCH_QA_BUILD_MISMATCH"));
+    assert!(receive(&candidate, &candidate, false).unwrap_err().contains("PRODUCTION_BATCH_QA_BROWSER_PASS_REQUIRED"));
+    receive(&candidate, &candidate, true).unwrap();
+    assert_eq!(propose(), 1);
+    let base = run(repo, &["rev-parse", "main"]);
+    let tree = run(repo, &["rev-parse", &format!("{candidate}^{{tree}}")]);
+    let candidate_tree = cas_store::ProductionCandidate { base_sha: base.clone(), source_sha: candidate.clone(), tree };
+    let synthetic = run(repo, &["commit-tree", &candidate_tree.tree, "-p", &base, "-p", &candidate,
+        "-m", &format!("{}fixture", crate::mcp::tools::core::workflow::premerge_verification::CANDIDATE_COMMIT_PREFIX)]);
+    receive(&synthetic, &synthetic, true).unwrap();
+    crate::qa_batch::production::admit(&cas_dir, repo, "main", &candidate_tree, Some(&synthetic), None).unwrap();
+    crate::qa_batch::production::admit(&cas_dir, repo, "main", &candidate_tree, None, None).unwrap();
+    let moved = run(repo, &["commit-tree", &format!("{base}^{{tree}}"), "-p", &base, "-m", "advance production"]);
+    run(repo, &["update-ref", "refs/heads/main", &moved, &base]);
+    refused();
+    let moved_candidate = cas_store::ProductionCandidate { base_sha: moved.clone(), ..candidate_tree.clone() };
+    assert!(crate::qa_batch::production::admit(&cas_dir, repo, "main", &moved_candidate, None, None)
+        .unwrap_err().contains("PRODUCTION_BATCH_QA_REQUIRED"));
+    run(repo, &["update-ref", "refs/heads/main", &base, &moved]);
+    run(repo, &["checkout", "-q", "main"]);
+    run(repo, &["merge", "--no-ff", "-m", "land the checked tree", TRAIN]);
+    let landed = run(repo, &["rev-parse", "HEAD"]);
+    crate::qa_batch::production::validate_landing(repo, &candidate_tree, &synthetic, &landed, &base).unwrap();
+    let receipt = crate::qa_batch::satisfying_deferred_receipt(&cas_dir, &task, repo, "main", &landed).unwrap().unwrap();
+    assert_eq!(receipt.staging_sha, synthetic);
+    crate::qa_pass::sync::record_batch(&cas_dir, &receipt).unwrap();
+    let mut task = tasks.get(&task.id).unwrap();
+    let synced = crate::qa_pass::sync::take(&mut task.notes, &task.id);
+    run(repo, &["push", "-q", "origin", "main"]);
+    let peer = tempfile::tempdir().unwrap();
+    run(peer.path(), &["clone", "-q", "-b", "main", origin.path().to_str().unwrap(), "."]);
+    let peer_root = crate::store::init_cas_dir(peer.path()).unwrap();
+    std::fs::copy(cas_dir.join("config.toml"), peer_root.join("config.toml")).unwrap();
+    open_task_store(&peer_root).unwrap().add(&task).unwrap();
+    crate::qa_pass::sync::import(&peer_root, &task, &synced).unwrap();
+    assert!(git(peer.path(), &["cat-file", "-e", &synthetic]).is_err());
+    assert_eq!(crate::qa_batch::satisfying_deferred_receipt(&peer_root, &task, peer.path(), "main", &landed)
+        .unwrap().unwrap().staging_sha, synthetic);
+}
+
+#[test]
+fn production_waiver_does_not_carry_to_a_new_base() {
+    let _env = TestEnvGuard::temp_home();
+    let (dir, _origin) = repo_with_origin();
+    let repo = dir.path();
+    let cas_dir = train(repo, &[("cas-a", TaskStatus::AwaitingMerge)]);
+    std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id='candidate-fixture'\n").unwrap();
+    merge_child(repo, &cas_dir, "cas-a", &["index.html"]);
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get("cas-a").unwrap();
+    task.origin_project = Some("candidate-fixture".into());
+    let source = run(repo, &["rev-parse", "factory/cas-a"]);
+    task.deliverables.factory_branch_anchor = Some(source.clone());
+    tasks.update(&task).unwrap();
+    cas_store::defer_qa_batch_evidence(&cas_dir, &task.id, &source).unwrap();
+    let waiver = cas_store::waive_qa_pass(&cas_dir, &task.id, "sup-id", "worker-cas-a-id", "factory/cas-a",
+        &source, "Approve the candidate on the current production base", Utc::now()).unwrap();
+    run(repo, &["push", "-q", "origin", "main"]);
+    let original = crate::qa_batch::production::candidate_for_waiver(&cas_dir, repo, &task, "main", &source).unwrap().unwrap();
+    crate::qa_pass::sync::record_production_waiver(&cas_dir, &waiver, original.clone()).unwrap();
+    crate::qa_batch::production::admit(&cas_dir, repo, "main", &original, Some(&source), Some(&task.id)).unwrap();
+    let base = run(repo, &["rev-parse", "main"]);
+    let moved = run(repo, &["commit-tree", &format!("{base}^{{tree}}"), "-p", &base, "-m", "advance production"]);
+    run(repo, &["update-ref", "refs/heads/main", &moved, &base]);
+    let candidate = cas_store::ProductionCandidate {
+        base_sha: moved, source_sha: source.clone(), tree: run(repo, &["rev-parse", &format!("{source}^{{tree}}")]),
+    };
+    let refused = crate::qa_batch::production::admit(&cas_dir, repo, "main", &candidate, Some(&source), Some(&task.id)).unwrap_err();
+    assert_eq!(refused.split_ascii_whitespace().next(), Some("PRODUCTION_BATCH_QA_REQUIRED"));
+}
+
+#[test]
+fn production_scope_excludes_ui_inherited_from_another_delivery() {
+    let _env = TestEnvGuard::temp_home();
+    let (dir, _origin) = repo_with_origin();
+    let repo = dir.path();
+    let cas_dir = train(repo, &[("cas-a", TaskStatus::AwaitingMerge)]);
+    std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id='candidate-fixture'\n[qa]\napi_paths=['api.rs']\n").unwrap();
+    let base = run(repo, &["rev-parse", "main"]);
+    run(repo, &["checkout", "-qb", "factory/cas-a"]);
+    std::fs::write(repo.join("index.html"), "<h1>Prior delivery</h1>\n").unwrap();
+    run(repo, &["add", "index.html"]);
+    run(repo, &["commit", "-qm", "feat(cas-aaaa): previous rendered delivery"]);
+    std::fs::write(repo.join("api.rs"), "pub fn api() {}\n").unwrap();
+    run(repo, &["add", "api.rs"]);
+    run(repo, &["commit", "-qm", "feat(cas-a): deliver API"]);
+    let source = run(repo, &["rev-parse", "HEAD"]);
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get("cas-a").unwrap();
+    task.origin_project = Some("candidate-fixture".into());
+    task.deliverables.record_park(Some("factory/cas-a"), Some(&source), task.assignee.clone().as_deref());
+    tasks.update(&task).unwrap();
+    cas_store::defer_qa_batch_evidence(&cas_dir, &task.id, &source).unwrap();
+    crate::qa_batch::production::admit_tip(&cas_dir, repo, "main", &base, &source, None).unwrap();
+}
+
 /// GH #1635: no notice asks for a cut without a green verdict at the tip.
 /// cas-0fc56: an unfrozen train has no train suite, so its notice asks for
 /// the freeze that starts one; once frozen, only green at the current tip notifies.

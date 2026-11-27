@@ -27,6 +27,13 @@ pub const RELEASE_VERDICT_SCHEMA: u32 = 2;
 pub const RELEASE_TAG_VERDICT_SCHEMA: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductionCandidate {
+    pub source_sha: String,
+    pub base_sha: String,
+    pub tree: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QaBatchReceipt {
     pub schema_version: u32,
     pub id: String,
@@ -36,6 +43,8 @@ pub struct QaBatchReceipt {
     pub ledger_sha256: String,
     pub ledger_size_bytes: u64,
     pub staging_sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_candidate: Option<ProductionCandidate>,
     /// Only PASS tasks, each bound to its own delivery anchor.
     pub task_heads: BTreeMap<String, String>,
     pub recorder_agent_id: String,
@@ -191,6 +200,14 @@ pub fn has_qa_batch_deferral(root: &Path, task: &str) -> Result<bool> {
 /// Deferred deliveries whose task is still open. Reads only, and has no debt on a
 /// database that predates the batch tables.
 pub fn pending_qa_batch_deferrals(root: &Path) -> Result<Vec<String>> {
+    batch_deferrals(root, false)
+}
+
+pub fn production_qa_batch_deferrals(root: &Path) -> Result<Vec<String>> {
+    batch_deferrals(root, true)
+}
+
+fn batch_deferrals(root: &Path, include_closed: bool) -> Result<Vec<String>> {
     let conn = crate::shared_db::shared_connection(&root.join("cas.db"))?;
     let guard = crate::shared_db::lock_connection(&conn)?;
     let exists: bool = guard.query_row(
@@ -201,10 +218,10 @@ pub fn pending_qa_batch_deferrals(root: &Path) -> Result<Vec<String>> {
     }
     let mut statement = guard.prepare(
         "SELECT d.task_id FROM qa_batch_deferrals d JOIN tasks t ON t.id=d.task_id
-         WHERE t.status NOT IN ('closed', 'cancelled')",
+         WHERE t.status <> 'cancelled' AND (?1 OR t.status <> 'closed')",
     )?;
     let rows = statement
-        .query_map([], |row| row.get(0))?
+        .query_map([include_closed], |row| row.get(0))?
         .collect::<std::result::Result<Vec<String>, _>>()?;
     Ok(rows)
 }
@@ -354,6 +371,7 @@ mod tests {
             ledger_sha256: "a".repeat(64),
             ledger_size_bytes: 4,
             staging_sha: "b".repeat(40),
+            production_candidate: None,
             recorder_agent_id: "supervisor".into(),
             recorded_at: Utc::now().to_rfc3339(),
             release_tag: None,

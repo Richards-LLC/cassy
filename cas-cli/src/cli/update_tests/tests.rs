@@ -3070,7 +3070,9 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     assert_ne!(cas_6718_git(&linked, &["rev-parse", "HEAD"]), linked_head);
     assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), primary_head);
     assert_eq!(std::fs::read(project.join(".git/index")).unwrap(), primary_index);
-    assert!(!linked.join(".cas").exists());
+    for path in [".cas/cas.db", ".cas/config.toml", ".cas/config.yaml"] {
+        assert!(!linked.join(path).exists(), "unexpected local store file: {path}");
+    }
     assert!(std::fs::read_to_string(linked.join(unchanged[1])).unwrap().contains(&rule.content));
     let hook_timeouts = |settings: &str| {
         let settings: serde_json::Value = serde_json::from_str(settings).unwrap();

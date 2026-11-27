@@ -208,14 +208,14 @@ fn send_notice(root: &Path, scope: &ReleaseScope, receipt: &ReleaseReconcileRece
 /// The newest release review whose candidate the final commit contains, plus
 /// every QA/review receipt recorded at that candidate. No review: the final
 /// commit with no proof, so closes hold as named residuals.
-fn reviewed_proofs(root: &Path, repo: &Path, project: &str, final_sha: &str) -> Result<(String, Vec<ReleaseProofRef>)> {
+fn reviewed_proofs(root: &Path, repo: &Path, project: &str, final_sha: &str, audited_sha: Option<&str>) -> Result<(String, Vec<ReleaseProofRef>)> {
     let receipts = crate::qa_batch::release_close::read_receipts(root, project).map_err(anyhow::Error::msg)?;
-    let reviewed = receipts
+    let reviewed = audited_sha.map(str::to_owned).unwrap_or_else(|| receipts
         .iter()
         .filter(|r| r.schema_version == cas_store::RELEASE_VERDICT_SCHEMA)
         .filter(|r| crate::qa_batch::ancestor(repo, &r.staging_sha, final_sha) == Some(true))
         .max_by(|a, b| a.recorded_at.cmp(&b.recorded_at).then_with(|| a.id.cmp(&b.id)))
-        .map_or_else(|| final_sha.to_string(), |r| r.staging_sha.clone());
+        .map_or_else(|| final_sha.to_string(), |r| r.staging_sha.clone()));
     let mut proofs: Vec<_> = receipts
         .iter()
         .filter(|r| r.staging_sha == reviewed)
@@ -248,6 +248,7 @@ pub(super) fn tag_scope(
     train_id: &str,
     tag: &str,
     tag_sha: &str,
+    cut_audit: Option<&ReleaseInputs>,
 ) -> Result<ReleaseScope> {
     let project_id = crate::cloud::resolve_canonical_id(root).context("project identity unavailable")?;
     let repository = match context {
@@ -256,9 +257,12 @@ pub(super) fn tag_scope(
             .map_err(anyhow::Error::msg)?
             .context("release has no GitHub origin")?,
     };
-    let (reviewed_sha, proof_refs) = reviewed_proofs(root, repo, &project_id, tag_sha)?;
-    let included_task_ids = context
-        .and_then(|c| c.release_inputs.as_ref())
+    let audit = cut_audit.or_else(|| context.and_then(|c| c.release_inputs.as_ref()));
+    let audited_sha = audit.map(|audit| audit.checked_sha.as_str()).filter(|checked| {
+        *checked == tag_sha || git(repo, &["rev-parse", &format!("{tag_sha}^1")]).ok().as_deref() == Some(*checked)
+    });
+    let (reviewed_sha, proof_refs) = reviewed_proofs(root, repo, &project_id, tag_sha, audited_sha)?;
+    let included_task_ids = audit
         .map(|inputs| inputs.included_task_ids.clone())
         .unwrap_or_default();
     let mut scope = ReleaseScope {
@@ -298,7 +302,7 @@ fn recover_with(
         Ok(path) if path.exists() => Some(serde_json::from_slice(&fs::read(path)?)?),
         _ => None,
     };
-    let scope = tag_scope(root, &repo, context.as_ref(), train_id, tag, &tag_sha)?;
+    let scope = tag_scope(root, &repo, context.as_ref(), train_id, tag, &tag_sha, None)?;
     reconcile_once(root, &repo, &scope, trigger, reconciler)
 }
 
@@ -327,7 +331,7 @@ pub fn published(args: &PublishedArgs, current_root: Option<&Path>) -> Result<()
             // The tag may be newer than this checkout; fetching it is idempotent.
             let _ = git(&repo, &["fetch", "--quiet", "origin", "tag", &tag]);
             let tag_sha = published_tag_sha(&repo, &tag)?;
-            let scope = tag_scope(&root, &repo, Some(&context), &context.train_id, &tag, &tag_sha)?;
+            let scope = tag_scope(&root, &repo, Some(&context), &context.train_id, &tag, &tag_sha, None)?;
             let trigger = ReconcileTrigger::Publish { tag: tag.clone() };
             reconcile_once(&root, &repo, &scope, trigger, &LocalReconciler)
         })();
@@ -395,7 +399,7 @@ fn promoted_with(root: &Path, pr: u64, inputs: Option<&Path>, reconciler: &dyn R
         "merge commit {merge_sha} is not on origin/{base}"
     );
     let project_id = crate::cloud::resolve_canonical_id(root).context("project identity unavailable")?;
-    let (mut reviewed_sha, proof_refs) = reviewed_proofs(root, &repo, &project_id, &merge_sha)?;
+    let (mut reviewed_sha, proof_refs) = reviewed_proofs(root, &repo, &project_id, &merge_sha, None)?;
     if proof_refs.is_empty() {
         reviewed_sha = head_sha.to_string();
     }

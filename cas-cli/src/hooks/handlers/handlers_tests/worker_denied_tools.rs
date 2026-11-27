@@ -371,6 +371,9 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
     for listing in [
         "rg --files /Applications/Postgres.app /opt /usr/local ~/.local/share ~/Library/pnpm 2>/dev/null",
         "find ~ -path '*cas-worker/references/discipline.md' 2>/dev/null",
+        "find node_modules -maxdepth 3 -type l -lname '*apps/*'",
+        "find apps/frontend/node_modules apps/backend/node_modules -maxdepth 2 -type l -lname '/*'",
+        "find apps/frontend/node_modules apps/backend/node_modules -maxdepth 2 -type l -name '/*'",
         // GH #2119, #2061, #2123: the listing sits in a compound command, and
         // its pipe consumers only filter the names.
         "ls /opt; tail -5 install.log && rg --files ~/.local /opt -g initdb -g postgres -g pg_ctl",
@@ -386,6 +389,7 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
     }
     // A listed name that reaches a reader is still a credential read.
     for command in [
+        "find ~/.config/neonctl -type l -lname '/*'",
         "find ~ -name credentials.json -print0 | sort --files0-from=-",
         "find ~ -name credentials.json | (xargs cat)",
         // Another segment of the compound command reads a store.

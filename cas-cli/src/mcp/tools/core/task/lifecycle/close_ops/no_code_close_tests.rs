@@ -5203,7 +5203,7 @@ async fn worker_status_keeps_only_history_after_deferred_start_is_accepted_gh257
     assert!(agents.get_lease(task_id).unwrap().is_none());
     let status = || async {
         let request = serde_json::from_value(serde_json::json!({
-            "action":"worker_status", "summary":true,
+            "action":"worker_status", "summary_mode":true,
         })).unwrap();
         fixture.supervisor.factory(Parameters(request)).await.unwrap()
             .content.iter().filter_map(|content| content.as_text().map(|text| text.text.as_str()))

@@ -1,0 +1,4 @@
+title: Release closeout verifies the content of approved import assemblies
+statement: A landed review-bound assembly preserves each authorized import through the release tree or a proven fold owned by its constituent. Unapproved, ambiguous, reverted, or unfolded content holds closeout.
+tasks: [cas-ce21]
+journeys: [CLI-RELEASE]

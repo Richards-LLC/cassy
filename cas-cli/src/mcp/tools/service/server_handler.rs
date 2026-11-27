@@ -1894,6 +1894,14 @@ mod tests {
         env.set("CAS_FACTORY_SESSION", "spawn-receipt-fixture");
         env.set("CAS_FACTORY_BUILD_GUARD", "off");
         let temp = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args)
+                .current_dir(temp.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-b", "main"]);
+        git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+            "commit", "--allow-empty", "-m", "fixture"]);
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
         let tasks = crate::store::open_task_store(&root).unwrap();
         let task_id = "cas-spawn-receipt";

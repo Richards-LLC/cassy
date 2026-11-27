@@ -672,7 +672,7 @@ impl CasCore {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::test_support::TestEnvGuard;
     use cas_types::{Dependency, DependencyType};
@@ -953,6 +953,10 @@ mod tests {
     /// instead of opening a second one; a cut with none still opens one.
     #[test]
     fn cut_adopts_the_lazy_successor_and_opens_one_only_when_none_gh2181() {
+        let _ = cut_rollover_fixture();
+    }
+
+    pub(crate) fn cut_rollover_fixture() -> (Task, Task) {
         let mut env = TestEnvGuard::temp_home();
         env.remove("CAS_ROOT");
         env.remove("CAS_SKIP_FAST_ROWS");
@@ -988,7 +992,15 @@ mod tests {
         git(repo, &["add", "work.txt"]);
         git(repo, &["commit", "-qm", "work"]);
         git(repo, &["checkout", "-q", "main"]);
-        git(repo, &["branch", "epic/lazy"]);
+        git(repo, &["checkout", "-qb", "epic/lazy"]);
+        std::fs::write(repo.join("successor.txt"), "successor\n").unwrap();
+        git(repo, &["add", "successor.txt"]);
+        git(repo, &["commit", "-qm", "successor work"]);
+        git(repo, &["checkout", "-qb", "factory/rollover-b0d1", "main"]);
+        std::fs::write(repo.join("worker.txt"), "worker\n").unwrap();
+        git(repo, &["add", "worker.txt"]);
+        git(repo, &["commit", "-qm", "parked worker"]);
+        git(repo, &["checkout", "-q", "main"]);
         git(repo, &["push", "-q", "origin", "epic/cut", "epic/lazy"]);
         let read_git = |checkout: &Path, args: &[&str]| {
             let output = Command::new("git").args(args).current_dir(checkout).output().unwrap();
@@ -1015,7 +1027,35 @@ mod tests {
         let successor = |id: &str| store.get(id).unwrap().labels.iter()
             .find_map(|label| label.strip_prefix(SUCCESSOR_LABEL).map(str::to_string));
 
+        let mut parked = Task::new("cas-b333".into(), "Parked worker delivery".into());
+        parked.origin_project = Some("train-fixture".into());
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.assignee = Some("rollover-b0d1".into());
+        parked.pending_worktree_merge = true;
+        parked.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:train-fixture".into(), target_branch: "epic/cut".into(),
+        });
+        parked.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: parked.deliverables.work_target.clone().unwrap(),
+            assignee: parked.assignee.clone().unwrap(), branch: "factory/rollover-b0d1".into(),
+            base_sha: tip("main"),
+        });
+        parked.deliverables.factory_branch_anchor = Some(tip("factory/rollover-b0d1"));
+        parked.deliverables.parked_branch = Some("factory/rollover-b0d1".into());
+        parked.notes = super::super::audit::parked_note(
+            chrono::Utc::now() - chrono::Duration::minutes(10), "MERGE REQUIRED",
+        );
+        store.create_atomic(&parked, &[], Some("cas-b111"), None).unwrap();
+        let parked = store.get(&parked.id).unwrap();
         mark_cut_trains(&cas_root, repo, store.as_ref(), "cas-b111", &tip("epic/cut"), "main", &[]).unwrap();
+        let rolled = store.get(&parked.id).unwrap();
+        assert_eq!(rolled.status, TaskStatus::Open);
+        assert_eq!(rolled.deliverables.work_target.as_ref().unwrap().target_branch, "epic/lazy");
+        assert_eq!(rolled.deliverables.factory_branch_start.as_ref().unwrap().work_target,
+            rolled.deliverables.work_target.clone().unwrap());
+        assert_eq!(rolled.assignee, parked.assignee);
+        assert_eq!(rolled.deliverables.factory_branch_anchor, parked.deliverables.factory_branch_anchor);
+        assert_eq!(rolled.deliverables.parked_branch, parked.deliverables.parked_branch);
         assert_eq!(successor("cas-b111").as_deref(), Some("cas-b222"));
         assert_eq!(trains().len(), 2);
 
@@ -1060,5 +1100,6 @@ mod tests {
         let refused = publish_train_branch(repo, "epic/unproved", "main").unwrap_err();
         assert!(refused.contains("[C-07]") && refused.contains("[H-38]"), "{refused}");
         assert!(!ref_exists(bare.path(), "refs/heads/epic/unproved"));
+        (parked, rolled)
     }
 }

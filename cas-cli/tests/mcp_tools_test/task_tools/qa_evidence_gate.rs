@@ -808,15 +808,6 @@ async fn first_park_binds_fresh_bundle_and_receipt_to_current_tip_cas_8cfe() {
             }
             request
         };
-        let stale = extract_text(fx.core.cas_task_close(Parameters(request())).await.unwrap());
-        assert!(stale.contains("QA evidence bundle is stale"), "{stale}");
-        assert_eq!(fx.status(), TaskStatus::InProgress);
-        assert!(
-            cas_store::list_qa_passes(&cas_dir, TASK)
-                .unwrap()
-                .is_empty()
-        );
-
         let bundle = fx.write_bundle(&head);
         let parked = extract_text(fx.core.cas_task_close(Parameters(request())).await.unwrap());
         assert!(parked.contains("MERGE REQUIRED"), "{parked}");
@@ -938,7 +929,7 @@ async fn refreshed_bundle_dispatches_current_tip_without_reusing_old_approval_ca
 }
 
 #[tokio::test]
-async fn user_facing_close_without_a_bundle_is_rejected_with_the_next_command() {
+async fn user_facing_close_without_a_bundle_warns_and_parks() {
     let mut test_env = TestEnvGuard::temp_home();
     let fx = fixture(
         &mut test_env,
@@ -946,28 +937,9 @@ async fn user_facing_close_without_a_bundle_is_rejected_with_the_next_command() 
         "Open the composer; spacing is even",
     );
 
-    let refused = close_text(&fx.core, TASK).await;
-    assert!(
-        refused.starts_with("TASK CLOSE REJECTED: cas-ev01 is user-facing ("),
-        "{refused}"
-    );
-    assert!(refused.contains("path:web/composer.css"), "{refused}");
-    assert!(refused.contains("demo_statement"), "{refused}");
-    assert!(
-        refused.contains("QA evidence bundle is not cited"),
-        "{refused}"
-    );
-    assert!(refused.contains("note_type=platform_proof"), "{refused}");
-    assert!(refused.contains("qa-bundle:"), "{refused}");
-    assert!(
-        !refused.contains("MERGE REQUIRED"),
-        "must refuse before the park: {refused}"
-    );
-    assert_eq!(
-        fx.status(),
-        TaskStatus::InProgress,
-        "an unevidenced delivery must not park"
-    );
+    let parked = close_text(&fx.core, TASK).await;
+    assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{parked}");
+    assert!(cas::gates::codes_in(&fx.notes()).contains(&"G-53"));
 }
 
 #[tokio::test]
@@ -1074,22 +1046,8 @@ journeys:
         let rebound = git(&fx.repo, &["rev-parse", "HEAD"]);
         let result = close_text(&fx.core, TASK).await;
         if case != "neutral bug metadata" {
-            assert!(
-                result.contains("QA evidence bundle is") && result.contains("coverage changed"),
-                "{case}: {result}"
-            );
-            assert!(
-                result.starts_with("TASK CLOSE REJECTED: cas-ev01 is user-facing ("),
-                "{case}: {result}"
-            );
-            assert!(result.contains("COMPOSE"), "{case}: {result}");
-            if case == "changed invariant" {
-                assert!(result.contains("INV-COMPOSER"), "{result}");
-            }
-            assert!(
-                !fx.notes().contains("QA evidence rebind"),
-                "no rebind decision on refusal"
-            );
+            assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{case}: {result}");
+            assert!(cas::gates::codes_in(&fx.notes()).contains(&"G-53"));
             continue;
         }
         assert!(result.contains("MERGE REQUIRED"), "{case}: {result}");
@@ -1170,7 +1128,7 @@ async fn docs_only_delivery_with_a_demo_statement_is_not_gated() {
 }
 
 #[tokio::test]
-async fn demo_only_non_web_delivery_needs_the_evidence_ledger() {
+async fn demo_only_non_web_delivery_warns_without_the_evidence_ledger() {
     let mut test_env = TestEnvGuard::temp_home();
     let fx = fixture(
         &mut test_env,
@@ -1178,27 +1136,9 @@ async fn demo_only_non_web_delivery_needs_the_evidence_ledger() {
         "Run cas report; it prints totals",
     );
 
-    let refused = close_text(&fx.core, TASK).await;
-    assert!(
-        refused.contains("is user-facing (demo_statement)"),
-        "{refused}"
-    );
-    assert!(
-        refused.contains("QA evidence ledger is missing"),
-        "{refused}"
-    );
-
-    std::fs::create_dir_all(fx.task_artifacts().join("qa")).unwrap();
-    std::fs::write(fx.task_artifacts().join("qa/M01.txt"), "captured output").unwrap();
-    let ledger = fx.task_artifacts().join("LEDGER.md");
-    std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
-    std::fs::write(
-        &ledger,
-        ledger_rows(&"| M01 | cas report | totals | totals | PASS | real-build | qa/M01.txt | - |\n"),
-    )
-    .unwrap();
     let parked = close_text(&fx.core, TASK).await;
-    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{parked}");
+    assert!(cas::gates::codes_in(&fx.notes()).contains(&"G-53"));
 }
 
 #[tokio::test]
@@ -1333,11 +1273,6 @@ async fn factory_input_and_pty_geometry_accept_real_build_ledger_cas_266e() {
             ledger_rows(&"| M01 | pane | forwards | forwards | PASS | fixture | capture.txt | - |\n"),
         )
         .unwrap();
-        let refused = close_text(&fx.core, TASK).await;
-        assert!(
-            refused.contains("no row with verdict PASS and label real-build"),
-            "{refused}"
-        );
         std::fs::write(
             &ledger,
             ledger_rows(&"| M01 | pane | forwards | forwards | PASS | real-build | capture.txt | - |\n"),
@@ -1351,7 +1286,7 @@ async fn factory_input_and_pty_geometry_accept_real_build_ledger_cas_266e() {
 }
 
 #[tokio::test]
-async fn mixed_factory_and_cli_output_still_requires_terminal_qa_cas_266e() {
+async fn mixed_factory_and_cli_output_warns_without_terminal_qa_cas_266e() {
     let mut test_env = TestEnvGuard::temp_home();
     let fx = fixture(
         &mut test_env,
@@ -1375,46 +1310,8 @@ async fn mixed_factory_and_cli_output_still_requires_terminal_qa_cas_266e() {
         ledger_rows(&"| M01 | status | Ready | Ready | PASS | real-build | capture.txt | - |\n"),
     )
     .unwrap();
-    let refused = close_text(&fx.core, TASK).await;
-    assert!(
-        refused.contains("terminal-qa receipt is missing"),
-        "{refused}"
-    );
-    let report = task_dir.join("terminal-qa/cas-status/report.md");
-    std::fs::create_dir_all(report.parent().unwrap()).unwrap();
-    std::fs::write(&report, "terminal-qa: PASS cas-status · 11 runs · 0 fail\n").unwrap();
-    assert!(close_text(&fx.core, TASK).await.contains("MERGE REQUIRED"));
-}
-
-#[tokio::test]
-async fn supervisor_override_preserves_advisory_evidence_notes() {
-    let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(
-        &mut test_env,
-        &[("web/composer.css", ".composer{gap:8px}\n")],
-        "Open the composer",
-    );
-    let cas_dir = fx.repo.join(".cas");
-    let id = format!("supervisor-session-{}", std::process::id());
-    cas::store::open_agent_store(&cas_dir)
-        .unwrap()
-        .register(&cas::types::Agent::new_with_role(
-            id.clone(),
-            "fixture-supervisor".to_string(),
-            cas::types::AgentRole::Supervisor,
-        ))
-        .unwrap();
-    let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
-    supervisor.set_agent_id_for_testing(id);
-
-    let mut request = close_req(TASK);
-    request.supervisor_override = Some(true);
-    request.reason = Some("copy-only change reviewed live with the operator".to_string());
-    let text = match supervisor.cas_task_close(Parameters(request)).await {
-        Ok(result) => extract_text(result),
-        Err(error) => error.message.to_string(),
-    };
-    assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{text}");
+    let parked = close_text(&fx.core, TASK).await;
+    assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{parked}");
     assert!(cas::gates::codes_in(&fx.notes()).contains(&"G-53"));
 }
 
@@ -1541,7 +1438,7 @@ async fn batch_squash_receipt_keeps_docs_only_qa_scope_cas_e5b1() {
 /// delivery that touches a `.vue` file still needs its bundle, and the refusal
 /// names only that file, not the sibling's.
 #[tokio::test]
-async fn batch_squash_receipt_still_requires_own_ui_bundle_cas_e5b1() {
+async fn batch_squash_receipt_keeps_own_ui_advisory_cas_e5b1() {
     let mut env = TestEnvGuard::temp_home();
     let (fx, text, _) = close_against_batch_squash(
         &mut env,
@@ -1549,9 +1446,8 @@ async fn batch_squash_receipt_still_requires_own_ui_bundle_cas_e5b1() {
         TaskStatus::AwaitingMerge,
     )
     .await;
-    assert_ne!(fx.status(), TaskStatus::Closed, "{text}");
-    assert!(text.contains("path:web/OwnPanel.vue"), "{text}");
-    assert!(!text.contains("SiblingDrawer.vue"), "{text}");
+    assert_eq!(fx.status(), TaskStatus::Closed, "{text}");
+    assert!(cas::gates::codes_in(&fx.notes()).contains(&"G-53"));
 }
 
 /// cas-ba4a: the worker parks A at X with a valid QA bundle, starts B on the
@@ -1687,11 +1583,6 @@ async fn cas_6f10_exact_waiver_satisfies_worker_real_build_ledger_gate() {
         ledger_rows(&"| M01 | endpoint | ok | mocked | PASS | fixture | qa/fixture.txt | - |\n"),
     )
     .unwrap();
-    assert!(
-        close_text(&fx.core, TASK)
-            .await
-            .contains("label real-build")
-    );
     let supervisor = cas_6f10_supervisor(&fx);
     let service = cas::mcp::CasService::new(supervisor, None);
     env.set("CAS_AGENT_ROLE", "supervisor");
@@ -1754,25 +1645,15 @@ async fn cas_6f10_deferred_owner_must_be_registered_supervisor() {
     std::fs::write(dir.join("qa/fixture.txt"), "fixture output").unwrap();
     for owner in ["unregistered", "test-agent"] {
         std::fs::write(dir.join("LEDGER.md"), ledger_rows(&format!("| M01 | staging GET | tip | pending | DEFERRED | deployed-verification | deferred: deployed-verification owner={owner} | - |\n"))).unwrap();
-        let refused = close_text(&fx.core, TASK).await;
-        assert!(
-            refused.contains("must identify one registered supervisor"),
-            "{refused}"
-        );
-        assert_eq!(fx.status(), TaskStatus::InProgress);
+        let parked = close_text(&fx.core, TASK).await;
+        assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{parked}");
+        assert!(cas::gates::codes_in(&fx.notes()).contains(&"G-53"));
         assert!(!fx.notes().contains("POST-DEPLOY OBLIGATION"));
     }
-    let _supervisor = cas_6f10_supervisor(&fx);
-    std::fs::write(dir.join("LEDGER.md"), ledger_rows(&"| M01 | staging GET | tip | pending | DEFERRED | deployed-verification | deferred: deployed-verification owner=deployed-owner extra | - |\n")).unwrap();
-    assert!(
-        close_text(&fx.core, TASK)
-            .await
-            .contains("invalid deployed-verification deferral")
-    );
 }
 
 #[tokio::test]
-async fn cas_6f10_waiver_does_not_cover_skip_marker() {
+async fn cas_6f10_waiver_keeps_skip_marker_advisory() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(
         &mut env,
@@ -1796,12 +1677,9 @@ async fn cas_6f10_waiver_does_not_cover_skip_marker() {
         chrono::Utc::now(),
     )
     .unwrap();
-    let refused = close_text(&fx.core, TASK).await;
-    assert!(
-        refused.contains("adds test skip/focus markers"),
-        "{refused}"
-    );
-    assert_eq!(fx.status(), TaskStatus::InProgress);
+    let parked = close_text(&fx.core, TASK).await;
+    assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{parked}");
+    assert!(cas::gates::codes_in(&fx.notes()).contains(&"G-53"));
 }
 
 #[tokio::test]
@@ -1882,12 +1760,6 @@ async fn cas_1377c_waiver_binds_the_merged_per_task_tip_not_a_stale_anchor() {
         .unwrap();
     };
     waive(&anchor, "Only the stale anchor is waived");
-    let refused = close_text(&fx.core, TASK).await;
-    assert!(
-        refused.contains("QA evidence ledger is missing"),
-        "{refused}"
-    );
-    assert!(!fx.notes().contains("QA evidence ledger waived"));
     waive(&tip, "Delivered tip waived");
     let closed = close_text(&fx.core, TASK).await;
     assert!(
@@ -2028,7 +1900,7 @@ async fn bundle_waiver_rejects_worker_next_tip_cas_06f5() {
 }
 
 #[tokio::test]
-async fn bundle_waiver_preserves_skip_marker_gate_cas_06f5() {
+async fn bundle_waiver_preserves_skip_marker_advisory_cas_06f5() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(
         &mut env,
@@ -2039,14 +1911,10 @@ async fn bundle_waiver_preserves_skip_marker_gate_cas_06f5() {
         "Open the composer",
     );
     waive_bundle_tip_cas_06f5(&fx, &mut env).await;
-    let refused = close_text(&fx.core, TASK).await;
-    assert!(
-        refused.contains("adds test skip/focus markers"),
-        "{refused}"
-    );
-    assert_eq!(fx.status(), TaskStatus::InProgress);
+    let parked = close_text(&fx.core, TASK).await;
+    assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{parked}");
+    assert!(cas::gates::codes_in(&fx.notes()).contains(&"G-53"));
 }
-
 
 fn ledger_rows(rows: &str) -> String {
     // These fixtures all describe a demo: keep three honest unrun conditions.

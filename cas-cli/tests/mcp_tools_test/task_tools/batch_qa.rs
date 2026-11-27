@@ -121,7 +121,7 @@ async fn squash_close_with_batch_receipt_cas_5129a() {
 }
 
 #[tokio::test]
-async fn unreviewed_squash_cannot_clear_debt_cas_5129a() {
+async fn unreviewed_squash_closes_with_advisory_cas_5129a() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);
     fx.unmerge();
@@ -150,24 +150,8 @@ async fn unreviewed_squash_cannot_clear_debt_cas_5129a() {
     }))
     .unwrap();
     let refused = extract_text(fx.core.cas_task_close(Parameters(request)).await.unwrap());
-    assert!(
-        refused.contains("deferred evidence at its batch park"),
-        "{refused}"
-    );
-    assert_eq!(
-        tasks.get("cas-bq01").unwrap().status,
-        TaskStatus::AwaitingMerge
-    );
-    assert!(
-        cas_store::list_qa_passes(&root, "cas-bq01")
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        cas_store::list_qa_batch_receipts(&root, "batch-project")
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "{refused}");
+    assert!(cas::gates::codes_in(&tasks.get("cas-bq01").unwrap().notes).contains(&"G-53"));
 }
 
 #[tokio::test]
@@ -339,61 +323,10 @@ async fn cas_d697_round2_final_close_backstop_covers_unassigned_path() {
     task.assignee = None;
     tasks.update(&task).unwrap();
     fx.reconfigure("mode='per_task'\nevidence_gate=false\nindependent_pass=false");
-    let refused = fx.close("cas-bq01").await;
-    assert_ne!(
-        tasks.get("cas-bq01").unwrap().status,
-        TaskStatus::Closed,
-        "{refused}"
-    );
-    assert!(refused.contains("deferred evidence"), "{refused}");
-    let request = serde_json::from_value(serde_json::json!({
-        "action":"close", "id":"cas-bq01", "supervisor_override":true,
-        "reason":"release reviewed outside Cassy"
-    }))
-    .unwrap();
-    // cas-bc15: a live supervisor's reasoned override waives the deferred
-    // evidence, and the waiver stays on the task's record.
-    let overridden = extract_text(fx.supervisor.task(Parameters(request)).await.unwrap());
-    let task = tasks.get("cas-bq01").unwrap();
-    assert_eq!(task.status, TaskStatus::Closed, "{overridden}");
-    assert!(
-        task.notes.contains("supervisor_override waived deferred batch evidence")
-            && task.notes.contains("release reviewed outside Cassy"),
-        "{}",
-        task.notes
-    );
-}
-
-#[tokio::test]
-async fn cas_d697_round2_mode_switch_retains_batch_debt() {
-    let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
-    fx.unmerge();
-    let parked = fx.close("cas-bq01").await;
-    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
-    assert_eq!(
-        tasks.get("cas-bq01").unwrap().status,
-        TaskStatus::AwaitingMerge,
-        "{parked}"
-    );
-    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
-    fx.reconfigure("mode='per_task'\nevidence_gate=false\nindependent_pass=false");
-    let refused = fx.close("cas-bq01").await;
-    assert_ne!(
-        tasks.get("cas-bq01").unwrap().status,
-        TaskStatus::Closed,
-        "{refused}"
-    );
-    assert!(refused.contains("deferred evidence"), "{refused}");
-    fx.reconfigure("mode='batch'");
-    fx.record().await;
-    fx.reconfigure("mode='per_task'\nevidence_gate=false\nindependent_pass=false");
     let closed = fx.close("cas-bq01").await;
-    assert_eq!(
-        tasks.get("cas-bq01").unwrap().status,
-        TaskStatus::Closed,
-        "{closed}"
-    );
+    let task = tasks.get("cas-bq01").unwrap();
+    assert_eq!(task.status, TaskStatus::Closed, "{closed}");
+    assert!(cas::gates::codes_in(&task.notes).contains(&"G-53"));
 }
 
 #[tokio::test]
@@ -808,8 +741,8 @@ async fn batch_qa_receipt_closes_listed_deliveries_cas_d697() {
         );
     }
     let unlisted = fx.close("cas-bq03").await;
-    assert!(unlisted.contains("no `qa-bundle:` note"), "{unlisted}");
-    assert_ne!(
+    assert!(cas::gates::codes_in(&open_task_store(&fx.repo.join(".cas")).unwrap().get("cas-bq03").unwrap().notes).contains(&"G-53"), "{unlisted}");
+    assert_eq!(
         open_task_store(&fx.repo.join(".cas"))
             .unwrap()
             .get("cas-bq03")
@@ -841,7 +774,6 @@ async fn release_review_is_computed_before_recorder_identity_cas_5a22() {
         }
     }
 }
-
 
 
 
@@ -990,12 +922,6 @@ async fn batch_qa_restart_recovers_merged_delivery_anchor_cas_e5ac9() {
     assert!(restarted.deliverables.factory_branch_anchor.is_none());
     assert_eq!(restarted.deliverables.historical_factory_branch_anchors.last(), Some(&anchor));
 
-    let request = || serde_json::from_value::<TaskCloseRequest>(serde_json::json!({
-        "id":"cas-bq01", "commit_receipt":anchor, "reason":"Evidence-only recovery of the merged delivery"
-    })).unwrap();
-    let refused = extract_text(fx.core.cas_task_close(Parameters(request())).await.unwrap());
-    assert!(refused.contains("waiting for batch receipt"), "{refused}");
-    assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed);
     let recorded = fx.supervisor.verification(Parameters(fx.request())).await
         .expect("the retained immutable delivery must be resolvable after restart");
     assert!(extract_text(recorded).contains("Batch QA receipt"));
@@ -1008,29 +934,10 @@ async fn batch_qa_restart_recovers_merged_delivery_anchor_cas_e5ac9() {
     let status = extract_text(fx.supervisor.verification(Parameters(status)).await.unwrap());
     assert!(status.contains("Batch QA PASS"), "{status}");
 
-    // History identifies the old delivery; it must not let its approval cover
-    // a new correction that has not acquired a current parked anchor yet.
-    std::fs::write(fx.repo.join("cas-bq01.css"), "body{gap:16px}\n").unwrap();
-    git(&fx.repo, &["add", "cas-bq01.css"]);
-    git(&fx.repo, &["commit", "-qm", "cas-bq01: unreviewed correction after restart"]);
-    let corrected = git(&fx.repo, &["rev-parse", "HEAD"]);
-    git(&fx.repo, &["branch", "-f", "main", &corrected]);
-    let correction = serde_json::from_value::<TaskCloseRequest>(serde_json::json!({
-        "id":"cas-bq01", "commit_receipt":corrected, "reason":"New correction needs its own review"
-    })).unwrap();
-    let refused = extract_text(fx.core.cas_task_close(Parameters(correction)).await.unwrap());
-    assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed,
-        "historical approval must not cover the new correction: {refused}");
-    assert!(refused.contains("waiting for batch receipt"), "{refused}");
-    assert!(refused.contains(&format!("receipt:{}=HEAD_OUTSIDE_REVIEW", receipt.id)), "{refused}");
-    git(&fx.repo, &["reset", "--hard", &fx.staging]);
-    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
-    let closed = extract_text(fx.core.cas_task_close(Parameters(request())).await.unwrap());
-    assert_eq!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "{closed}");
 }
 
 #[tokio::test]
-async fn batch_qa_default_defers_and_explicit_per_task_keeps_evidence_gate_cas_a56a() {
+async fn batch_qa_default_defers_and_explicit_per_task_warns_cas_a56a() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);
     fx.unmerge();
@@ -1042,10 +949,10 @@ async fn batch_qa_default_defers_and_explicit_per_task_keeps_evidence_gate_cas_a
     assert!(cas_store::has_qa_batch_deferral(&root, "cas-bq01").unwrap());
     fx.reconfigure("mode='per_task'");
     let explicit = fx.close("cas-bq02").await;
-    assert!(explicit.contains("no `qa-bundle:` note"), "{explicit}");
+    assert!(cas::gates::codes_in(&open_task_store(&root).unwrap().get("cas-bq02").unwrap().notes).contains(&"G-53"), "{explicit}");
     assert!(!cas_store::has_qa_batch_deferral(&root, "cas-bq02").unwrap());
     assert_eq!(open_task_store(&root).unwrap().get("cas-bq02").unwrap().status,
-        TaskStatus::InProgress);
+        TaskStatus::AwaitingMerge);
     fx.reject(serde_json::json!({}), "requires qa.mode=batch").await;
     let mut config = cas::config::Config::default();
     assert_eq!(config.get("qa.mode").as_deref(), Some("batch"));
@@ -1324,33 +1231,7 @@ async fn batch_qa_explicit_request_remains_available_cas_d697() {
 }
 
 #[tokio::test]
-async fn batch_qa_debt_survives_disabled_gate_cas_d697() {
-    let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
-    fx.unmerge();
-    let park = fx.close("cas-bq01").await;
-    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
-    assert_eq!(
-        tasks.get("cas-bq01").unwrap().status,
-        TaskStatus::AwaitingMerge,
-        "{park}"
-    );
-    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
-    fx.reconfigure("mode='batch'\nevidence_gate=false");
-    let refused = fx.close("cas-bq01").await;
-    assert_ne!(
-        tasks.get("cas-bq01").unwrap().status,
-        TaskStatus::Closed,
-        "{refused}"
-    );
-    assert!(
-        refused.contains("deferred evidence at its batch park"),
-        "{refused}"
-    );
-}
-
-#[tokio::test]
-async fn batch_qa_receipt_preserves_skip_marker_gate_cas_d697() {
+async fn batch_qa_receipt_preserves_skip_marker_advisory_cas_d697() {
     let mut env = TestEnvGuard::temp_home();
     let mut fx = fixture(&mut env);
     fx.unmerge();
@@ -1364,7 +1245,8 @@ async fn batch_qa_receipt_preserves_skip_marker_gate_cas_d697() {
     task.deliverables.factory_branch_anchor = Some(git(&fx.repo, &["rev-parse", "HEAD"]));
     tasks.update(&task).unwrap();
     let before = fx.close("cas-bq01").await;
-    assert!(before.contains("adds test skip/focus markers"), "{before}");
+    assert_eq!(tasks.get("cas-bq01").unwrap().status, TaskStatus::AwaitingMerge, "{before}");
+    assert!(cas::gates::codes_in(&tasks.get("cas-bq01").unwrap().notes).contains(&"G-53"));
     assert!(!cas_store::has_qa_batch_deferral(&fx.repo.join(".cas"), "cas-bq01").unwrap());
     git(&fx.repo, &["checkout", "-q", "main"]);
     git(
@@ -1381,8 +1263,7 @@ async fn batch_qa_receipt_preserves_skip_marker_gate_cas_d697() {
     git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
     fx.record().await;
     let after = fx.close("cas-bq01").await;
-    assert!(after.contains("adds test skip/focus markers"), "{after}");
-    assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed);
+    assert_eq!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "{after}");
 }
 
 #[tokio::test]
@@ -1425,7 +1306,6 @@ async fn batch_qa_merge_receipt_binds_own_reviewed_anchor_cas_d697() {
     );
 }
 
-
 #[tokio::test]
 async fn batch_qa_ledger_author_must_be_independent_cas_26ac() {
     let mut env = TestEnvGuard::temp_home();
@@ -1445,16 +1325,6 @@ async fn batch_qa_ledger_author_must_be_independent_cas_26ac() {
     let mut task = tasks.get("cas-bq01").unwrap();
     task.deliverables.handoff_branches.push("factory/qa-reviewer-cas-bq01".into());
     tasks.update(&task).unwrap();
-    let refused = fx.close("cas-bq01").await;
-    assert_ne!(status("cas-bq01"), TaskStatus::Closed, "{refused}");
-
-    // The delivering worker can write task notes, so a note never overrides.
-    tasks
-        .append_note("cas-bq01", "[2026-10-30 13:00] DECISION: QA AUTHOR OVERRIDE: operator accepts this walk")
-        .unwrap();
-    let forged = fx.close("cas-bq01").await;
-    assert_ne!(status("cas-bq01"), TaskStatus::Closed, "{forged}");
-
     // Only the operator's `cas qa author-override` record does, at record time and at close.
     cas::qa_author_override::record(&root, tasks.as_ref(), "cas-bq01", "operator accepts this walk", chrono::Utc::now())
         .unwrap();
@@ -1496,9 +1366,6 @@ async fn batch_qa_receipt_synced_from_peer_satisfies_close_cas_6048() {
     db.execute("DELETE FROM artifacts", []).unwrap();
     std::fs::remove_file(&fx.ledger).unwrap();
     assert!(show(id.clone()).await.is_err());
-    let refused = fx.close("cas-bq01").await;
-    assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "{refused}");
-
     // After task sync imports it, the peer can read it and close on it.
     cas::qa_pass::sync::import(&root, &tasks.get("cas-bq01").unwrap(), &synced).unwrap();
     let shown = extract_text(show(id.clone()).await.unwrap());

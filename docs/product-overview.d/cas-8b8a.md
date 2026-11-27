@@ -1,3 +1,7 @@
+## Core Concepts
+
+### Recorded factory windows
+
 `cas scorecard --since <RFC3339> --until <RFC3339>` (also `cas ledger report`)
 reads recorded local facts for `[since, until)`. Both bounds are required and
 cannot be combined with `--release`. Explicit windows make no Cloud or GitHub

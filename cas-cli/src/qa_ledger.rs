@@ -562,7 +562,7 @@ pub(crate) fn check_visual_capture(
     })
 }
 
-fn capture_matches(path: &Path, sha256: &str) -> bool {
+pub(crate) fn capture_matches(path: &Path, sha256: &str) -> bool {
     use std::io::{Cursor, Read};
 
     const LIMIT: usize = 25 * 1024 * 1024;

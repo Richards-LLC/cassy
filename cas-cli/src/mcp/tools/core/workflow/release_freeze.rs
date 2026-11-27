@@ -933,7 +933,7 @@ mod tests {
         repair.status = cas_types::TaskStatus::Closed;
         store.update(&repair).unwrap();
         let tip = git(repo, &["rev-parse", lane]);
-        let poll = |tip: &str| attempt(&root, &store.get("cas-tr").unwrap(), lane, tip, false, false, Utc::now()).unwrap();
+        let poll = |tip: &str| attempt(&root, &store.get("cas-tr").unwrap(), lane, tip, false, false, Utc::now(), false).unwrap();
 
         assert!(matches!(poll(&tip), Outcome::Handled));
         assert!(check_merge(&root, lane, Some("cas-feat")).is_err(), "auto-cut froze the train");

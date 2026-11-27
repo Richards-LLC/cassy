@@ -268,7 +268,7 @@ pub(crate) const VERIFIER_FACTORY_STORE_BUDGET: std::time::Duration = std::time:
 pub(crate) mod cycle;
 pub(crate) use peer::legacy_peer_approval;
 
-const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
+pub(crate) const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
 
 fn proof_candidate_key(proof: &RepositoryProofBoundary) -> Result<Option<String>, String> {
     let message = git(
@@ -316,7 +316,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// Build the tree the merge will ship, including repository-owned regeneration.
-fn regenerated_merge_tree(repo: &Path, target: &str, source: &str) -> Result<String, String> {
+pub(crate) fn regenerated_merge_tree(repo: &Path, target: &str, source: &str) -> Result<String, String> {
     let merged = git(repo, &["merge-tree", "--write-tree", target, source])?;
     let tree = merged.lines().next().ok_or("merge candidate tree missing")?;
     if git(
@@ -1634,6 +1634,12 @@ impl CasCore {
         Ok(candidate)
     }
 
+    pub(super) fn build_verification_candidate_for_batch(
+        &self, task: &Task, repo: &Path, source: &str, target: &str,
+    ) -> Result<Candidate, McpError> {
+        self.build_verification_candidate(task, repo, source, target, context_digest(&self.cas_root, task).map_err(fail)?, None)
+    }
+
     fn build_verification_candidate(
         &self,
         task: &Task,
@@ -2232,6 +2238,73 @@ mod tests {
             core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").unwrap_err();
             assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().verifier_agent_id.as_deref(), Some(replacement.id.as_str()));
         }
+    }
+
+    #[tokio::test]
+    async fn carried_review_uses_the_live_production_qa_candidate() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        run(repo, &["config", "user.name", "Fixture"]);
+        run(repo, &["config", "user.email", "fixture@example.invalid"]);
+        let base = commit_file(repo, ".gitignore", ".cas/\n", "base");
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("CAS_CLONE_PATH", repo);
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='carry-production'\n[verification]\nenabled=true\n").unwrap();
+        let branch = "factory/worker";
+        let checkout = root.join("worktrees/worker");
+        run(repo, &["worktree", "add", "-qb", branch, checkout.to_str().unwrap(), "main"]);
+        let source = commit_file(&checkout, "index.html", "<h1>Delivery</h1>\n", "delivery");
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let agents = core.open_agent_store().unwrap();
+        let owner = cas_types::Agent::new_with_role("owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+        agents.register(&owner).unwrap();
+        core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+        let mut worker = cas_types::Agent::new_with_role("worker".into(), "worker".into(), cas_types::AgentRole::Worker);
+        worker.metadata.insert("clone_path".into(), checkout.to_string_lossy().into_owned());
+        agents.register(&worker).unwrap();
+        let mut task = Task::new("cas-cafe".into(), "Rendered delivery".into());
+        task.origin_project = Some("carry-production".into());
+        task.depth = cas_types::TaskDepth::Deep;
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.assignee = Some(worker.name);
+        task.delivery_mode = cas_types::DeliveryMode::LocalMerge;
+        let target = cas_types::WorkTarget { repo_selector: "project:carry-production".into(), target_branch: "main".into() };
+        task.deliverables.work_target = Some(target.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: target, assignee: "worker".into(), branch: branch.into(), base_sha: base.clone(),
+        });
+        task.deliverables.record_park(Some(branch), Some(&source), Some("worker"));
+        core.open_task_store().unwrap().add(&task).unwrap();
+        cas_store::defer_qa_batch_evidence(&root, &task.id, &source).unwrap();
+        let held = core.prepare_premerge_verification(&task, repo, branch, "main").unwrap_err();
+        let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap()
+            .unwrap_or_else(|| panic!("verification was not dispatched: {held:?}"));
+        let initial = candidate_for_dispatch(&root, &dispatch).unwrap().unwrap();
+        rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
+            "UPDATE verification_dispatches SET deadline_at = ?2 WHERE id = ?1",
+            rusqlite::params![dispatch.id, (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()],
+        ).unwrap();
+        cas_store::timeout_verification_dispatch(&root, &task.id, chrono::Utc::now()).unwrap().unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "task_id": task.id, "dispatch_id": dispatch.id, "status": "approved",
+            "summary": "Reviewed the exact candidate", "issues": "[]",
+        })).unwrap();
+        let approved = core.cas_verification_add(rmcp::handler::server::wrapper::Parameters(request)).await.unwrap();
+        assert_ne!(approved.is_error, Some(true), "{approved:?}");
+        run(repo, &["commit", "--allow-empty", "-qm", "advance production"]);
+        let moved = run(repo, &["rev-parse", "main"]);
+        let fresh = core.build_verification_candidate_for_batch(&task, repo, branch, "main").unwrap();
+        assert_ne!(fresh.proof.head_commit, initial.proof.head_commit);
+        assert_eq!(fresh.target_sha, moved);
+        let refused = core.worktree_merge(branch, false, Some(&task.id), true, Some(false), false, None).await.unwrap_err();
+        let mut fields = refused.message.split_ascii_whitespace();
+        assert_eq!(fields.next(), Some("PRODUCTION_BATCH_QA_REQUIRED"), "{refused:?}");
+        assert_eq!(fields.next().and_then(|field| field.strip_prefix("candidate_sha=")), Some(fresh.proof.head_commit.as_str()));
     }
 
     #[test]

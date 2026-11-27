@@ -22,6 +22,8 @@ fn receipt_marker(receipt: &QaBatchReceipt) -> &'static str {
 pub(crate) struct Snapshot {
     pass: QaPass,
     changed_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    production_candidate: Option<cas_store::ProductionCandidate>,
 }
 
 pub(crate) fn record(cas_root: &Path, task_id: &str) -> anyhow::Result<()> {
@@ -46,6 +48,7 @@ pub(crate) fn record(cas_root: &Path, task_id: &str) -> anyhow::Result<()> {
         let snapshot = Snapshot {
             pass,
             changed_at: Utc::now(),
+            production_candidate: None,
         };
         store.append_trusted_note(
             task_id,
@@ -53,6 +56,30 @@ pub(crate) fn record(cas_root: &Path, task_id: &str) -> anyhow::Result<()> {
         )?;
     }
     Ok(())
+}
+
+pub(crate) fn record_production_waiver(
+    root: &Path, pass: &QaPass, candidate: cas_store::ProductionCandidate,
+) -> anyhow::Result<()> {
+    let snapshot = Snapshot { pass: pass.clone(), changed_at: Utc::now(), production_candidate: Some(candidate) };
+    crate::store::open_task_store(root)?.append_trusted_note(&pass.task_id, &format!("{MARKER}{}", serde_json::to_string(&snapshot)?))?;
+    Ok(())
+}
+
+pub(crate) fn has_production_waiver(root: &Path, id: &str, candidate: &cas_store::ProductionCandidate) -> Result<bool, String> {
+    let passes = cas_store::list_qa_passes(root, id).map_err(|error| error.to_string())?;
+    if passes.is_empty() { return Ok(false); }
+    let store = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
+    let task = store.get(id).map_err(|error| error.to_string())?;
+    Ok(snapshots(&task.notes, id).into_iter().any(|snapshot| {
+        snapshot.production_candidate.as_ref() == Some(candidate) && passes.iter().any(|pass| {
+            pass == &snapshot.pass
+                && pass.bound_head == candidate.source_sha
+                && pass.state == cas_types::QaPassState::Waived
+                && pass.issuer_agent_id.as_deref().is_some_and(|issuer| !issuer.trim().is_empty())
+                && pass.summary.as_deref().is_some_and(|reason| !reason.trim().is_empty())
+        })
+    }))
 }
 
 /// Publish a freshly recorded batch receipt on each task it lists, so a peer

@@ -95,6 +95,13 @@ case "$1 $2" in
        review_missing:held("REVIEW_MISSING"),lane_ci_missing:held("LANE_CI_MISSING"),members_by_id:$m}' ;;
   "qa candidate")
     case "$3" in build) ;; path) printf '%s\n' "$(dirname "$0")/cas-candidate" ;; *) exit 2 ;; esac ;;
+  "qa admit-production")
+    [[ "${FAKE_OLD_ADMIT:-0}" == 0 || ( "$(basename "$0")" == cas-candidate && "${FAKE_OLD_CANDIDATE:-0}" == 0 ) ]] || exit 2
+    [[ "$3" == --help ]] && exit 0
+    printf 'admission-cli=%s\n' "$(basename "$0")" >>"$FAKE_CAS_LOG"
+    [[ "${FAKE_ADMIT_EXIT:-0}" == 0 ]] || echo PRODUCTION_BATCH_QA_REQUIRED >&2
+    exit "${FAKE_ADMIT_EXIT:-0}" ;;
+  "config get") printf '%s' "${FAKE_EPIC_BASE:-}" ;;
   "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
   # The installed CLI predates `release refused`; the cut's candidate has it (GH #2027).
   "release refused")
@@ -582,6 +589,31 @@ status=0
 (cd "$epic" && FAKE_PR_STATE_JSON="$tmp/not-enqueued.json" ./scripts/release.sh --no-watch) >"$tmp/not-enqueued.err" 2>&1 || status=$?
 check '[[ "$status" == 3 ]]' 'cas-61e0: a missing enqueue is reported immediately after admission'
 
+refused_production_enqueue() {
+    local armed="$1" status=0
+    rm -f "$FAKE_GH_STATE/admitted"
+    [[ "$armed" == false ]] || touch "$FAKE_GH_STATE/admitted"
+    : >"$FAKE_GH_LOG"; : >"$FAKE_CAS_LOG"
+    (cd "$epic" && FAKE_OLD_ADMIT=1 FAKE_ADMIT_EXIT=42 ./scripts/release.sh --no-watch) >"$tmp/production-admit.err" 2>&1 || status=$?
+    [[ "$status" != 0 ]] && grep -qx 'admission-cli=cas-candidate' "$FAKE_CAS_LOG" &&
+        grep -qx PRODUCTION_BATCH_QA_REQUIRED "$tmp/production-admit.err" && ! grep -q '^pr merge' "$FAKE_GH_LOG"
+}
+check 'refused_production_enqueue false' 'a candidate refusal blocks enqueue with an older installed CLI'
+check 'refused_production_enqueue true' 'an already queued PR still runs exact production admission'
+legacy_admission() {
+    local target="$1" status=0
+    rm -f "$FAKE_GH_STATE/admitted"
+    : >"$FAKE_GH_LOG"
+    (cd "$epic" && FAKE_OLD_ADMIT=1 FAKE_OLD_CANDIDATE=1 FAKE_EPIC_BASE="$target" ./scripts/release.sh --no-watch) >"$tmp/legacy-admit.err" 2>&1 || status=$?
+    if [[ "$target" == staging ]]; then
+        [[ "$status" == 0 ]] && grep -q '^pr merge' "$FAKE_GH_LOG"
+    else
+        [[ "$status" != 0 ]] && grep -q '^PRODUCTION_BATCH_QA_CLI_REQUIRED ' "$tmp/legacy-admit.err" && ! grep -q '^pr merge' "$FAKE_GH_LOG"
+    fi
+}
+check 'legacy_admission main' 'a direct production cut with members refuses two older CLIs'
+check 'legacy_admission staging' 'a staging project retains compatibility with the older installed CLI'
+
 # cas-d637: replay a release beside other queued PRs. Never enable admission
 # when GitHub can batch the release, skip per-entry checks, or hide its config.
 for config in '{"maximumEntriesToMerge":5,"mergingStrategy":"ALLGREEN"}' '{"maximumEntriesToMerge":1,"mergingStrategy":"HEADGREEN"}' null; do
@@ -598,7 +630,7 @@ hotfix_fallback() {
     clone_epic "$fixture" "release/v9.99.1-$mode" "hotfix-$mode"
     mkdir -p "$tmp/state-$mode"
     write_valid_draft "$tmp/hotfix-$mode.md"
-    FAKE_CONTEXT_MODE="$mode" FAKE_TRACK_EXIT="${2:-0}" FAKE_GH_STATE="$tmp/state-$mode" FAKE_CAS_LOG="$tmp/hotfix-$mode-cas.log" \
+    FAKE_CONTEXT_MODE="$mode" FAKE_TRACK_EXIT="${2:-0}" FAKE_OLD_ADMIT=1 FAKE_GH_STATE="$tmp/state-$mode" FAKE_CAS_LOG="$tmp/hotfix-$mode-cas.log" \
         run "$fixture" --hotfix --base main --no-watch --notes "$tmp/hotfix-$mode.md" >"$tmp/hotfix-$mode.log" 2>&1 || status=$?
     [[ "$status" == 0 && "$(git -C "$tmp/origin.git" rev-parse "refs/heads/release/v9.99.1-$mode" 2>/dev/null)" == "$(git -C "$fixture" rev-parse HEAD)" ]] &&
         ! grep -Eq '^(qa candidate|release preview) ' "$tmp/hotfix-$mode-cas.log" &&

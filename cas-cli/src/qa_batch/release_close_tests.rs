@@ -628,6 +628,7 @@ fn published_train_closes_members_independently_cas_734b() {
         staging_sha: anchor.clone(), task_heads: ["cas-report"].into_iter().map(|id| (id.into(), anchor.clone())).collect(),
         recorder_agent_id: "supervisor".into(), recorded_at: "2026-11-11T00:00:00Z".into(),
         release_tag: None, ledger_author_id: Some("reviewer".into()), ledger_author_role: Some("sub_agent".into()),
+        production_candidate: None,
         author_overrides: BTreeMap::new(), imported: true,
     };
     cas_store::import_qa_batch_receipt(&root, &receipt).unwrap();

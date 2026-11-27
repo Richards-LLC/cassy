@@ -9838,7 +9838,10 @@ mod cas_6b42_peer_delivery_tests {
 
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
         env.set("CAS_ROOT", &cas_dir);
-        std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id='cas-src'\n").unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[project]\ncanonical_id='cas-src'\n[verification]\nenabled=false\n[qa]\nindependent_pass=false\n",
+        ).unwrap();
         let agents = crate::store::open_agent_store(&cas_dir).unwrap();
         agents.register(&cas_types::Agent::new_with_role(
             "sup-soundwave".into(), "calm-koala-86".into(), cas_types::AgentRole::Supervisor,
@@ -9997,6 +10000,42 @@ mod cas_6b42_peer_delivery_tests {
         assert!(refused.message.contains("[G-96]"));
         assert_eq!(git(&repo, &["rev-parse", branch]), local);
         assert_eq!(git(&repo, &["rev-parse", &format!("origin/{branch}")]), peer);
+
+        if !team {
+            let checkout = dir.path().join("worker-checkout");
+            let worktrees = crate::store::open_worktree_store(&cas_dir).unwrap();
+            worktrees.add(&cas_types::Worktree::new(
+                "peer-row".into(), branch.into(), "main".into(), checkout.clone(),
+            )).unwrap();
+            let merge = || core.worktree_merge(branch, false, Some(&task.id), false, None, false, None);
+            let target_before = git(&repo, &["rev-parse", "main"]);
+            git(&repo, &["worktree", "add", "-q", checkout.to_str().unwrap(), branch]);
+            let private = merge().await.expect_err("a live checkout with unpublished work must refuse");
+            assert!(private.message.contains("[G-97]"), "{private:?}");
+            assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), local);
+            git(&repo, &["worktree", "remove", checkout.to_str().unwrap()]);
+            git(&repo, &["branch", "-D", branch]);
+
+            std::fs::write(publisher.join("startup.rs"), "unparked remote change\n").unwrap();
+            git(&publisher, &["commit", "-qam", "unparked remote change"]);
+            git(&publisher, &["push", "-q", "origin", branch]);
+            let moved = merge().await.expect_err("a moved origin ref must refuse");
+            git(&publisher, &["push", "-q", "origin", "--delete", branch]);
+            let missing = merge().await.expect_err("a missing origin ref must refuse");
+            assert_eq!(git(&repo, &["rev-parse", "main"]), target_before);
+            assert_eq!(git(&origin, &["rev-parse", "main"]), target_before);
+            assert_eq!(git(&repo, &["branch", "--list", branch]), "");
+            assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(peer.as_str()));
+
+            git(&publisher, &["push", "-q", "origin", &format!("{peer}:refs/heads/{branch}")]);
+            merge().await.expect("the stale row must not hide the exact parked origin delivery");
+            assert_eq!(git(&origin, &["merge-base", "main", &peer]), peer);
+            git(&origin, &["diff", "--exit-code", &peer, "main"]);
+            assert!(!checkout.exists());
+            assert_eq!(worktrees.get("peer-row").unwrap().status, cas_types::WorktreeStatus::Active);
+            assert!(moved.message.contains("[G-96]"), "{moved:?}");
+            assert!(missing.message.contains("[G-96]"), "{missing:?}");
+        }
         }
     }
 

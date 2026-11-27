@@ -310,7 +310,7 @@ pub(super) struct ReleaseContext {
     pub(super) repository: String,
     branch: String,
     integration: String,
-    release_commit: Option<String>,
+    pub(super) release_commit: Option<String>,
     first_child_commit: Option<String>,
     first_child_epoch: Option<i64>,
     landing_reminder: Option<i64>,

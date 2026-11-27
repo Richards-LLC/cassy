@@ -123,7 +123,10 @@ pub(crate) fn reconcile_once(
 ) -> Result<String> {
     let tree = release_reconcile::final_tree(repo, &scope.final_release_sha).map_err(anyhow::Error::msg)?;
     let key = operation_key(&scope.project_id, &scope.release_id, &tree);
-    let recorded = reconciler.reusable(root, &key, &trigger)?;
+    // A settled partial resumes only when its review or proof binding changed;
+    // resume still refuses any other change to the release identity.
+    let recorded = reconciler.reusable(root, &key, &trigger)?.filter(|receipt| receipt.complete
+        || (receipt.scope.reviewed_sha == scope.reviewed_sha && receipt.scope.proof_refs == scope.proof_refs));
     let reused = recorded.is_some();
     let receipt = match recorded {
         Some(receipt) => receipt,
@@ -239,6 +242,33 @@ fn reviewed_proofs(root: &Path, repo: &Path, project: &str, final_sha: &str, aud
     Ok((reviewed, proofs))
 }
 
+/// The candidate a cut audit reviewed, or None when it does not identify the
+/// tag. The tag ships the release commit directly or as a two-parent merge
+/// with its exact tree; the audit names that commit or its first parent, as
+/// `release track` required. An audit of the release commit itself reviewed
+/// its single parent only when that parent is the train's recorded freeze tip.
+fn audited_candidate(root: &Path, repo: &Path, train_id: &str, release: &str, tag_sha: &str, checked: &str) -> Option<String> {
+    use cas_store::TaskStore;
+    let parents = |sha: &str| git(repo, &["rev-list", "--parents", "-n", "1", sha]).ok()
+        .map(|line| line.split_whitespace().skip(1).map(str::to_owned).collect::<Vec<_>>());
+    let tree = |sha: &str| git(repo, &["rev-parse", &format!("{sha}^{{tree}}")]).ok();
+    let shipped = release == tag_sha || {
+        let merge = parents(tag_sha)?;
+        merge.len() == 2 && merge.iter().any(|parent| parent == release) && tree(tag_sha)? == tree(release)?
+    };
+    let release_parents = parents(release).filter(|_| shipped)?;
+    if checked != release {
+        return (release_parents.first().map(String::as_str) == Some(checked)).then(|| checked.to_string());
+    }
+    let freeze = crate::qa_batch::release_close::read_tasks(root).ok()
+        .and_then(|tasks| tasks.get(train_id).ok())
+        .and_then(|train| crate::mcp::tools::core::workflow::release_freeze::recorded(&train));
+    Some(match release_parents.as_slice() {
+        [parent] if freeze.is_some_and(|freeze| &freeze.tip == parent) => parent.clone(),
+        _ => checked.to_string(),
+    })
+}
+
 /// A published tag's scope: the tracked cut receipt's when present, else the
 /// train, its tracked inputs and the reviewed candidate the tag contains.
 pub(super) fn tag_scope(
@@ -258,10 +288,15 @@ pub(super) fn tag_scope(
             .context("release has no GitHub origin")?,
     };
     let audit = cut_audit.or_else(|| context.and_then(|c| c.release_inputs.as_ref()));
-    let audited_sha = audit.map(|audit| audit.checked_sha.as_str()).filter(|checked| {
-        *checked == tag_sha || git(repo, &["rev-parse", &format!("{tag_sha}^1")]).ok().as_deref() == Some(*checked)
-    });
-    let (reviewed_sha, proof_refs) = reviewed_proofs(root, repo, &project_id, tag_sha, audited_sha)?;
+    let release = context.and_then(|c| c.release_commit.as_deref()).unwrap_or(tag_sha);
+    let (reviewed_sha, proof_refs) = match audit {
+        None => reviewed_proofs(root, repo, &project_id, tag_sha, None)?,
+        Some(audit) => match audited_candidate(root, repo, train_id, release, tag_sha, &audit.checked_sha) {
+            Some(reviewed) => reviewed_proofs(root, repo, &project_id, tag_sha, Some(&reviewed))?,
+            // An audit that does not identify this tag proves nothing at it.
+            None => (tag_sha.to_string(), Vec::new()),
+        },
+    };
     let included_task_ids = audit
         .map(|inputs| inputs.included_task_ids.clone())
         .unwrap_or_default();

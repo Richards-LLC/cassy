@@ -89,7 +89,11 @@ pub(super) fn apply_claude(config: &mut PtyConfig, account: &Path, cwd: &Path) {
         .collect();
 
     let Some(flag) = config.args.iter().position(|arg| arg == "--settings") else {
-        let settings = serde_json::json!({ "skillOverrides": overrides });
+        let settings = serde_json::json!({
+            "skillOverrides": overrides,
+            "autoMemoryEnabled": false,
+            "claudeMdExcludes": ["**/skills/exa-search/**"],
+        });
         config.args.extend(["--settings".to_string(), settings.to_string()]);
         return;
     };
@@ -100,6 +104,13 @@ pub(super) fn apply_claude(config: &mut PtyConfig, account: &Path, cwd: &Path) {
     match parsed {
         Ok(Value::Object(mut settings)) => {
             settings.insert("skillOverrides".into(), Value::Object(overrides));
+            settings.insert("autoMemoryEnabled".into(), Value::Bool(false));
+            if let Value::Array(excludes) = settings
+                .entry("claudeMdExcludes")
+                .or_insert_with(|| serde_json::json!([]))
+            {
+                excludes.push(Value::String("**/skills/exa-search/**".into()));
+            }
             config.args[flag + 1] = Value::Object(settings).to_string();
         }
         Ok(_) => tracing::warn!(path, "worker settings are not an object; full skill listing kept"),
@@ -293,6 +304,22 @@ mod tests {
         for setting in ["features.apps=false", "features.plugins=false", "features.memories=false"] {
             assert!(codex.args.windows(2).any(|pair| pair == ["-c", setting]), "{setting}");
         }
+        for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+            let supervisor = cli.backend().build_supervisor_config(SupervisorLaunchConfig {
+                name: "sup",
+                cwd: dir.path().to_path_buf(),
+                cas_root: None,
+                worker_cli: cli,
+                worker_names: &[],
+                model: None,
+                effort: None,
+                teams: None,
+            });
+            for setting in ["features.apps=false", "features.plugins=false", "features.memories=false", "skills.include_instructions=false"] {
+                assert!(!supervisor.args.iter().any(|arg| arg == setting));
+            }
+            assert!(!supervisor.args.iter().any(|arg| arg.contains("autoMemoryEnabled")));
+        }
 
         let worktree = dir.path().join(".cas/worktrees/probe");
         let grok = worker_config(SupervisorCli::Grok, &worktree, &account);
@@ -344,7 +371,7 @@ mod tests {
     fn claude_merge_keeps_worker_hooks_and_permissions() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("worker-settings.json");
-        std::fs::write(&file, r#"{"hooks":{"Stop":[]},"permissions":{"allow":["Read"]}}"#).unwrap();
+        std::fs::write(&file, r#"{"hooks":{"Stop":[]},"permissions":{"allow":["Read"]},"autoMemoryEnabled":true,"claudeMdExcludes":["/private/project/CLAUDE.md"]}"#).unwrap();
         let mut config = worker_config(SupervisorCli::Grok, dir.path(), dir.path());
         config.args = vec!["--settings".into(), file.to_str().unwrap().into()];
         apply_claude(&mut config, dir.path(), dir.path());
@@ -352,6 +379,8 @@ mod tests {
         assert_eq!(settings["permissions"]["allow"][0], "Read");
         assert!(settings["hooks"].get("Stop").is_some());
         assert_eq!(settings["skillOverrides"]["init"], "user-invocable-only");
+        assert_eq!(settings["autoMemoryEnabled"], false);
+        assert_eq!(settings["claudeMdExcludes"], serde_json::json!(["/private/project/CLAUDE.md", "**/skills/exa-search/**"]));
     }
 
     /// Copies are explicit-only with their resources. Role skills, personal

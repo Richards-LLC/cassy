@@ -211,6 +211,8 @@ fn command(root: &Path, output: &Path) -> Result<(Command, Option<String>), Stri
                 "--strict-mcp-config",
                 "--mcp-config",
                 "{\"mcpServers\":{}}",
+                "--settings",
+                r#"{"autoMemoryEnabled":false,"claudeMdExcludes":["**/skills/exa-search/**"]}"#,
             ]);
         }
         other => return Err(format!("unsupported verifier harness: {other:?}")),
@@ -231,6 +233,10 @@ fn codex_exec_args(model: &str, effort: &str, output: &Path) -> Vec<std::ffi::Os
     for value in [
         format!("model_reasoning_effort=\"{effort}\""),
         "project_doc_max_bytes=0".into(),
+        "skills.include_instructions=false".into(),
+        "features.apps=false".into(),
+        "features.plugins=false".into(),
+        "features.memories=false".into(),
         // GH #2023: `exec` runs with approval: never, which refuses every MCP
         // call that needs approval. Pre-approve only Cassy's canonical server;
         // its own identity checks still apply. Command and args keep the

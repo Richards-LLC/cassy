@@ -405,7 +405,7 @@ impl Reconcile {
     /// Preflight before any writer, including malformed documents, unmerged
     /// files, symlinks and local edits to a managed body. Conflicts are visible
     /// and preserve each conflicting path in both the worktree and index.
-    pub(crate) fn begin(root: &Path, harnesses: &[SupervisorCli]) -> Result<Option<Self>> {
+    pub(crate) fn begin(root: &Path, cas_root: &Path, harnesses: &[SupervisorCli]) -> Result<Option<Self>> {
         if authoring(root) || !git_root(root) {
             return Ok(None);
         }
@@ -598,7 +598,7 @@ impl Reconcile {
                     .iter()
                     .filter_map(|(p, b)| b.clone().map(|b| (p.clone(), b)))
                     .collect();
-                let projected = configuration_projection_excluding(root, &seed, &conflicts)?;
+                let projected = configuration_projection_excluding(root, cas_root, &seed, &conflicts)?;
                 for (path, local) in dirty {
                     let expected = std::fs::read(projected.path().join(path)).unwrap_or_default();
                     let expected = owned_fragment(path, &expected)?;
@@ -674,7 +674,7 @@ impl Reconcile {
             .iter()
             .map(|(p, (_, b))| (p.clone(), b.clone()))
             .collect();
-        let temp = configuration_projection_excluding(root, &seed, &self.report.conflicts)?;
+        let temp = configuration_projection_excluding(root, cas_root, &seed, &self.report.conflicts)?;
         for path in TRACKED {
             if !self.allows(path) || ignored(path, &paths) {
                 continue;
@@ -825,14 +825,15 @@ impl Reconcile {
 /// Read-only: callers use this both for commit admission and merge recovery.
 pub(crate) fn staged_sync_only(root: &Path) -> Result<bool> {
     let harnesses = harnesses(root);
-    let Some(plan) = Reconcile::begin(root, &harnesses)? else { return Ok(false); };
+    let cas_root = root.join(".cas");
+    let Some(plan) = Reconcile::begin(root, &cas_root, &harnesses)? else { return Ok(false); };
     if !plan.report.conflicts.is_empty() { return Ok(false); }
     let pending = git(root, &["diff", "--cached", "--name-only", "-z"])?;
     if pending.is_empty() { return Ok(false); }
     let committed: BTreeMap<_, _> = TRACKED.iter().filter_map(|path| {
         git(root, &["show", &format!("HEAD:{path}")]).ok().map(|bytes| ((*path).to_string(), bytes))
     }).collect();
-    let projected = configuration_projection_excluding(root, &committed, &[])?;
+    let projected = configuration_projection_excluding(root, &cas_root, &committed, &[])?;
     let ignored_paths = ignored_paths(root, &harnesses);
     for path in pending.split(|b| *b == 0).filter(|path| !path.is_empty()) {
         let path = text(path)?;
@@ -867,7 +868,7 @@ pub(crate) fn staged_sync_only(root: &Path) -> Result<bool> {
 }
 
 fn configuration_projection_excluding(
-    root: &Path, seed: &BTreeMap<String, Vec<u8>>, excluded: &[String],
+    root: &Path, cas_root: &Path, seed: &BTreeMap<String, Vec<u8>>, excluded: &[String],
 ) -> Result<tempfile::TempDir> {
     let allowed = |path: &str| !excluded.iter().any(|conflict| Path::new(path).starts_with(conflict));
     let temp = tempfile::tempdir()?;
@@ -879,11 +880,16 @@ fn configuration_projection_excluding(
             std::fs::write(dest, bytes)?;
         }
     }
-    std::fs::create_dir_all(temp.path().join(".cas"))?;
-    if let Ok(config) = std::fs::read(root.join(".cas/config.toml")) {
-        std::fs::write(temp.path().join(".cas/config.toml"), config)?;
+    if allowed(".claude/settings.json") {
+        let config_dir = temp.path().join(".cas");
+        std::fs::create_dir_all(&config_dir)?;
+        for name in ["config.toml", "config.yaml"] {
+            if let Ok(config) = std::fs::read(cas_root.join(name)) {
+                std::fs::write(config_dir.join(name), config)?;
+            }
+        }
+        crate::cli::hook::configure_claude_hooks_for_index(temp.path(), root, cas_root)?;
     }
-    if allowed(".claude/settings.json") { crate::cli::hook::configure_claude_hooks_for_index(temp.path(), root)?; }
     if allowed(".mcp.json") { crate::cli::hook::configure_mcp_server(temp.path())?; }
     if root.join(".codex").is_dir() {
         crate::cli::hook::config_gen::configure_codex_project_files(
@@ -999,7 +1005,7 @@ fn drift_fragment(path: &str, bytes: &[u8]) -> Result<String> {
 }
 
 pub(crate) fn drift(root: &Path, harnesses: &[SupervisorCli]) -> Result<usize> {
-    let Some(plan) = Reconcile::begin(root, harnesses)? else {
+    let Some(plan) = Reconcile::begin(root, &root.join(".cas"), harnesses)? else {
         return Ok(0);
     };
     let paths = ignored_paths(root, harnesses);

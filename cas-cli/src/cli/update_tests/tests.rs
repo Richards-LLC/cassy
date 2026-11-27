@@ -3680,7 +3680,7 @@ fn cas_4585_retired_notices_survive_nested_failure_and_other_modes() {
         );
         // The real index-side hook projection must attribute its copied
         // config to the owning project, never a disposable temp directory.
-        crate::cli::hook::configure_claude_hooks_for_index(projection.path(), &home).unwrap();
+        crate::cli::hook::configure_claude_hooks_for_index(projection.path(), &home, &root).unwrap();
         assert_eq!(crate::config::retire_config(&root, false).status, "failed");
         // A refused or failed maintenance does not resolve this file. Scope
         // exit replays it even if the command never reaches a final receipt.

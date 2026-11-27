@@ -24,7 +24,7 @@ use crate::cli::cloud::{
 };
 use crate::cli::factory_tooling;
 use crate::cli::hook::{
-    configure_claude_hooks, configure_mcp_server, provision_codex_project,
+    configure_claude_hooks_from, configure_mcp_server, provision_codex_project,
     provision_codex_user_config,
 };
 use crate::cli::init::{generate_cas_skill, update_agents_md, update_claude_md};
@@ -3239,7 +3239,7 @@ fn sync_claude_files_into(
     // because its rendered files are intentional tracked fixtures.
     let builtin_harnesses = crate::cli::project_files::harnesses(project_root);
     let reconciliation =
-        crate::cli::project_files::Reconcile::begin(project_root, &builtin_harnesses)?;
+        crate::cli::project_files::Reconcile::begin(project_root, &cas_root, &builtin_harnesses)?;
     // A worker's worktree sync shares this store; only the project's own sync
     // owns the conflict record that SessionStart reports.
     if _refresh_host_integration {
@@ -3276,7 +3276,11 @@ fn sync_claude_files_into(
 
     // Update configuration files
     // 1. Claude Code hooks (.claude/settings.json)
-    match if allowed(".claude/settings.json") { configure_claude_hooks(project_root, false) } else { Ok(false) } {
+    match if allowed(".claude/settings.json") {
+        configure_claude_hooks_from(project_root, &cas_root, false, None)
+    } else {
+        Ok(false)
+    } {
         Ok(true) => {
             config_updated.push("settings.json");
             if !cli.json {

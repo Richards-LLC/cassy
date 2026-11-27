@@ -2798,17 +2798,17 @@ fn managed_sync_commits_on_named_branches_cas_10ad() {
     env.remove("CAS_SKIP_FACTORY_TOOLING");
     let home = env.home().to_path_buf();
     let mut failures = Vec::new();
-    for (branch, can_commit) in [
-        ("main", true),
-        ("staging", true),
-        ("production", true),
-        ("release/base", true),
-        ("epic/shared", true),
-        ("repair/managed", true),
-        ("detached", false),
-        ("repair/config-unreadable", false),
-        ("release/shared-state", true),
-        ("repair/unknown-default", true),
+    for (branch, outcome) in [
+        ("main", "deferred"),
+        ("staging", "deferred"),
+        ("production", "deferred"),
+        ("release/base", "deferred"),
+        ("epic/shared", "deferred"),
+        ("repair/managed", "committed"),
+        ("detached", "staged"),
+        ("repair/config-unreadable", "deferred"),
+        ("release/shared-state", "deferred"),
+        ("repair/unknown-default", "deferred"),
     ] {
         let project = cas_6718_drifted_project(&home.join(branch));
         let root = if branch == "release/shared-state" {
@@ -2838,7 +2838,8 @@ fn managed_sync_commits_on_named_branches_cas_10ad() {
         let path = root.join("config.toml");
         let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         let configured_base = if branch == "release/shared-state" { branch } else { "release/base" };
-        config["factory"]["epic_base_branch"] = toml_edit::value(configured_base);
+        config["factory"]["epic_base_branch"] =
+            toml_edit::value(format!("refs/remotes/origin/{configured_base}"));
         std::fs::write(&path, config.to_string()).unwrap();
         if branch == "repair/config-unreadable" {
             // A directory fails config reading on every host, including root.
@@ -2846,22 +2847,38 @@ fn managed_sync_commits_on_named_branches_cas_10ad() {
             std::fs::create_dir(&path).unwrap();
         }
         if branch == "repair/unknown-default" {
+            cas_6718_git(&project, &["config", "init.defaultBranch", ""]);
             cas_6718_git(&project, &["branch", "-D", "main"]);
             cas_6718_git(&project, &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
             cas_6718_git(&project, &["update-ref", "-d", "refs/remotes/origin/production"]);
         }
+        if branch == "main" {
+            std::fs::write(project.join("README.md"), "Staged project work\n").unwrap();
+            cas_6718_git(&project, &["add", "README.md"]);
+        }
+        let index = std::fs::read(project.join(".git/index")).unwrap();
+        let refs = cas_6718_git(&project, &["show-ref"]);
+        let paths = cas_6718_git(&project, &["ls-files"]);
+        let files = paths.lines().chain([".claude/skills/cas-search/SKILL.md"])
+            .map(|path| (project.join(path), std::fs::read(project.join(path)).ok()))
+            .collect::<Vec<_>>();
         let before = cas_6718_git(&project, &["rev-parse", "HEAD"]);
-        let (result, output) = capture_phase(true, || sync_claude_files_into(
+        let (result, _) = capture_phase(true, || sync_claude_files_into(
             &update_test_cli(branch != "repair/config-unreadable"), Some(&root), Some(&project),
         ));
         let report = match result {
             Ok(report) => report,
             Err(error) => {
-                failures.push(format!("{branch}: update aborted instead of keeping repair staged: {error}"));
+                failures.push(format!("{branch}: update aborted: {error}"));
                 continue;
             }
         };
+        if report.outcome != outcome {
+            failures.push(format!("{branch}: expected {outcome}, got {}", report.outcome));
+            continue;
+        }
         let after = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+        let can_commit = outcome == "committed";
         if (after != before) != can_commit || report.commit.is_some() != can_commit {
             failures.push(format!("{branch}: expected can_commit={can_commit}, outcome={}, commit={:?}", report.outcome, report.commit));
         }
@@ -2870,41 +2887,31 @@ fn managed_sync_commits_on_named_branches_cas_10ad() {
             assert_eq!(cas_6718_git(&project, &["rev-list", "--count", &format!("{}..HEAD", before.trim())]).trim(), "1");
         }
         assert!(report.commit_error.is_none(), "{branch}: {:?}", report.commit_error);
-        if !can_commit && report.commit.is_none() {
-            assert_eq!(report.outcome, "staged", "{branch}");
+        if outcome == "staged" {
             assert!(report.staged > 0);
             assert!(!cas_6718_git(&project, &["diff", "--cached", "--name-only"]).is_empty());
         }
-        if branch == "repair/config-unreadable" {
+        if outcome == "deferred" {
             let json = serde_json::to_value(&report).unwrap();
-            let warning = json["commit_warning"].as_str().expect("guard error needs a structured warning");
-
-            let lines: Vec<_> = output.lines().filter(|line| line.contains(warning)).collect();
-            assert_eq!(lines.len(), 1, "{output}");
-            assert!(lines[0].is_ascii() && lines[0].len() <= 78, "{}", lines[0]);
+            assert_eq!(json["commit"], serde_json::Value::Null, "{branch}");
+            assert_eq!(json["untracked"], 0, "{branch}");
+            assert_eq!(json["staged"], 0, "{branch}");
+            assert!(json["commit_warning"].is_string(), "{branch}");
+            assert_eq!(std::fs::read(project.join(".git/index")).unwrap(), index, "{branch}");
+            assert_eq!(cas_6718_git(&project, &["show-ref"]), refs, "{branch}");
+            for (path, original) in files {
+                assert_eq!(std::fs::read(&path).ok(), original, "{branch}: {}", path.display());
+            }
+        }
+        if branch == "repair/config-unreadable" {
             assert!(path.is_dir(), "update must not replace the unreadable config");
         }
         if branch != "repair/unknown-default" {
             assert_eq!(cas_6718_git(&project, &["rev-parse", "refs/remotes/origin/production"]), before);
         }
         assert!(check_managed_commit(report).is_ok(), "staged guard refusals must exit successfully");
-        if branch == "main" {
-            let head = cas_6718_git(&project, &["rev-parse", "HEAD"]);
-            let settings_path = project.join(".claude/settings.json");
-            let mut settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
-            settings["theme"] = serde_json::json!("staged-project-choice");
-            std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
-            cas_6718_git(&project, &["add", ".claude/settings.json"]);
-            let index: serde_json::Value = serde_json::from_str(&cas_6718_git(&project, &["show", ":.claude/settings.json"])).unwrap();
-            let report = sync_claude_files_into(&update_test_cli(true), Some(&root), Some(&project)).unwrap();
-            assert_eq!(report.outcome, "staged", "project settings are never a managed commit");
-            let _ = report.commit_warning.expect("commit warning recorded");
-            assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), head);
-            let actual: serde_json::Value = serde_json::from_str(&cas_6718_git(&project, &["show", ":.claude/settings.json"])).unwrap();
-            assert_eq!(actual, index);
-        }
         if branch == "detached" {
-            cas_6718_git(&project, &["checkout", "-qB", "main"]);
+            cas_6718_git(&project, &["checkout", "-qB", "repair/detached"]);
             let report = sync_claude_files_into(&update_test_cli(true), Some(&root), Some(&project)).unwrap();
             assert_eq!(report.outcome, "committed", "rerun must clear pure sync staging");
             assert!(cas_6718_git(&project, &["diff", "--cached", "--name-only"]).is_empty());
@@ -2919,7 +2926,7 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     env.remove("CAS_AGENT_ROLE");
     env.remove("CAS_SKIP_FACTORY_TOOLING");
     let project = cas_6718_drifted_project(env.home());
-    cas_6718_git(&project, &["checkout", "-q", "main"]);
+    env.set_current_dir(&project);
     let root = project.join(".cas");
     env.set("CAS_ROOT", &root);
     let harnesses = crate::cli::project_files::harnesses(&project);

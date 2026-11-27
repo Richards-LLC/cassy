@@ -50,6 +50,9 @@ mod tests {
     fn upgrade_purges_noise_and_queued_copies_preserving_deliberate_memories() {
         for with_queue in [false, true] {
             let temp = TempDir::new().unwrap();
+            let conn = Connection::open(temp.path().join("cas.db")).unwrap();
+            conn.execute_batch(cas_store::ENTRIES_RULES_SCHEMA).unwrap();
+            conn.execute_batch(cas_store::TASK_SCHEMA).unwrap();
             assert!(
                 run_migrations(temp.path(), false)
                     .unwrap()

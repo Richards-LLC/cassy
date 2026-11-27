@@ -621,7 +621,7 @@ async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
         .unwrap();
     assert_eq!(round2.round, 2);
     assert_eq!(round2.bound_head, fixed_head);
-    let reviewer = reviewer_core(&cas_dir, "qa-reviewer-round-2");
+    let reviewer = reviewer_core(&cas_dir, "second-reviewer");
     let reviewer_service = CasService::new(reviewer.clone(), None);
     reviewer
         .cas_task_start(Parameters(IdRequest {
@@ -2439,7 +2439,7 @@ async fn rejected_round_reopens_after_a_target_change_and_a_test_only_fix() {
     assert!(round2.qa_task_id.is_some(), "round two has its work item");
 
     // qa_record against the open round succeeds.
-    let reviewer = reviewer_core(&cas_dir, "qa-reviewer-round-2");
+    let reviewer = reviewer_core(&cas_dir, "second-reviewer");
     reviewer
         .cas_task_start(Parameters(IdRequest {
             id: round2.qa_task_id.clone().unwrap(),

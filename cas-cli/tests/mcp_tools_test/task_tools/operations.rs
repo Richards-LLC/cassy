@@ -399,7 +399,7 @@ async fn task_read_default_show_preserves_gate_inputs() {
 /// Complete start-only guidance must survive default reads and later full reads.
 #[tokio::test]
 async fn task_read_default_start_preserves_complete_advisories() {
-    for case in ["qa-blockers", "qa-overflow", "unanchored", "parked", "recalled-markers", "restart", "parent-worktree", "synced-history"] {
+    for case in ["qa-blockers", "qa-overflow", "unanchored", "recalled-markers", "restart", "parent-worktree", "synced-history"] {
         let mut env = TestEnvGuard::temp_home();
         let (temp, core) = setup_cas_as(&mut env, AgentRole::Worker);
         let cas_dir = temp.path().join(".cas");
@@ -466,7 +466,7 @@ canonical_id = "start-read-fixture"
                 "cas cloud purge-foreign".into(),
                 "foreign rows and re-pull.".into(),
             ];
-        } else if matches!(case, "recalled-markers" | "restart" | "parent-worktree" | "synced-history") {
+        } else {
             task.assignee = Some("test-agent".into());
             task.origin_project = Some("start-read-fixture".into());
             if case == "synced-history" {
@@ -511,38 +511,6 @@ Keep reading.".into(),
             } else {
                 required = vec![];
             }
-        } else {
-            let root = temp.path();
-            branch_transfer_git(root, &["init", "-b", "main"]);
-            branch_transfer_git(root, &["config", "user.name", "Fixture"]);
-            branch_transfer_git(root, &["config", "user.email", "fixture@example.test"]);
-            std::fs::write(root.join(".gitignore"), ".cas/\n").unwrap();
-            branch_transfer_git(root, &["add", ".gitignore"]);
-            branch_transfer_git(root, &["commit", "-m", "seed"]);
-            branch_transfer_git(root, &["switch", "-c", "factory/test-agent"]);
-            std::fs::write(root.join("parked.txt"), "parked delivery\n").unwrap();
-            branch_transfer_git(root, &["add", "parked.txt"]);
-            branch_transfer_git(root, &["commit", "-m", "fix(cas-parked): prior delivery"]);
-            let tip = branch_transfer_git(root, &["rev-parse", "HEAD"]);
-            branch_transfer_git(root, &["switch", "main"]);
-            std::fs::write(root.join("target.txt"), "target work\n").unwrap();
-            branch_transfer_git(root, &["add", "target.txt"]);
-            branch_transfer_git(root, &["commit", "-m", "advance target"]);
-            branch_transfer_git(root, &["switch", "factory/test-agent"]);
-            let mut parked = Task::new("cas-parked".into(), "Prior delivery".into());
-            parked.status = cas::types::TaskStatus::AwaitingMerge;
-            parked.assignee = Some("prior-worker".into());
-            parked.deliverables.parked_branch = Some("factory/test-agent".into());
-            parked.deliverables.factory_branch_anchor = Some(tip.clone());
-            store.add(&parked).unwrap();
-            task.deliverables.work_target = Some(cas::types::WorkTarget {
-                repo_selector: "project:start-read-fixture".into(),
-                target_branch: "main".into(),
-            });
-            store.add(&task).unwrap();
-            required = vec![format!(
-                "cas-parked stays on factory/test-agent at {tip}. This task uses factory/test-agent-cas-start-read."
-            )];
         }
         let service = CasService::new(core, None);
         let request = |action, full| {

@@ -1496,11 +1496,20 @@ mod tests {
 
         await_listing(&root, "factory-test", "worker-test");
         let marker = path_for_test(&root, "factory-test", "worker-test");
+        let legacy_list = |pid: u32| {
+            let staged = marker.with_extension(format!("pid{pid}"));
+            std::fs::write(&staged, pid.to_string()).unwrap();
+            std::fs::rename(staged, &marker).unwrap();
+        };
         let mut primary_front = spawn_front();
         let (primary, primary_server) = connect().await;
         assert!(!ready());
         let primary_pid = primary_front.id().unwrap();
         env.set(FRONT_PID_ENV, &primary_pid.to_string());
+        env.set("CAS_AGENT_NAME", "foreign-worker");
+        primary.list_tools(None).await.unwrap();
+        assert!(!ready());
+        env.set("CAS_AGENT_NAME", "worker-test");
         assert!(primary.list_tools(None).await.unwrap().tools.iter().any(|tool| tool.name == "task"));
         assert!(ready());
 
@@ -1527,9 +1536,9 @@ mod tests {
 
         std::fs::write(&marker, "awaiting").unwrap();
         assert!(!ready(), "a legacy launch reset discards prior acknowledgments");
-        std::fs::write(&marker, primary_pid.to_string()).unwrap();
+        legacy_list(primary_pid);
         assert!(!ready(), "a legacy dead PID cannot revive old acknowledgments");
-        std::fs::write(&marker, successor_pid.to_string()).unwrap();
+        legacy_list(successor_pid);
         assert!(ready(), "a legacy reader/writer still uses a numeric ready record");
         await_listing(&root, "factory-test", "worker-test");
         assert!(!ready());

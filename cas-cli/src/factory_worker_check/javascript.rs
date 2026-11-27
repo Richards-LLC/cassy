@@ -3073,9 +3073,6 @@ mod tests {
     }
 
 
-    /// cas-a4c3: park demanded five capped passes for hub-web's `node:test`
-    /// files while worker-check refused `node --test`. The changed case runs
-    /// five times alone; its unchanged neighbour would fail the proof if run.
     #[test]
     fn node_test_files_run_selected_cases_once_cas_a4c3() {
         let repo = tempfile::tempdir().unwrap();

@@ -2559,22 +2559,6 @@ fn uncovered_blast_radius_scope(
     (uncovered, notice)
 }
 
-fn proof_targets_scope_fix_command(task: &Task, uncovered: &[String]) -> String {
-    let mut targets = cas_types::normalize_proof_targets(&task.proof_targets);
-    for module in uncovered {
-        if !targets.iter().any(|target| target == module) {
-            targets.push(module.clone());
-        }
-    }
-    format!(
-        "A crate the worker tested is covered without a scope fix (cas-b38a): run a capped targeted test in each uncovered module's crate at the delivered commit (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`), then retry close. Otherwise, ask a live registered supervisor to run `{supervisor}task action=update id={} proof_targets=\"{}\" proof_scope_fix=true reason=\"widen proof scope for delivered modules\"`, then record scoped proof and retry close. If no delivery transaction exists, a live registered supervisor may instead close with `{supervisor}task action=close id={} supervisor_override=true reason=\"reviewed uncovered source modules and accepted the measured scope mismatch\"`; the waived modules are recorded on the task.",
-        task.id,
-        targets.join(","),
-        task.id,
-        supervisor = crate::mcp::tools::core::guidance::supervisor_prefix(),
-    )
-}
-
 /// File kinds that are web or documentation content. A delivery made only
 /// of these cannot need a macOS native-command platform proof (cas-b4cc).
 const WEB_ONLY_EXTENSIONS: &[&str] = &[

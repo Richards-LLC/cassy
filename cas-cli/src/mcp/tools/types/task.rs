@@ -110,16 +110,16 @@ pub fn validate_task_risk_declaration(
     reason: Option<&str>,
 ) -> Result<(Vec<TaskRisk>, Vec<String>), String> {
     if supervisor_override && !is_supervisor {
-        return Err(
+        return Err(crate::gates::tag("G-129",
             "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true is only available to a registered supervisor."
                 .to_string(),
-        );
+        ));
     }
     if supervisor_override && reason.is_none_or(|reason| reason.trim().is_empty()) {
-        return Err(
+        return Err(crate::gates::tag("G-129",
             "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true requires a non-empty reason."
                 .to_string(),
-        );
+        ));
     }
 
     let risks = match risk.map(str::trim).filter(|risk| !risk.is_empty()) {

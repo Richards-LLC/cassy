@@ -1,0 +1,4 @@
+title: Release rollover replicates its lifecycle decision
+statement: A parked delivery that needs the successor merged reopens with an explicit lifecycle event, so the peer applies its state and target while retaining the source and anchor. Missing or old events cannot reopen the delivery, and repeated rollover does not append another transition.
+tasks: [cas-b0d1]
+journeys: [CLI-RELEASE]

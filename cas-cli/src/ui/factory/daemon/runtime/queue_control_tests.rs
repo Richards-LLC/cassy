@@ -32,6 +32,9 @@ fn codex_supervisor_rollout_releases_idle_wake_and_keeps_tool_calls_busy() {
         ).unwrap().id();
         let path = account.join("sessions").join(format!("rollout-{native}.jsonl"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let foreign = account.join("sessions/rollout-foreign.jsonl");
+        std::fs::write(&foreign, format!("{}\n", serde_json::json!({"type":"session_meta","payload":{"id":"foreign","cwd":temp.path(),"source":"cli"}}))).unwrap();
+        assert!(super::super::supervisor_commands::supervisor_transcript(&root, &daemon.session_name, &name, cas_mux::SupervisorCli::Codex).is_none());
         let at = (chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339();
         let mut records = vec![
             serde_json::json!({"timestamp":at,"type":"session_meta","payload":{"id":native,"cwd":temp.path()}}),

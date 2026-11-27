@@ -2852,6 +2852,27 @@ async fn team_pull_status_only_resume_preserves_assigned_execution_cas_45e7() {
 #[tokio::test]
 async fn team_pull_parked_projection_requires_new_lifecycle_event_cas_755a() {
     use crate::mcp::tools::core::task::audit;
+    let (parked, rolled) = crate::mcp::tools::core::task::release_train::tests::cut_rollover_fixture();
+    let rollover_project = parked.origin_project.as_deref().unwrap();
+    for applies in [false, true] {
+        let mut incoming = serde_json::to_value(&rolled).unwrap();
+        incoming["project_id"] = serde_json::json!(rollover_project);
+        if !applies {
+            incoming["notes"] = serde_json::json!(parked.notes);
+        }
+        let (_temp, result, store, _) = pull_team_task_fixtures(
+            rollover_project, vec![incoming], Some(parked.clone()),
+        ).await;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let observed = store.get(&parked.id).unwrap();
+        let expected = if applies { &rolled } else { &parked };
+        assert_eq!(observed.status, expected.status);
+        assert_eq!(observed.assignee, expected.assignee);
+        assert_eq!(observed.deliverables.work_target, expected.deliverables.work_target);
+        assert_eq!(observed.deliverables.factory_branch_start, expected.deliverables.factory_branch_start);
+        assert_eq!(observed.deliverables.factory_branch_anchor, parked.deliverables.factory_branch_anchor);
+        assert_eq!(result.pulled_tasks, usize::from(applies));
+    }
     let actor = cas_types::Agent::new("remote-supervisor-id".into(), "remote-supervisor".into());
     let project = "park-owner";
     let parked_at = chrono::DateTime::parse_from_rfc3339("2026-10-20T11:55:00Z")

@@ -2316,8 +2316,14 @@ fn add_worker_persists_explicit_spec_so_effective_resolves_codex() {
     // Dynamically spawn "alice" with an explicit Codex spec (the SpawnWorkers path).
     let dir = std::env::temp_dir();
     let spec = WorkerSpec::codex_default("alice");
-    mux.add_worker("alice", dir, None, "supervisor", None, Some(spec))
+    let mut launch_id = None;
+    mux.add_worker_with_pre_spawn("alice", dir, None, "supervisor", None, Some(spec), |session_id| {
+        launch_id = session_id.map(str::to_owned);
+        Ok(())
+    })
         .expect("add_worker should spawn the worker pane");
+    assert!(launch_id.is_some());
+    assert_eq!(launch_id, mux.panes().find(|pane| pane.id() == "alice").unwrap().harness_session_id());
 
     // Post-spawn: harness resolution (what FactoryApp::harness_for does) must now
     // report Codex, with NO explicit spec passed — proving the spec was persisted.

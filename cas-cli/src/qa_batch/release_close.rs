@@ -695,6 +695,23 @@ pub(crate) fn read_artifact(root: &Path, id: &str) -> Result<cas_store::Publishe
     found.ok_or_else(|| "ARTIFACT_METADATA_MISSING".into())
 }
 
+pub(super) fn no_local_review(conn: &rusqlite::Connection, task_id: &str) -> Result<bool, String> {
+    for table in ["verification_dispatches", "verifications"] {
+        if conn.table_exists(None, table).map_err(|error| error.to_string())?
+            && conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE task_id=?)"),
+                [task_id], |row| row.get::<_, bool>(0)).map_err(|error| error.to_string())? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+pub(super) fn carried_approval(task: &Task, anchor: &str) -> bool {
+    task.deliverables.premerge_approval.as_ref().is_some_and(|approval| {
+        approval.approved_anchor == anchor && approval.delivery_cycle == task.deliverables.delivery_cycle
+    })
+}
+
 /// Preview and apply share every decision; only the guarded close write differs.
 pub(crate) fn reconcile_members(
     root: &Path, repo: &Path, inventory: &ReleaseInventory, write: bool,
@@ -745,8 +762,8 @@ pub(crate) fn reconcile_members(
                 if task.deliverables.factory_branch_anchor.as_deref().is_some_and(|current| current != anchor) {
                     return Err("RELEASE_GENERATION_CHANGED".into());
                 }
-                release_delivery_effect_reviewed(repo, delivery.base_sha.as_deref(), anchor,
-                    &inventory.scope.final_release_sha, &id, review.reviewed_drop(&id, Some(anchor)).as_deref())
+                release_delivery_effect_for_task(root, repo, &task, delivery.base_sha.as_deref(), anchor,
+                    &inventory.scope.final_release_sha, review.reviewed_drop(&id, Some(anchor)).as_deref())
                     .map_err(|code| code.close_gate())?;
                 anchors.push(anchor);
             }
@@ -756,13 +773,7 @@ pub(crate) fn reconcile_members(
                         || review_tier::tier_for_delivery(&task, repo).is_some_and(|d| d.tier == VerificationTier::Mechanical))
             });
             let conn = read_connection(root)?;
-            let mut no_review = true;
-            for table in ["verification_dispatches", "verifications"] {
-                if conn.table_exists(None, table).map_err(|e| e.to_string())? {
-                    no_review &= !conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE task_id=?)"),
-                        [&task.id], |row| row.get::<_, bool>(0)).map_err(|e| e.to_string())?;
-                }
-            }
+            let no_review = no_local_review(&conn, &task.id)?;
             let report = report_proof::read_report_verdict(&conn, verification_on, &task, &task)
                 .map_err(|_| "REVIEW_MISSING".to_string())?;
             if report.covered() && report.approval().is_none() {
@@ -803,10 +814,7 @@ pub(crate) fn reconcile_members(
                 // approval of this exact delivery carried on the task row from
                 // the machine that reviewed it admits the member.
                 let carried = dispatch_approval.is_none() && no_review
-                    && task.deliverables.premerge_approval.as_ref().is_some_and(|approval| {
-                        approval.approved_anchor == anchor
-                            && approval.delivery_cycle == task.deliverables.delivery_cycle
-                    });
+                    && carried_approval(&task, anchor);
                 approved &= exempt || dispatch_approval.is_some() || carried || (delivery.membership == ReleaseMembership::ExplicitNoCode && receipts.iter().any(|receipt| {
                     matches!(receipt.schema_version, cas_store::QA_BATCH_RECEIPT_SCHEMA | cas_store::RELEASE_VERDICT_SCHEMA)
                         && receipt.task_heads.get(&task.id).is_some_and(|head| head == anchor)

@@ -1028,6 +1028,20 @@ impl Mux {
         teams: Option<&TeamsSpawnConfig>,
         spec: Option<WorkerSpec>,
     ) -> Result<PaneId> {
+        self.add_worker_with_pre_spawn(name, cwd, cas_root, supervisor_name, teams, spec, |_| Ok(()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_worker_with_pre_spawn(
+        &mut self,
+        name: &str,
+        cwd: PathBuf,
+        cas_root: Option<&PathBuf>,
+        supervisor_name: &str,
+        teams: Option<&TeamsSpawnConfig>,
+        spec: Option<WorkerSpec>,
+        before_spawn: impl FnOnce(Option<&str>) -> std::io::Result<()>,
+    ) -> Result<PaneId> {
         // Check if pane with this name already exists
         if self.panes.contains_key(name) {
             return Err(Error::pty(format!("Pane '{name}' already exists")));
@@ -1075,6 +1089,7 @@ impl Mux {
             self.factory_session.as_deref(),
             Some(fleet_size),
             startup_prompt.as_deref(),
+            before_spawn,
         )?;
         let id = pane.id().to_string();
         // Persist the resolved spec so `effective_worker_spec(name, None)` is

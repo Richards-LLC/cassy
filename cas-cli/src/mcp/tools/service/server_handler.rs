@@ -556,7 +556,7 @@ impl CasService {
     /// - once the request's terminal mutation has committed, post-commit work
     ///   that outlives `grace` gets a COMMITTED success answer, and the work
     ///   keeps running to completion (one mutation, no retry invited);
-    /// - slow merges return a durable state receipt, retaining execution and
+    /// - slow factory mutations return a durable state receipt, retaining execution and
     ///   recording its eventual outcome in a supervisor notice;
     /// - other budgets elapsing first return the usual timeout disposition.
     pub(crate) async fn call_with_deadline_and_grace<F>(
@@ -578,13 +578,15 @@ impl CasService {
         let continuation_id = registration.then(|| uuid::Uuid::new_v4().to_string());
         let send = tool_name == "coordination" && matches!(action, "message" | "interrupt");
         let merge = tool_name == "factory" && action == "worktree_merge";
+        let spawn = tool_name == "factory" && action == "spawn_workers";
         // Candidate/Git/CI waits have separate local bounds, not a bound on
         // their combined duration. Persist before starting non-cancellable work.
-        let merge_receipt = if merge {
-            Some(super::merge_response::MergeReceipt::begin(&self.inner.cas_root, arguments)
+        let durable_receipt = if merge || spawn {
+            let (operation, name) = if spawn { ("Spawn", "spawn") } else { ("Merge", "merge") };
+            Some(super::merge_response::MutationResponseReceipt::begin(&self.inner.cas_root, arguments, spawn)
                 .map_err(|error| rmcp::ErrorData {
                     code: rmcp::model::ErrorCode::INTERNAL_ERROR,
-                    message: format!("Merge receipt could not be persisted; no merge started: {error}").into(),
+                    message: format!("{operation} receipt could not be persisted; no {name} started: {error}").into(),
                     data: None,
                 })?)
         } else { None };
@@ -597,7 +599,7 @@ impl CasService {
         // Before spawning the handler: a call in flight is already activity.
         // This universal boundary also covers factory and proxy tool calls.
         record_worker_mcp_activity(&self.inner, tool_name, action);
-        let task_id_key = if tool_name == "verification" { "task_id" } else { "id" };
+        let task_id_key = if tool_name == "verification" || spawn { "task_id" } else { "id" };
         let task_id = arguments
             .and_then(|args| args.get(task_id_key))
             .and_then(serde_json::Value::as_str);
@@ -618,7 +620,7 @@ impl CasService {
             let _close_guard = handler_close_guard;
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             let _memory_call = crate::mcp::server::memory::Call::started();
-            if registration || merge {
+            if registration || merge || spawn {
                 // Aborting an async task cannot cancel synchronous startup or
                 // SQLite work. Keep runtime workers free to answer on time.
                 super::mutation_receipt::run_on_blocking_pool(future).await
@@ -672,12 +674,24 @@ impl CasService {
                         warn!(?recorded, "Park publication retained for daemon recovery");
                     }
                 }
-                if let Some(durable) = &merge_receipt {
-                    durable.finish(&joined, &receipt, None).map_err(|error| rmcp::ErrorData {
-                        code: rmcp::model::ErrorCode::INTERNAL_ERROR,
-                        message: format!("Merge finished but its receipt could not be updated: {error}").into(),
-                        data: None,
-                    })?;
+                if let Some(durable) = &durable_receipt {
+                    let saved = durable.finish(&joined, &receipt, None);
+                    if spawn {
+                        if let Err(error) = saved {
+                            warn!(%error, "Spawn outcome receipt could not be updated");
+                        }
+                        if receipt.spawn_request_id.get().is_some()
+                            && !matches!(&joined, Ok(Ok(result)) if result.is_error != Some(true))
+                        {
+                            return Ok(durable.answer(&receipt));
+                        }
+                    } else {
+                        saved.map_err(|error| rmcp::ErrorData {
+                            code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+                            message: format!("Merge finished but its receipt could not be updated: {error}").into(),
+                            data: None,
+                        })?;
+                    }
                 }
                 let elapsed = start.elapsed();
                 if elapsed.as_secs() >= 5 {
@@ -702,7 +716,7 @@ impl CasService {
                 }
             }
             Won::Grace => {
-                if let Some(durable) = merge_receipt {
+                if let Some(durable) = durable_receipt {
                     let answer = durable.answer(&receipt);
                     durable.watch(self.clone(), handle, receipt);
                     return Ok(answer);
@@ -755,7 +769,7 @@ impl CasService {
                 Ok(committed_task_answer(&receipt, &description))
             }
             Won::Deadline => {
-                if let Some(durable) = merge_receipt {
+                if let Some(durable) = durable_receipt {
                     let answer = durable.answer(&receipt);
                     durable.watch(self.clone(), handle, receipt);
                     return Ok(answer);
@@ -1464,6 +1478,111 @@ pub(crate) fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
 mod tests {
     use super::potentially_mutating_call;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worker_catalog_readiness_survives_sibling_front_exit_cas_a43b() {
+        use crate::factory_tools_ready::{FRONT_PID_ENV, await_launch_listing, await_listing, path_for_test, tools_listed};
+        use crate::mcp::{CasCore, CasService, daemon::pid_alive};
+        use rmcp::ServiceExt;
+        use std::process::Stdio;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_SESSION", "factory-test");
+        env.set("CAS_AGENT_NAME", "worker-test");
+        let first_launch = "codex-worker-test-first";
+        let next_launch = "codex-worker-test-next";
+        env.set("CAS_SESSION_ID", first_launch);
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let service = CasService::new(CasCore::with_daemon(root.clone(), None, None),
+            #[cfg(feature = "mcp-proxy")] None);
+        let ready = || tools_listed(&root, "factory-test", "worker-test", pid_alive);
+        let spawn_front = || {
+            tokio::process::Command::new("/bin/cat").stdin(Stdio::piped())
+                .stdout(Stdio::null()).kill_on_drop(true).spawn().unwrap()
+        };
+        let connect = async || {
+            let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+            let service = service.clone();
+            let server = tokio::spawn(async move {
+                service.serve(server_io).await.unwrap().waiting().await.unwrap();
+            });
+            (().serve(client_io).await.unwrap(), server)
+        };
+
+        await_launch_listing(&root, "factory-test", "worker-test", first_launch).unwrap();
+        let marker = path_for_test(&root, "factory-test", "worker-test");
+        let legacy_list = |pid: u32| {
+            let staged = marker.with_extension(format!("pid{pid}"));
+            std::fs::write(&staged, pid.to_string()).unwrap();
+            std::fs::rename(staged, &marker).unwrap();
+        };
+        let mut primary_front = spawn_front();
+        let (primary, primary_server) = connect().await;
+        assert!(!ready());
+        let primary_pid = primary_front.id().unwrap();
+        env.set(FRONT_PID_ENV, &primary_pid.to_string());
+        env.set("CAS_AGENT_NAME", "foreign-worker");
+        primary.list_tools(None).await.unwrap();
+        assert!(!ready());
+        env.set("CAS_AGENT_NAME", "worker-test");
+        assert!(primary.list_tools(None).await.unwrap().tools.iter().any(|tool| tool.name == "task"));
+        assert!(ready());
+
+        let mut sibling_front = spawn_front();
+        let (sibling, sibling_server) = connect().await;
+        env.set(FRONT_PID_ENV, &sibling_front.id().unwrap().to_string());
+        sibling.list_tools(None).await.unwrap();
+        sibling.cancel().await.unwrap();
+        sibling_server.await.unwrap();
+        sibling_front.kill().await.unwrap();
+        primary.send_request(rmcp::model::PingRequest::default().into()).await.unwrap();
+        assert!(ready(), "a listed live front must survive a sibling's exit");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().parse::<u32>().unwrap(), primary_pid);
+
+        let mut successor_front = spawn_front();
+        let (successor, successor_server) = connect().await;
+        let successor_pid = successor_front.id().unwrap();
+        env.set(FRONT_PID_ENV, &successor_pid.to_string());
+        successor.list_tools(None).await.unwrap();
+        primary.cancel().await.unwrap();
+        primary_server.await.unwrap();
+        primary_front.kill().await.unwrap();
+        assert!(ready(), "a genuinely listed successor keeps the same launch ready");
+
+        await_launch_listing(&root, "factory-test", "worker-test", next_launch).unwrap();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "awaiting");
+        successor.list_tools(None).await.unwrap();
+        assert!(!ready(), "a live predecessor's fresh catalog cannot open the next launch");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "awaiting");
+        legacy_list(successor_pid);
+        assert!(!ready(), "an old writer cannot acknowledge a stamped launch");
+
+        let mut next_front = spawn_front();
+        let (next_client, next_server) = connect().await;
+        let next_pid = next_front.id().unwrap();
+        env.set(FRONT_PID_ENV, &next_pid.to_string());
+        env.set("CAS_SESSION_ID", next_launch);
+        assert!(!ready());
+        next_client.list_tools(None).await.unwrap();
+        assert!(ready());
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().parse::<u32>().unwrap(), next_pid);
+        legacy_list(primary_pid);
+        assert!(ready(), "a legacy writer does not replace stamped acknowledgments");
+
+        await_listing(&root, "factory-test", "worker-test");
+        assert!(!ready());
+        legacy_list(successor_pid);
+        assert!(ready(), "an unstamped launch still accepts a legacy listing");
+        next_client.cancel().await.unwrap();
+        next_server.await.unwrap();
+        next_front.kill().await.unwrap();
+        successor.cancel().await.unwrap();
+        successor_server.await.unwrap();
+        successor_front.kill().await.unwrap();
+    }
+
     #[test]
     fn cas_4e19_authenticated_non_worker_verdict_skips_store_access_across_clones() {
         use crate::mcp::server::{AgentIdentitySource, CasCore};
@@ -1774,6 +1893,115 @@ mod tests {
             assert!(!text.contains("COMMITTED"), "{text}");
             panic!("fixture close was refused, so the close path was not exercised: {text}");
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn isolated_spawn_deadline_reconciles_one_queue_admission_cas_b5f3() {
+        use crate::mcp::{CasCore, CasService};
+        use rmcp::model::ErrorCode;
+        use serde_json::{Value, json};
+        use std::time::Duration;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_AGENT_NAME", "spawn-receipt-fixture");
+        env.set("CAS_FACTORY_SESSION", "spawn-receipt-fixture");
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        let temp = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args)
+                .current_dir(temp.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-b", "main"]);
+        git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+            "commit", "--allow-empty", "-m", "fixture"]);
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let task_id = "cas-spawn-receipt";
+        tasks.add(&cas_types::Task::new(task_id.into(), "Spawn receipt fixture".into())).unwrap();
+        let queue = crate::store::open_spawn_queue_store(&root).unwrap();
+        let service = CasService::new(CasCore::with_daemon(root.clone(), None, None),
+            #[cfg(feature = "mcp-proxy")] None);
+        let request = |count| serde_json::from_value(json!({
+            "action": "spawn_workers", "count": count, "isolate": true,
+            "task_id": task_id, "cli": "grok"
+        })).unwrap();
+
+        let refused = service.factory_with_budget_for_testing(
+            request(2), Duration::from_secs(5), Duration::ZERO).await.unwrap_err();
+        assert_eq!(refused.code, ErrorCode::INVALID_PARAMS);
+        let mut receipts = std::fs::read_dir(root.join("spawn-receipts")).unwrap();
+        let refusal = serde_json::from_slice::<Value>(
+            &std::fs::read(receipts.next().unwrap().unwrap().path()).unwrap(),
+        ).unwrap();
+        assert!(receipts.next().is_none());
+        assert_eq!(refusal["mutation_outcome"], "NOT_ADMITTED");
+        assert_eq!(refusal["result"]["error"], json!(refused));
+        assert!(queue.peek(10).unwrap().is_empty());
+
+        let read = |path: &std::path::Path| {
+            serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap()
+        };
+        let completed = async |answer: &Value| {
+            let receipt_id = answer["receipt_id"].as_str().expect("receipt ID");
+            let path = std::path::Path::new(answer["receipt_path"].as_str().expect("receipt path"));
+            assert!(path.starts_with(&root));
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let outcome = read(path);
+                    assert_eq!(outcome["receipt_id"], receipt_id);
+                    if outcome["state"] == "completed" {
+                        break outcome;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("spawn receipt must reach its final state")
+        };
+
+        let writer = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let result = service.factory_with_budget_for_testing(
+            request(1), Duration::from_millis(120), Duration::ZERO).await;
+        let pending_rows: i64 = writer.query_row("SELECT count(*) FROM spawn_queue", [], |row| row.get(0)).unwrap();
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(pending_rows, 0);
+        let answer = result.expect("deadline must return a durable spawn continuation");
+        let answer = answer.structured_content.expect("structured continuation");
+        assert_eq!(answer["mutation_outcome"], "IN_PROGRESS");
+        let outcome = completed(&answer).await;
+        assert_eq!(outcome["mutation_outcome"], "COMMITTED", "{outcome}");
+        let admitted = queue.peek(10).unwrap();
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(outcome["request_id"], admitted[0].id);
+        assert_eq!(admitted[0].count, Some(1));
+        assert!(admitted[0].isolate);
+        assert_eq!(admitted[0].task_id.as_deref(), Some(task_id));
+        assert_eq!(read(answer["receipt_path"].as_str().unwrap().as_ref()), outcome);
+        assert_eq!(queue.peek(10).unwrap().len(), 1);
+        assert_eq!(tasks.get(task_id).unwrap().status, cas_types::TaskStatus::Open);
+
+        let arguments = serde_json::to_value(request(1)).unwrap();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let (capture, original) = tokio::sync::oneshot::channel();
+        let answer = service.call_with_deadline(
+            "factory", arguments.as_object(), Duration::from_millis(120), async move {
+                let error = super::super::panic_catch::dispatch_with_catch("factory", async move {
+                    wait.await.unwrap();
+                    panic!("spawn receipt fixture panic");
+                }).await.unwrap_err();
+                capture.send(json!(&error)).unwrap();
+                Err(error)
+            },
+        ).await.unwrap().structured_content.unwrap();
+        assert_eq!(answer["mutation_outcome"], "IN_PROGRESS");
+        release.send(()).unwrap();
+        let abnormal = completed(&answer).await;
+        assert!(abnormal["request_id"].is_null());
+        assert_eq!(abnormal["result"]["error"]["code"], json!(ErrorCode::INTERNAL_ERROR));
+        assert_eq!(abnormal["result"]["error"], original.await.unwrap());
+        assert_eq!(abnormal["mutation_outcome"], "UNKNOWN", "{abnormal}");
+        assert_eq!(queue.peek(10).unwrap().len(), 1);
     }
 
     #[tokio::test]

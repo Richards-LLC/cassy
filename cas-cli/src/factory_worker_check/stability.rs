@@ -207,7 +207,7 @@ fn required_with_discovery(repo: &Path, head: &str, target: &str, paths: &[Strin
     // Historical ranges establish ownership, not whether a test edit survived.
     // After integration, keep the attributed base rather than collapsing proof
     // onto the already-landed tip. Otherwise compare with the current target.
-    let net_base = if base == head { ranges.first().map_or(base.as_str(), |(from, _)| from) } else { &base };
+    let net_base = net_proof_base(&base, head, Some(ranges));
     let live = discovery.changed(repo, net_base, head, paths)?.into_iter()
         .map(|test| test.identity).collect::<BTreeSet<_>>();
     let mut required = BTreeSet::new();
@@ -217,6 +217,10 @@ fn required_with_discovery(repo: &Path, head: &str, target: &str, paths: &[Strin
     }
     required.extend(super::javascript::changed_tests(repo, net_base, head, paths, owned.as_ref())?);
     Ok(required.into_iter().collect())
+}
+
+fn net_proof_base<'a>(base: &'a str, head: &str, ranges: Option<&'a [(String, String)]>) -> &'a str {
+    if base == head { ranges.and_then(|ranges| ranges.first()).map_or(base, |(from, _)| from) } else { base }
 }
 
 fn delivery_commits(repo: &Path, ranges: &[(String, String)]) -> Result<BTreeSet<String>> {
@@ -254,11 +258,15 @@ pub(crate) fn requirements(repo: &Path, head: &str, target: &str, paths: &[Strin
             }
         }
     }
-    // GH #2221: a changed JSON catalogue regenerates the tests of every spec
-    // importing it, though those specs have no changed line.
-    for data in paths.iter().filter(|path| path.ends_with(".json")) {
-        for spec in super::javascript::catalogue_specs(repo, head, data)? {
-            widened.insert(super::widened::Scope::File(spec));
+    // GH #2221: a changed JSON catalogue can regenerate tests without a changed spec line.
+    let mut catalogues = paths.iter().filter(|path| path.ends_with(".json")).peekable();
+    if catalogues.peek().is_some() {
+        let base = proof_base(repo, target, head).ok();
+        let net_base = base.as_deref().map(|base| net_proof_base(base, head, ranges));
+        for data in catalogues {
+            for spec in super::javascript::catalogue_specs(repo, net_base, head, data)? {
+                widened.insert(super::widened::Scope::File(spec));
+            }
         }
     }
     Ok((tests.into_iter().collect(), widened.into_iter().collect()))

@@ -489,12 +489,18 @@ refuse_cut() {
 # tracks the cut with no local build. A missing artifact falls back to the
 # installed CLI; a missing or red receipt never reaches here.
 train_receipt_cli() {
-    local dir="$1" producer
+    local dir producer
     producer="$(jq -r '[.job_receipts[]? | select(.job == "fast-validation-preflight") | .producer_run][0] // empty' \
         <<<"$train_receipt" 2>/dev/null)" || return 1
     [[ "$producer" =~ ^[0-9]+$ ]] || return 1
-    "$gh_bin" run download "$producer" --name preflight-cli --dir "$dir" >&2 || return 1
-    chmod +x "$dir/cas" && "$dir/cas" --version >/dev/null
+    dir="$(mktemp -d "$1/preflight.XXXXXXXX")" || return 1
+    if "$gh_bin" run download "$producer" --name preflight-cli --dir "$dir" >&2 &&
+        chmod +x "$dir/cas" && "$dir/cas" --version >/dev/null; then
+        printf '%s\n' "$dir/cas"
+    else
+        rm -rf -- "$dir"
+        return 1
+    fi
 }
 
 # Evaluate with the release commit's code before any push, enqueue or freeze.
@@ -516,9 +522,7 @@ preview_cut() {
     if [[ -n "$train_receipt" ]]; then
         # A green receipt never means a local build (cas-7971): retry the
         # train's CLI once, then preview with the installed one.
-        if train_receipt_cli "$candidate_dir" || train_receipt_cli "$candidate_dir"; then
-            candidate="$candidate_dir/cas"
-        else
+        if ! candidate="$(train_receipt_cli "$candidate_dir" || train_receipt_cli "$candidate_dir")"; then
             say "warning: the green train run's preflight-cli is unavailable; previewing with the installed CLI"
             candidate="$cas_bin"
         fi

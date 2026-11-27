@@ -188,18 +188,24 @@ if [[ "${1:-}" == --fast-rows ]]; then
     fi
     fast_rows=true
     fast_base="${3:-}"
+    fast_head="$(git rev-parse --verify HEAD)" || exit 1
+    fast_dirty="$(git status --porcelain --untracked-files=no)" || exit 1
+    fast_base_ref=''
     # A force-pushed branch's push event names the replaced tip as `before`.
     # That commit is not fetched and may no longer exist, so a missing base
     # falls back to merge-base(HEAD, default branch) instead of failing every
     # row that diffs against it. ZERO_BASE_REF names the default branch in CI.
-    if [[ -n "$fast_base" ]] && ! git rev-parse --verify --quiet "$fast_base^{commit}" >/dev/null; then
+    if [[ -n "$fast_base" ]] && resolved_base="$(git rev-parse --verify --quiet --end-of-options "$fast_base^{commit}")"; then
+        fast_base_ref="$fast_base"
+        fast_base="$resolved_base"
+    elif [[ -n "$fast_base" ]]; then
         fallback_ref="${ZERO_BASE_REF:-origin/main}"
         if ! git rev-parse --verify --quiet "$fallback_ref^{commit}" >/dev/null \
             && [[ "$fallback_ref" == origin/* ]]; then
             GIT_TERMINAL_PROMPT=0 git fetch --quiet --no-tags origin \
                 "+refs/heads/${fallback_ref#origin/}:refs/remotes/$fallback_ref" 2>/dev/null || true
         fi
-        if fallback_base="$(git merge-base HEAD "$fallback_ref" 2>/dev/null)"; then
+        if fallback_base="$(git merge-base "$fast_head" "$fallback_ref" 2>/dev/null)"; then
             printf 'fast rows: base %s is unavailable (force-push?); using merge-base with %s (%s)\n' \
                 "$fast_base" "$fallback_ref" "$fallback_base"
             fast_base="$fallback_base"
@@ -208,6 +214,9 @@ if [[ "${1:-}" == --fast-rows ]]; then
                 "$fast_base" "$fallback_ref"
             fast_base=''
         fi
+    fi
+    if [[ -z "$fast_base" ]]; then
+        fast_base="$(git rev-parse --verify --quiet "$fast_head^" || true)"
     fi
     version="$(sed -n 's/^version = "\([^" ]*\)".*/\1/p' cas-cli/Cargo.toml | head -n1)"
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
@@ -2612,26 +2621,32 @@ fast_row_fixes() {
 # cas-7bce: a failed run on a committed tree writes a FAIL receipt naming the
 # rows and their fixes, so the park refusal can quote the exact fix.
 record_fast_rows_receipt() {
-    local outcome="$1" head common dir
-    if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+    local outcome="$1" current_dirty common dir receipt
+    current_dirty="$(git status --porcelain --untracked-files=no)" || return 1
+    if [[ "$(git rev-parse --verify HEAD)" != "$fast_head" || "$current_dirty" != "$fast_dirty" ]] \
+        || [[ -n "$fast_base_ref" && "$(git rev-parse --verify --quiet --end-of-options "$fast_base_ref^{commit}")" != "$fast_base" ]]; then
+        printf 'fast rows: refused receipt: checkout or comparison base changed during the run; rerun on stable inputs\n' >&2
+        return 1
+    fi
+    if [[ -n "$current_dirty" ]]; then
         printf 'fast rows: no receipt written: tracked files have uncommitted changes; commit, then rerun\n'
         return 0
     fi
-    head="$(git rev-parse HEAD 2>/dev/null)" || return 0
-    common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
+    common="$(git rev-parse --path-format=absolute --git-common-dir)" || return 1
     dir="$common/cas/fast-rows"
-    mkdir -p "$dir" || return 0
-    if [[ "$outcome" == PASS ]]; then
-        printf 'fast-rows: PASS %s base=%s version=%s at=%s\n' "$head" "${fast_base:-HEAD^}" "$version" \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$dir/$head.pass"
-    else
-        {
-            printf 'fast-rows: FAIL %s rows=%s base=%s version=%s at=%s\n' "$head" "$(IFS=,; printf '%s' "${failures[*]}")" \
+    mkdir -p "$dir" || return 1
+    receipt="$dir/$fast_head.pass"
+    {
+        if [[ "$outcome" == PASS ]]; then
+            printf 'fast-rows: PASS %s base=%s version=%s at=%s\n' "$fast_head" "${fast_base:-HEAD^}" "$version" \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        else
+            printf 'fast-rows: FAIL %s rows=%s base=%s version=%s at=%s\n' "$fast_head" "$(IFS=,; printf '%s' "${failures[*]}")" \
                 "${fast_base:-HEAD^}" "$version" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             fast_row_fixes
-        } >"$dir/$head.pass.tmp.$$" && mv "$dir/$head.pass.tmp.$$" "$dir/$head.pass"
-    fi
-    printf 'fast rows: receipt %s\n' "$dir/$head.pass"
+        fi
+    } >"$receipt.tmp.$$" && mv "$receipt.tmp.$$" "$receipt" || return 1
+    printf 'fast rows: receipt %s\n' "$receipt"
 }
 
 if [[ "${#failures[@]}" -gt 0 ]]; then
@@ -2644,7 +2659,7 @@ if [[ "${#failures[@]}" -gt 0 ]]; then
 fi
 
 if [[ "$fast_rows" == true ]]; then
-    record_fast_rows_receipt PASS
+    record_fast_rows_receipt PASS || exit 1
 fi
 
 if [[ -n "$only_rows" ]]; then

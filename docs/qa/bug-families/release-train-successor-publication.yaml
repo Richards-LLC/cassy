@@ -1,0 +1,4 @@
+title: Release cut publishes the next train from its baseline
+statement: A release cut publishes a successor already contained in the integration branch even when the caller is on the prepared release commit. The normal push hook checks the exact successor tip; it still refuses unproved new commits.
+tasks: [cas-15d0]
+journeys: [CLI-RELEASE]

@@ -78,19 +78,70 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-fn may_commit_managed_files(root: &Path, cas_root: &Path) -> Result<bool> {
-    let Some(_) = git(root, &["symbolic-ref", "--quiet", "HEAD"])
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .and_then(|reference| reference.trim().strip_prefix("refs/heads/").map(str::to_string))
-        .filter(|branch| !branch.is_empty())
-    else {
-        // Detached or unreadable HEAD is not permission to create history.
+fn configured_sync_base(cas_root: &Path) -> Result<Option<String>> {
+    for name in ["config.toml", "config.yaml"] {
+        let content = match std::fs::read_to_string(cas_root.join(name)) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let config: crate::config::Config = if name == "config.toml" {
+            toml::from_str(&content)?
+        } else {
+            serde_yaml::from_str(&content)?
+        };
+        if let Some(factory) = config.factory {
+            return Ok(factory.epic_base_branch);
+        }
+    }
+    Ok(None)
+}
+
+fn protected_sync_branch(root: &Path, cas_root: &Path, branch: &str) -> Result<bool> {
+    if branch.is_empty() {
         return Ok(false);
+    }
+    if matches!(branch, "main" | "master" | "staging" | "develop" | "trunk")
+        || branch.starts_with("epic/")
+        || branch == crate::worktree::GitOperations::new(root.to_path_buf()).detect_default_branch()
+    {
+        return Ok(true);
+    }
+    Ok(configured_sync_base(cas_root)?.is_some_and(|base| {
+        base == branch
+            || base.strip_prefix("refs/heads/") == Some(branch)
+            || base.strip_prefix("refs/remotes/origin/") == Some(branch)
+            || base.strip_prefix("origin/") == Some(branch)
+    }))
+}
+
+pub(crate) fn deferred_sync(root: &Path, cas_root: &Path) -> Option<Report> {
+    if authoring(root) || !git_root(root) {
+        return None;
+    }
+    let protected = git(root, &["branch", "--show-current"]).and_then(|branch| {
+        protected_sync_branch(root, cas_root, text(&branch)?.trim())
+    });
+    let reason = match protected {
+        Ok(false) => return None,
+        Ok(true) => "Protected branch.",
+        Err(_) => "Branch protection could not be verified; check Git and Cassy config.",
     };
-    // Sync owns managed commits on named branches, including main and train
-    // branches. Never complete someone else's merge/rebase/sequencer operation.
-    crate::config::Config::load(cas_root)?;
+    Some(Report {
+        outcome: "deferred",
+        commit_warning: Some(format!(
+            "{reason} Cut a repair branch from the published base, run `cas update --sync`, then review and open a PR."
+        )),
+        ..Default::default()
+    })
+}
+
+fn may_commit_managed_files(root: &Path, cas_root: &Path) -> Result<bool> {
+    let branch = git(root, &["branch", "--show-current"])?;
+    let branch = text(&branch)?.trim();
+    if branch.is_empty() || protected_sync_branch(root, cas_root, branch)? {
+        return Ok(false);
+    }
     for state in ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"] {
         let path = git(root, &["rev-parse", "--path-format=absolute", "--git-path", state])?;
         if Path::new(text(&path)?.trim()).exists() {
@@ -288,7 +339,6 @@ pub(crate) struct Report {
     /// An attempted Git commit failed; this is not a file-body conflict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_error: Option<String>,
-    /// Commit policy could not be read; the repair remains safely staged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_warning: Option<String>,
     pub conflicts: Vec<String>,
@@ -355,7 +405,7 @@ impl Reconcile {
     /// Preflight before any writer, including malformed documents, unmerged
     /// files, symlinks and local edits to a managed body. Conflicts are visible
     /// and preserve each conflicting path in both the worktree and index.
-    pub(crate) fn begin(root: &Path, harnesses: &[SupervisorCli]) -> Result<Option<Self>> {
+    pub(crate) fn begin(root: &Path, cas_root: &Path, harnesses: &[SupervisorCli]) -> Result<Option<Self>> {
         if authoring(root) || !git_root(root) {
             return Ok(None);
         }
@@ -548,7 +598,7 @@ impl Reconcile {
                     .iter()
                     .filter_map(|(p, b)| b.clone().map(|b| (p.clone(), b)))
                     .collect();
-                let projected = configuration_projection_excluding(root, &seed, &conflicts)?;
+                let projected = configuration_projection_excluding(root, cas_root, &seed, &conflicts)?;
                 for (path, local) in dirty {
                     let expected = std::fs::read(projected.path().join(path)).unwrap_or_default();
                     let expected = owned_fragment(path, &expected)?;
@@ -624,7 +674,7 @@ impl Reconcile {
             .iter()
             .map(|(p, (_, b))| (p.clone(), b.clone()))
             .collect();
-        let temp = configuration_projection_excluding(root, &seed, &self.report.conflicts)?;
+        let temp = configuration_projection_excluding(root, cas_root, &seed, &self.report.conflicts)?;
         for path in TRACKED {
             if !self.allows(path) || ignored(path, &paths) {
                 continue;
@@ -682,11 +732,11 @@ impl Reconcile {
         } else if !self.report.conflicts.is_empty()
             || !may_commit_managed_files(root, cas_root).unwrap_or_else(|_| {
                 self.report.commit_warning = Some(
-                    "Commit guard config unreadable; repair staged. Fix config, then retry.".into(),
+                    "Commit eligibility could not be verified; repair remains staged.".into(),
                 );
                 false
             })
-            || !staged_sync_only(root).unwrap_or(false)
+            || !staged_sync_only_from(root, cas_root).unwrap_or(false)
         {
             if self.report.commit_warning.is_none() {
                 self.report.commit_warning = Some(
@@ -774,15 +824,19 @@ impl Reconcile {
 /// In particular, a managed path may also contain staged project content.
 /// Read-only: callers use this both for commit admission and merge recovery.
 pub(crate) fn staged_sync_only(root: &Path) -> Result<bool> {
+    staged_sync_only_from(root, &root.join(".cas"))
+}
+
+fn staged_sync_only_from(root: &Path, cas_root: &Path) -> Result<bool> {
     let harnesses = harnesses(root);
-    let Some(plan) = Reconcile::begin(root, &harnesses)? else { return Ok(false); };
+    let Some(plan) = Reconcile::begin(root, cas_root, &harnesses)? else { return Ok(false); };
     if !plan.report.conflicts.is_empty() { return Ok(false); }
     let pending = git(root, &["diff", "--cached", "--name-only", "-z"])?;
     if pending.is_empty() { return Ok(false); }
     let committed: BTreeMap<_, _> = TRACKED.iter().filter_map(|path| {
         git(root, &["show", &format!("HEAD:{path}")]).ok().map(|bytes| ((*path).to_string(), bytes))
     }).collect();
-    let projected = configuration_projection_excluding(root, &committed, &[])?;
+    let projected = configuration_projection_excluding(root, cas_root, &committed, &[])?;
     let ignored_paths = ignored_paths(root, &harnesses);
     for path in pending.split(|b| *b == 0).filter(|path| !path.is_empty()) {
         let path = text(path)?;
@@ -817,7 +871,7 @@ pub(crate) fn staged_sync_only(root: &Path) -> Result<bool> {
 }
 
 fn configuration_projection_excluding(
-    root: &Path, seed: &BTreeMap<String, Vec<u8>>, excluded: &[String],
+    root: &Path, cas_root: &Path, seed: &BTreeMap<String, Vec<u8>>, excluded: &[String],
 ) -> Result<tempfile::TempDir> {
     let allowed = |path: &str| !excluded.iter().any(|conflict| Path::new(path).starts_with(conflict));
     let temp = tempfile::tempdir()?;
@@ -829,11 +883,16 @@ fn configuration_projection_excluding(
             std::fs::write(dest, bytes)?;
         }
     }
-    std::fs::create_dir_all(temp.path().join(".cas"))?;
-    if let Ok(config) = std::fs::read(root.join(".cas/config.toml")) {
-        std::fs::write(temp.path().join(".cas/config.toml"), config)?;
+    if allowed(".claude/settings.json") {
+        let config_dir = temp.path().join(".cas");
+        std::fs::create_dir_all(&config_dir)?;
+        for name in ["config.toml", "config.yaml"] {
+            if let Ok(config) = std::fs::read(cas_root.join(name)) {
+                std::fs::write(config_dir.join(name), config)?;
+            }
+        }
+        crate::cli::hook::configure_claude_hooks_for_index(temp.path(), root, cas_root)?;
     }
-    if allowed(".claude/settings.json") { crate::cli::hook::configure_claude_hooks_for_index(temp.path(), root)?; }
     if allowed(".mcp.json") { crate::cli::hook::configure_mcp_server(temp.path())?; }
     if root.join(".codex").is_dir() {
         crate::cli::hook::config_gen::configure_codex_project_files(
@@ -949,7 +1008,7 @@ fn drift_fragment(path: &str, bytes: &[u8]) -> Result<String> {
 }
 
 pub(crate) fn drift(root: &Path, harnesses: &[SupervisorCli]) -> Result<usize> {
-    let Some(plan) = Reconcile::begin(root, harnesses)? else {
+    let Some(plan) = Reconcile::begin(root, &root.join(".cas"), harnesses)? else {
         return Ok(0);
     };
     let paths = ignored_paths(root, harnesses);

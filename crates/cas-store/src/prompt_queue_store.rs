@@ -1358,6 +1358,7 @@ pub enum PendingReason {
     /// became the transport for three finished lanes. A relay that dies
     /// undelivered is a failure and must read as one.
     UndeliveredLifecycleRelay,
+    DuplicateObservedLifecycleRelay,
     /// Broadcast reached a subset of intended recipients.
     PartialBroadcast,
     /// Broadcast had zero intended recipients (e.g. no non-native workers).
@@ -1383,6 +1384,7 @@ impl PendingReason {
             Self::OperatorDeliveryExpired => "operator_delivery_expired",
             Self::RecipientEndedUnread => "recipient_ended_unread",
             Self::UndeliveredLifecycleRelay => "undelivered_lifecycle_relay",
+            Self::DuplicateObservedLifecycleRelay => "duplicate_observed_lifecycle_relay",
             Self::PartialBroadcast => "partial_broadcast",
             Self::NoIntendedRecipients => "no_intended_recipients",
         }
@@ -1406,6 +1408,7 @@ impl PendingReason {
             "operator_delivery_expired" => Some(Self::OperatorDeliveryExpired),
             "recipient_ended_unread" => Some(Self::RecipientEndedUnread),
             "undelivered_lifecycle_relay" => Some(Self::UndeliveredLifecycleRelay),
+            "duplicate_observed_lifecycle_relay" => Some(Self::DuplicateObservedLifecycleRelay),
             "partial_broadcast" => Some(Self::PartialBroadcast),
             "no_intended_recipients" => Some(Self::NoIntendedRecipients),
             "behind_queue_head" => Some(Self::AwaitingDelivery),
@@ -1419,7 +1422,8 @@ impl PendingReason {
                 DeliveryStage::Gated
             }
             Self::DroppedDeadSource => DeliveryStage::Dropped,
-            Self::SuppressedIdle | Self::SupersededStale | Self::ShutdownCancelled => {
+            Self::SuppressedIdle | Self::SupersededStale | Self::ShutdownCancelled
+            | Self::DuplicateObservedLifecycleRelay => {
                 DeliveryStage::Suppressed
             }
             Self::AbandonedUnknownTarget
@@ -1482,6 +1486,7 @@ impl PendingReason {
             | Self::OperatorDeliveryExpired
             | Self::RecipientEndedUnread
             | Self::UndeliveredLifecycleRelay
+            | Self::DuplicateObservedLifecycleRelay
             | Self::UndeliveredAfterWakeDeclines
             | Self::PartialBroadcast => false,
         }
@@ -1559,6 +1564,19 @@ pub enum SurfacingSource {
 /// provisional handoff; neither belongs here.
 pub(crate) const SURFACED_RECEIPT_SOURCES_SQL: &str =
     "('hook_surfaced', 'inbox_poll', 'observed_wake')";
+
+#[derive(Deserialize, PartialEq, Eq)]
+struct BlockerRelayOccurrence {
+    task_id: String,
+    transition: String,
+    old_status: cas_types::TaskStatus,
+    new_status: cas_types::TaskStatus,
+    actor: String,
+    occurrence_id: DateTime<Utc>,
+    factory_session: Option<String>,
+    recipient_target: String,
+    recipient_factory_session: Option<String>,
+}
 
 /// A SQL string literal for `value`, quotes doubled. Used only to name the
 /// draining recipient inside [`broadcast_audience_sql`], so the shared drain
@@ -1660,6 +1678,7 @@ pub const ENDED_SESSION_RELAY_AGE_SECS: i64 = 24 * 60 * 60;
 const TERMINAL_UNACKED_RELAY_SQL: &str = "transport_delivered_at IS NULL
        AND acked_at IS NULL
        AND source LIKE 'lifecycle-wake:%'
+       AND last_pending_reason IS NOT 'duplicate_observed_lifecycle_relay'
        AND highest_stage IN ('suppressed', 'dropped', 'abandoned')";
 
 /// ... whose task is closed or cancelled.
@@ -1730,6 +1749,7 @@ impl SqlitePromptQueueStore {
              WHERE transport_delivered_at IS NULL
                AND acked_at IS NULL
                AND source LIKE 'lifecycle-wake:%'
+               AND last_pending_reason IS NOT 'duplicate_observed_lifecycle_relay'
                {NOT_NOTICE_DIGEST_SQL}
                AND (highest_stage IN ('suppressed', 'dropped', 'abandoned')
                     OR (COALESCE(highest_stage, 'enqueued') IN ('enqueued', 'selected', 'gated')
@@ -3837,6 +3857,10 @@ pub trait PromptQueueStore: Send + Sync {
     /// suppression, so [`PromptQueueStore::list_undelivered_lifecycle_relays`]
     /// can surface it and the factory stops mistaking silence for success.
     fn mark_undelivered_lifecycle_relay(&self, prompt_id: i64, detail: Option<&str>) -> Result<()>;
+
+    /// Retire a stale blocker replay only when an earlier copy of the same
+    /// occurrence entered the same recipient's turn. Does not receipt the replay.
+    fn suppress_observed_blocker_replay(&self, prompt: &QueuedPrompt) -> Result<bool>;
 
     /// Terminate an ordinary direct message after the bounded wake gate has
     /// declined every re-offer. This is visibly distinct from a lifecycle
@@ -10325,6 +10349,84 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
+    fn suppress_observed_blocker_replay(&self, prompt: &QueuedPrompt) -> Result<bool> {
+        let Some(notification_id) = prompt.source.strip_prefix("lifecycle-wake:")
+            .and_then(|id| id.parse::<i64>().ok()) else { return Ok(false); };
+        let Some(envelope) = cas_types::parse_lifecycle_envelope(&prompt.prompt) else { return Ok(false); };
+        if prompt.origin != Some(QueueOrigin::Daemon)
+            || envelope.transition.as_deref() != Some("task_blocked")
+            || envelope.new_status != cas_types::TaskStatus::Blocked
+        {
+            return Ok(false);
+        }
+        let prefix = format!("{}:blocked-episode:", envelope.task_id);
+        let upper = format!("{}:blocked-episode;", envelope.task_id);
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            let has_outbox: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index'
+                 AND name = 'idx_supervisor_queue_transition_key')", [], |row| row.get(0),
+            )?;
+            if !has_outbox { return Ok(false); }
+            let current: Option<(String, String, String, Option<String>)> = tx.query_row(
+                "SELECT outbox.supervisor_id, outbox.payload, outbox.transition_key, q.last_pending_reason
+                 FROM prompt_queue q JOIN supervisor_queue outbox ON outbox.id = ?2
+                 WHERE q.id = ?1 AND q.dedupe_key = 'lifecycle-outbox:' || outbox.id
+                   AND q.source = ?3 AND q.target = ?4 AND q.factory_session IS ?5
+                   AND q.origin_kind = 'daemon'
+                   AND outbox.event_type = 'task_lifecycle' AND outbox.transition_key IS NOT NULL",
+                params![prompt.id, notification_id, prompt.source, prompt.target, prompt.factory_session],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).optional()?;
+            let Some((owner, payload, key, reason)) = current else { return Ok(false); };
+            let duplicate_reason = PendingReason::DuplicateObservedLifecycleRelay;
+            if reason.as_deref() == Some(duplicate_reason.as_str()) { return Ok(true); }
+            let Ok(occurrence) = serde_json::from_str::<BlockerRelayOccurrence>(&payload) else { return Ok(false); };
+            let Some((_, phase @ ("initial" | "deadline"))) = key.rsplit_once(':') else { return Ok(false); };
+            if !key.starts_with(&prefix)
+                || occurrence.task_id != envelope.task_id
+                || Some(occurrence.transition.as_str()) != envelope.transition.as_deref()
+                || occurrence.new_status != envelope.new_status
+                || occurrence.occurrence_id != envelope.occurrence
+                || occurrence.recipient_target != prompt.target
+                || occurrence.recipient_factory_session != prompt.factory_session
+            {
+                return Ok(false);
+            }
+            let mut stmt = tx.prepare(&format!(
+                "SELECT prior.id, older.payload, older.transition_key
+                 FROM supervisor_queue older INDEXED BY idx_supervisor_queue_transition_key
+                 JOIN prompt_queue prior ON prior.dedupe_key = 'lifecycle-outbox:' || older.id
+                 JOIN prompt_queue_recipient_seen seen ON seen.prompt_id = prior.id AND seen.recipient = prior.target
+                 WHERE older.transition_key IS NOT NULL AND older.transition_key >= ?1 AND older.transition_key < ?2
+                   AND older.supervisor_id = ?3 AND older.event_type = 'task_lifecycle'
+                   AND prior.id < ?4 AND prior.target = ?5 AND prior.factory_session IS ?6
+                   AND prior.origin_kind = 'daemon'
+                   AND prior.source IN ('lifecycle-wake:' || older.id, 'lifecycle:' || older.id)
+                   AND seen.source IN {SURFACED_RECEIPT_SOURCES_SQL}"
+            ))?;
+            let mut rows = stmt.query(params![prefix, upper, owner, prompt.id, prompt.target, prompt.factory_session])?;
+            while let Some(row) = rows.next()? {
+                let prior_key: String = row.get(2)?;
+                if prior_key.rsplit_once(':').map(|(_, phase)| phase) != Some(phase)
+                    || serde_json::from_str::<BlockerRelayOccurrence>(&row.get::<_, String>(1)?).ok().as_ref() != Some(&occurrence)
+                {
+                    continue;
+                }
+                let prior_id: i64 = row.get(0)?;
+                Self::atomic_stage_stamp_in_tx(tx, prompt.id, DeliveryStage::Suppressed, AtomicStampOpts {
+                    reason: Some(duplicate_reason),
+                    detail: Some(&format!("Lifecycle occurrence already surfaced in notification {prior_id}")),
+                    set_processed: true,
+                    broadcast_attempted: None,
+                    broadcast_succeeded: None,
+                    broadcast_failed: None,
+                })?;
+                return Ok(true);
+            }
+            Ok(false)
+        })
+    }
+
     fn mark_undelivered_after_wake_declines(
         &self,
         prompt_id: i64,
@@ -10466,6 +10568,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
              WHERE transport_delivered_at IS NULL
                AND acked_at IS NULL
                AND source LIKE 'lifecycle-wake:%'
+               AND last_pending_reason IS NOT 'duplicate_observed_lifecycle_relay'
                {NOT_NOTICE_DIGEST_SQL}
                AND (highest_stage IN ('suppressed', 'dropped', 'abandoned')
                     OR (COALESCE(highest_stage, 'enqueued') IN ('enqueued', 'selected', 'gated')

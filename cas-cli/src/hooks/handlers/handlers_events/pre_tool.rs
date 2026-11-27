@@ -553,9 +553,10 @@ pub(crate) const BLOCKING_GUARDS: [&str; 16] = [
 ];
 
 /// The one pre-tool switch. `Some(deny)` for a refusal that blocks; a demoted
-/// guard records its fact (code, actor, harness, task) and returns `None`, so
-/// the caller falls through to the remaining guards.
-fn refuse(input: &HookInput, cas_root: Option<&Path>, reason: String) -> Option<HookOutput> {
+/// guard records its fact (code, actor, harness, task), queues a one-line
+/// warning for the call's context and returns `None`, so the caller falls
+/// through to the remaining guards.
+fn refuse(input: &HookInput, cas_root: Option<&Path>, reason: String, warnings: &mut Vec<String>) -> Option<HookOutput> {
     let codes = crate::gates::codes_in(&reason);
     if codes.is_empty() || codes.iter().any(|code| !code.starts_with("H-") || BLOCKING_GUARDS.contains(code)) {
         return Some(HookOutput::with_pre_tool_permission("deny", &reason));
@@ -574,7 +575,8 @@ fn refuse(input: &HookInput, cas_root: Option<&Path>, reason: String) -> Option<
             tracing::warn!(%error, ?codes, "could not record demoted guard fact");
         }
     }
-    tracing::warn!(?codes, "demoted guard would have denied; the call proceeds");
+    let heading = reason.lines().find(|line| !line.trim().is_empty()).unwrap_or_default();
+    warnings.push(format!("Warning only, the call proceeds: {heading} {}", codes.iter().map(|code| format!("[{code}]")).collect::<Vec<_>>().join(" ")));
     None
 }
 
@@ -598,7 +600,11 @@ fn handle_pre_tool_use_inner(
     turn_cwd: &Path,
 ) -> Result<HookOutput, MemError> {
     let mut accepted_override_codes = Vec::new();
-    let mut output = handle_pre_tool_use_checked(input, cas_root, prepared_cargo_input, turn_cwd, &mut accepted_override_codes)?;
+    let mut warnings = Vec::new();
+    let mut output = handle_pre_tool_use_checked(input, cas_root, prepared_cargo_input, turn_cwd, &mut accepted_override_codes, &mut warnings)?;
+    for warning in &warnings {
+        output.append_pre_tool_context(warning);
+    }
     if crate::gates::facts::hook_denial(&output).is_none() {
         for code in accepted_override_codes {
             output.system_message = Some(crate::gates::override_tag(code, output.system_message.take().unwrap_or_default()));
@@ -615,6 +621,7 @@ fn handle_pre_tool_use_checked(
     prepared_cargo_input: Option<serde_json::Value>,
     turn_cwd: &Path,
     accepted_override_codes: &mut Vec<&'static str>,
+    warnings: &mut Vec<String>,
 ) -> Result<HookOutput, MemError> {
     let tool_name = match &input.tool_name {
         Some(name) => name.as_str(),
@@ -637,14 +644,14 @@ fn handle_pre_tool_use_checked(
     {
         // A post-release hold already carries its own gate code (G-120).
         let reason = if crate::gates::codes_in(&reason).is_empty() { crate::gates::tag("H-07", reason) } else { reason };
-        if let Some(denial) = refuse(input, cas_root, reason) {
+        if let Some(denial) = refuse(input, cas_root, reason, warnings) {
             return Ok(denial);
         }
     }
 
     // gate[H-08 pre-tool]: Browser test tier
     if let Some(reason) = super::browser_tier_guard::denial(input)
-        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-08", reason))
+        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-08", reason), warnings)
     {
         return Ok(denial);
     }
@@ -663,7 +670,7 @@ fn handle_pre_tool_use_checked(
     // the missing-root early return.
     // gate[H-10 pre-tool]: Worker-denied CLIs and MCP tools
     if let Some(reason) = super::worker_denied_tools::denial(input, tool_name, cas_root)
-        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-10", reason))
+        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-10", reason), warnings)
     {
         return Ok(denial);
     }
@@ -700,7 +707,7 @@ fn handle_pre_tool_use_checked(
     // operator; such calls run in the background or go to a worker.
     // gate[H-49 pre-tool]: Supervisor long foreground Bash
     if let Some(reason) = super::supervisor_foreground::denial(input)
-        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-49", reason))
+        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-49", reason), warnings)
     {
         return Ok(denial);
     }
@@ -720,7 +727,7 @@ fn handle_pre_tool_use_checked(
             .and_then(|tool_input| tool_input.get("command"))
             .and_then(|command| command.as_str())
             .is_some_and(git_push_bypasses_required_hooks)
-        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-15", "🚫 WORKER PUSH POLICY: `--no-verify`, Git config environment overrides, and `core.hooksPath` overrides can skip required factory push checks. `-n` is a dry-run and still runs the pre-push hook; worker pushes must use a plain `git push`. If an exception is needed, ask the supervisor to run the supervisor-approved push."))
+        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-15", "🚫 WORKER PUSH POLICY: `--no-verify`, Git config environment overrides, and `core.hooksPath` overrides can skip required factory push checks. `-n` is a dry-run and still runs the pre-push hook; worker pushes must use a plain `git push`. If an exception is needed, ask the supervisor to run the supervisor-approved push."), warnings)
     {
         return Ok(denial);
     }
@@ -770,7 +777,7 @@ fn handle_pre_tool_use_checked(
                  `rustfmt --edition 2024 --check --config skip_children=true <task-files>`\n\n\
                  To format task files, make recursion explicit:\n  \
                  `rustfmt --edition 2024 --config skip_children=true <task-files>`\n\n\
-                 A workspace normalization requires separate operator approval and must not be run from a worker."))
+                 A workspace normalization requires separate operator approval and must not be run from a worker."), warnings)
         {
             return Ok(denial);
         }
@@ -871,7 +878,7 @@ fn handle_pre_tool_use_checked(
                 "🚫 Supervisors must not spawn isolated-worktree subagents.\n\
                 Use {prefix}factory action=spawn_workers — factory-managed worktrees get cleaned up; Agent(isolation=\"worktree\") ones leak.\n\
                 If you genuinely need a throwaway subagent, drop `isolation` or run as a worker via `cas factory`."
-            ))) {
+            )), warnings) {
                 return Ok(denial);
             }
         }
@@ -884,7 +891,7 @@ fn handle_pre_tool_use_checked(
         && tool_name == "SendMessage"
         && crate::harness_policy::is_worker(input)
         && !owns_native_message_target(input, cas_root)
-        && let Some(denial) = refuse(input, cas_root, factory_worker_send_message_denial())
+        && let Some(denial) = refuse(input, cas_root, factory_worker_send_message_denial(), warnings)
     {
         return Ok(denial);
     }
@@ -994,7 +1001,7 @@ fn handle_pre_tool_use_checked(
             .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
         && let Some(refusal) =
             crate::qa_pass::supervisor_merge_refusal(root, std::path::Path::new(&input.cwd), cmd)
-        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-24", refusal))
+        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-24", refusal), warnings)
     {
         return Ok(denial);
     }
@@ -1013,7 +1020,7 @@ fn handle_pre_tool_use_checked(
             .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
         && let Some(refusal) =
             crate::qa_pass::github_merge_refusal(root, std::path::Path::new(&input.cwd), cmd)
-        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-25", refusal))
+        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-25", refusal), warnings)
     {
         return Ok(denial);
     }
@@ -1037,7 +1044,7 @@ fn handle_pre_tool_use_checked(
             std::env::var("CAS_FACTORY_SESSION").ok().as_deref(),
             accepted_override_codes,
         )
-        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-26", refusal))
+        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-26", refusal), warnings)
     {
         return Ok(denial);
     }
@@ -1059,7 +1066,7 @@ fn handle_pre_tool_use_checked(
                 .filter(|out| out.status.success())
                 .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         })
-        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-27", refusal))
+        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-27", refusal), warnings)
     {
         return Ok(denial);
     }
@@ -1335,7 +1342,7 @@ fn handle_pre_tool_use_checked(
                             (the close rejection names the branch). That call is allowed through the jail and releases it; \
                             then retry `{prefix}task action=close id=<task-id>`.",
                                 prefix = crate::harness_policy::own_tool_prefix()
-                            ))) {
+                            )), warnings) {
                             return Ok(denial);
                         }
                     }
@@ -1623,7 +1630,7 @@ fn handle_pre_tool_use_checked(
             "Verifier {verifier} is already running on dispatch {} for task {task_id}; a second verifier's verdict could not be recorded once that dispatch resolves. Next: wait for its verdict or supervisor_call (`{}verification action=latest task_id={task_id}`).",
             dispatch.id,
             crate::harness_policy::own_tool_prefix(),
-        )))
+        )), warnings)
     {
         return Ok(denial);
     }
@@ -1654,9 +1661,9 @@ fn handle_pre_tool_use_checked(
             VerifierSpawnDenial, verifier_spawn_denial,
         };
         // The demoted guard proceeds without a handoff; the spawn is the caller's.
-        let verifier_denial = |denial: VerifierSpawnDenial, task_id: Option<&str>| {
+        let mut verifier_denial = |denial: VerifierSpawnDenial, task_id: Option<&str>| {
             let reason = crate::gates::tag("H-35", verifier_spawn_denial(denial, task_id, crate::harness_policy::own_tool_prefix()));
-            refuse(input, Some(cas_root), reason).unwrap_or_else(HookOutput::empty)
+            refuse(input, Some(cas_root), reason, warnings).unwrap_or_else(HookOutput::empty)
         };
         let Some(agent_store) = stores.agents() else {
             return Ok(verifier_denial(VerifierSpawnDenial::RegistryUnavailable, None));

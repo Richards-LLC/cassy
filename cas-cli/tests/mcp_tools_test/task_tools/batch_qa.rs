@@ -727,8 +727,12 @@ impl Fx {
         let png = report["screenshots"][1]["path"].as_str().unwrap().to_owned();
         std::fs::write(dir.join("visual-qa").join(&png), sweep!("127-0-0-1-52391-ranking-expanded-light-390x800.png")).unwrap();
         std::fs::write(dir.join("visual-qa/visual-qa.json"), report.to_string()).unwrap();
+        // The fixture tasks have a demo, so the ledger needs four rows.
+        let deferred: String = ["390px", "1440px", "dark"].iter().enumerate().map(|(n, cell)| format!(
+            "| M0{} | {cell} | Spacing visible ({id}.css:1) | not run | NOT EXERCISED: deferred to batch | fixture | - | - |\n", n + 2,
+        )).collect();
         std::fs::write(dir.join("LEDGER.md"), format!(
-            "cells=1; PASS=1; FAIL=0; NOT EXERCISED=0\nlabels: fixture=1\n{}\n| M01 | /ranking/ [expanded] | Ranking visible ({id}.css:1) | visible: Ranking | PASS | fixture | visual-qa/{png} | - |\n",
+            "cells=4; PASS=1; FAIL=0; NOT EXERCISED=3\nlabels: fixture=4\n{}\n| M01 | /ranking/ [expanded] | Ranking visible ({id}.css:1) | visible: Ranking | PASS | fixture | visual-qa/{png} | - |\n{deferred}",
             cas::qa_ledger::HEADER,
         )).unwrap();
     }

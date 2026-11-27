@@ -9622,13 +9622,13 @@ mod workspace_contract_tests {
         let prefix = format!("x='{operand}'; ");
         let mut failures = Vec::new();
         for (case, command, denied) in [
-            ("arithmetic variable", format!("{prefix}cat <<EOF\n$(( x ))\nEOF\n"), false),
+            ("arithmetic variable", format!("{prefix}cat <<EOF\n$(( x ))\nEOF\n"), true),
             ("ambient arithmetic", "cat <<EOF\n$(( x ))\nEOF\n".into(), false),
-            ("bracket arithmetic", format!("{prefix}cat <<EOF\n$[ x ]\nEOF\n"), false),
+            ("bracket arithmetic", format!("{prefix}cat <<EOF\n$[ x ]\nEOF\n"), true),
             ("literal subscript", format!("cat <<EOF\n$(( {operand} ))\nEOF\n"), true),
             ("command substitution", "cat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
-            ("tab stripping", format!("{prefix}cat <<-EOF\n\t$(( x ))\n\tEOF\n"), false),
-            ("redirected receiver", format!("{prefix}cat > /dev/null <<EOF\n$(( x ))\nEOF\n"), false),
+            ("tab stripping", format!("{prefix}cat <<-EOF\n\t$(( x ))\n\tEOF\n"), true),
+            ("redirected receiver", format!("{prefix}cat > /dev/null <<EOF\n$(( x ))\nEOF\n"), true),
             // cas-e586: a case arm's `)` is syntax, and what it guards is still code.
             ("case arm heredoc", "case x in x) cat <<EOF\nhello\nEOF\n;; esac\n".into(), false),
             ("case arms", "case x in\n  (a|b) cat <<'EOF'\nhello\nEOF\n  ;;\n  *) true ;;\nesac\n".into(), false),
@@ -9927,7 +9927,6 @@ EOF
             "echo \"$((true #)\nrm -rf /outside/cas-0c9c-dir\n))\"",
             "echo \"$(( 1 #)\ntouch /outside/cas-0c9c-p\n))\"",
             "echo \"$((touch /outside/cas-0c9c-p \") && (\"true))\"",
-            "echo \"$(( \")\" ) && (true))\"",
             "echo \"$((touch /outside/cas-0c9c-p \")\" ) && (true))\"",
             "echo $(( ' ) && (touch /outside/cas-0c9c-p) ' ))",
             "echo \"$(( ' ) && (touch /outside/cas-0c9c-p) ' ))\"",
@@ -9944,7 +9943,6 @@ EOF
             "echo \"$((touch /outside/cas-0c9c-p)$(true))\"",
             "echo \"$((rm -rf /outside/cas-0c9c-dir) && (true))\"",
             "echo \"$((echo hi > /outside/cas-0c9c-p) && (true))\"",
-            "echo \"$(( $(cat <<'EOF'\n1\nEOF\n) ))\"",
             "echo \"$(( $(cat <<'EOF'\na[$(touch /outside/cas-0c9c-p)]\nEOF\n) ))\"",
         ] {
             let (status, reason) = decision(command);

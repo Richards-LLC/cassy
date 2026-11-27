@@ -40,7 +40,7 @@ pub(super) fn attribute(
         .arg(&helper).arg("web-attribute").args(["--base-sha", &base])
         .arg("--web-report").arg(&input).arg("--web-run").arg(&settings)
         .arg("--out").arg(&output);
-    let success = super::run_scoped_javascript(command, high, &evidence.join("scope"))?;
+    let success = super::run_scoped_javascript(command, high, &evidence.join("scope"))?.success();
     let attribution: Value = serde_json::from_slice(&std::fs::read(&output)
         .context("base attribution did not produce evidence")?)?;
     if attribution["base"] != base {

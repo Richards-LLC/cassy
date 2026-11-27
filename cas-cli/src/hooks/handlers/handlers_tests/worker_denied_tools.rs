@@ -549,9 +549,19 @@ fn worker_unresolved_credential_cwd_is_refused_cas_707a2() {
             "cd ~; true || { :; cd {p}; }; cat .config/neonctl/credentials.json",
             "cd ~; for x in a; do D={p}; done; cd \"$D\"; cat .config/neonctl/credentials.json",
             "cd ~; for x in; do \"done\"; D={p}; done; cd \"$D\"; cat .config/neonctl/credentials.json",
+            "cd ~; cd {p}; cd \"$OLDPWD\" && cat .config/neonctl/credentials.json",
+            // A payload's positional parameters and quoted substitutions run.
+            "bash -c 'cat \"$1/credentials.json\"' bash ~/.config/neonctl",
+            // A child shell does not receive a non-exported variable.
+            "A={p}; bash -c 'cd \"$A$HOME/.config/neonctl\" && cat credentials.json'",
+            "echo \"$(cat ~/.config/neonctl/credentials.json)\"",
         ],
         &[
             "cd \"$UNSET_DIR\" && git status",
+            // GH #2473, #2497: a known return directory and a payload
+            // argument are not unresolved credential directories.
+            "cd {p}; cd ~; cd \"$OLDPWD\" && rg -n needle .",
+            "A={p}; bash -c 'cat \"$1/README.md\"' bash \"$A\"",
             "cd ~/.cas/*/x && grep -rn needle .",
             "cd ~; cd {p}; cd - >/dev/null; cd {p}; cat .config/neonctl/credentials.json",
             "D={p}; cd \"$D\" && cat .config/neonctl/credentials.json; for x in a; do :; done",

@@ -1,6 +1,6 @@
 # Cassy — Codemap
 
-> Auto-generated structural map of nineteen Rust workspace members, Commander and the Slack bridge. Regenerate with `/codemap` after module moves.
+> Auto-generated structural map of the Rust workspace, Commander and the Slack bridge. Regenerate with `/codemap` after module moves.
 
 ## Top-level layout
 
@@ -57,6 +57,7 @@
 - `cas-cli/src/builtins/` — canonical skills, agents, harness catalogs and reference-history manifest.
 - `cas-cli/src/builtins/skills/cas-writing-tests/`, `cas-cli/src/builtins/skills/cas-playwright-tests/` — general test quality and browser Faith contracts; brief-warning patterns in `cas-cli/src/builtins/skills/cas-writing-tests/references/brief-test-phrases.txt`; old names redirect.
 - `cas-cli/src/builtins/skills/cas-test-audit/`, `cas-cli/src/builtins/skills/cas-playwright-debug/` — test-value audit and measured failure diagnosis; audit/history scripts live in `cas-cli/src/builtins/skills/cas-test-audit/scripts/`.
+- `cas-cli/src/builtins/skills/cas-no-comments/` — implementation and review guidance for source comments.
 - `cas-cli/src/rule_refs.rs`, `cas-cli/src/cli/rules.rs`, `docs/RULE_REFERENCES.md` — rule-marker navigation.
 - `cas-cli/src/model_eval.rs`, `cas-cli/src/phase_outcome.rs`, `fixtures/verification-plan-fit/` — dataset proofs and verifier replay fixtures.
 
@@ -99,8 +100,9 @@
 - `cas-cli/src/mcp/tools/service/server_handler.rs`, `cas-cli/src/mcp/tools/service/mutation_receipt.rs`, `cas-cli/src/mcp/tools/service/merge_response.rs` — response budgets, mutation receipts and durable merge-state receipts returned before the response deadline (fixtures in `cas-cli/tests/fixtures/merge_outcome.rs`).
 - `cas-cli/src/mcp/tools/service/close_continuation.rs` — late-close ownership journals, restart recovery and durable outcomes.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` — park/close orchestration, ownership and timeout recovery.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` — attribution (including cancelled-to-successor delivery receipts), receipts, report quality, proof claims and reviewed corrections.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` — attribution, receipts and park checks; `ac_checklist.rs`, `dead_code.rs` and `doc_fragment_gate.rs` own their focused checks.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs` — supervisor-approved merge imports and linked-checkout WIP/checkpoint attribution.
+- `cas-cli/src/mcp/tools/core/task/query.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/report_proof.rs`, `cas-cli/src/mcp/tools/core/task/repeat_review.rs` — structured task reads, verified report snapshots and repeated-rejection admission.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/registry_upkeep.rs` — shared delivery snapshots and finding-bound decisions used by report quality; registry enforcement is lane lint.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs` — post-merge close and recovery-owner notices.
 - `cas-cli/src/mcp/tools/core/task/close_refusal.rs`, `cas-cli/src/mcp/tools/core/task/notes.rs` — close refusal facts and trusted note markers.
@@ -124,7 +126,7 @@
 - `cas-cli/src/qa_batch/release_close.rs` — release-bound ledger reviews and per-member close/tag evidence.
 - `cas-cli/src/fast_lane.rs`, `cas-cli/src/fast_lane_walk.rs` — fast-lane eligibility and post-merge proof.
 - `cas-cli/src/quality_ledger/`, `crates/cas-store/src/quality_event_store.rs`, `docs/ESTIMATES.md` — quality events, delivery metrics and measured estimates.
-- `cas-cli/src/cli/ledger.rs`, `cas-cli/src/cli/ledger_scorers.rs` — `cas ledger report` and its rubric scorers with cited hits.
+- `cas-cli/src/cli/ledger.rs`, `cas-cli/src/cli/ledger_scorers.rs`, `cas-cli/src/cli/ledger_health.rs` — ledger reports, rubric scorers and quality-event health.
 - `cas-cli/src/hub/`, `cas-cli/src/bridge/server/`, `cas-cli/src/cli/hub.rs` — Commander service, bridge, pairing and durable input.
 - `hub-web/src/main.ts`, `hub-web/src/styles.css` — browser bootstrap, worker cards and desktop/phone presentation.
 - `hub-web/src/connection.ts`, `hub-web/src/status-refresh.ts`, `hub-web/src/conversation-store.ts` — authenticated connections and conversation state.
@@ -145,6 +147,7 @@
 - **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`.
 - **Release docs:** `docs/release-notes/`, `docs/release-reports/` — per-version Slack drafts (`<date>-vX.Y.Z-slack.md`, `RUBRIC.md`) and release reports (`vX.Y.Z.{md,html,pdf}`, brief, visual QA).
 - **Generated docs:** `docs/product-overview.d/`, `docs/qa/bug-families/`, `scripts/doc-fragments.py` — fragments, lane lint and release compilation.
+- **Close timing:** `docs/qa/close-gate-timing.md` — bounded park and close checks and timing evidence.
 - **Release/CI:** `scripts/release.sh`, `scripts/train-ci.py`, `.github/workflows/ci.yml`, `.github/workflows/full-validation.yml`.
 - **Proof/scripts:** `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-test-shape.py`, `scripts/check-changed-markdown.py`; `scripts/test-test-audit.py` with `scripts/fixtures/test-audit/` covers the audit detectors.
 - **Config:** `.mcp.json`, `.claude/settings.json`, `.codex/hooks.json`, `cas-cli/src/config/`, `hub-web/DESIGN.md`.

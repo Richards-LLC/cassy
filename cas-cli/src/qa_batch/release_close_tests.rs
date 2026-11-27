@@ -255,7 +255,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
         let anchor = git(&["rev-parse", "HEAD"]);
         let mut task = Task::new(id.into(), id.into());
         task.origin_project = Some("reverted".into());
-        task.status = TaskStatus::Closed;
+        task.status = TaskStatus::AwaitingMerge;
         task.deliverables.work_target = Some(target.clone());
         task.deliverables.factory_branch_anchor = Some(anchor.clone());
         task.deliverables.factory_branch_start = Some(FactoryBranchStart {
@@ -282,7 +282,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     let assembly_head = git(&["rev-parse", "HEAD"]);
     let mut task = Task::new(assembly_id.into(), "Reviewed cohort assembly".into());
     task.origin_project = Some("reverted".into());
-    task.status = TaskStatus::Closed;
+    task.status = TaskStatus::AwaitingMerge;
     task.labels.push(crate::mcp::tools::core::task::lifecycle::review_tier::FORCE_VERIFIER_LABEL.into());
     task.deliverables.work_target = Some(target.clone());
     task.deliverables.factory_branch_anchor = Some(assembly_head.clone());
@@ -303,7 +303,10 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     git(&["merge", "--no-ff", "-qm", "land reviewed cohort assembly", assembly_id]);
     let landing = git(&["rev-parse", "HEAD"]);
     for id in imported_ids.into_iter().chain([assembly_id]) {
-        tasks.record_merge_admission(id, &landing, cas_types::MergeCiAdmission::Green).unwrap();
+        assert!(tasks.record_merge_admission(id, &landing, cas_types::MergeCiAdmission::Green).unwrap());
+        let mut task = tasks.get(id).unwrap();
+        task.status = TaskStatus::Closed;
+        tasks.update(&task).unwrap();
     }
     // One real release compile consumes the retained member's fragments.
     // A deletion in the same release without folded bytes stays a loss.

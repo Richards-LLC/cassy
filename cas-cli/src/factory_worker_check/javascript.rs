@@ -189,7 +189,9 @@ pub(crate) fn changed_tests(
         if !safe_path(path) {
             bail!("invalid JavaScript stability path: {path}");
         }
-        if super::git(repo, &["ls-tree", "--name-only", head, "--", path])?.is_empty() {
+        if super::git(repo, &["ls-tree", "--name-only", head, "--", path])?.is_empty() || runner_config_file(path)
+            || Path::new(path).file_stem().and_then(|stem| stem.to_str()).is_some_and(|stem| stem.ends_with(".d"))
+        {
             continue;
         }
         let diff = super::git(
@@ -273,12 +275,9 @@ pub(crate) fn changed_tests(
     Ok(selected.into_iter().collect())
 }
 
-/// The catalogue that changes this source's generated tests, if any: a JSON
-/// file it imports by relative path that the delivery changed, or a JSON
-/// import the delivery added, removed or switched.
 fn changed_data_import(repo: &Path, base: &str, head: &str, path: &str, source: &str, old: &str) -> Result<Option<String>> {
-    let imported = json_imports(path, source)?;
-    if let Some(switched) = imported.symmetric_difference(&json_imports(path, old)?).next() {
+    let imported = registering_json_imports(path, source)?;
+    if let Some(switched) = imported.symmetric_difference(&registering_json_imports(path, old)?).next() {
         return Ok(Some(switched.clone()));
     }
     let changed = super::git(repo, &["diff", "--name-only", base, head, "--", "*.json"])?;
@@ -293,22 +292,133 @@ fn json_imports(path: &str, source: &str) -> Result<BTreeSet<String>> {
         .collect())
 }
 
+fn registering_json_imports(path: &str, source: &str) -> Result<BTreeSet<String>> {
+    if !test_file(path) { return Ok(BTreeSet::new()); }
+    let imported = json_imports(path, source)?;
+    if imported.is_empty() { return Ok(imported); }
+    let Ok(tree) = source_tree(path, source) else { return Ok(imported) };
+    const FUNCTIONS: [&str; 5] = ["arrow_function", "function_expression", "function_declaration", "generator_function_declaration", "method_definition"];
+    fn references(node: Node<'_>, source: &str, into_functions: bool, found: &mut Vec<String>) {
+        if matches!(node.kind(), "identifier" | "shorthand_property_identifier") { found.push(text(node, source).to_owned()); }
+        if !into_functions && FUNCTIONS.contains(&node.kind()) { return; }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) { references(child, source, into_functions, found); }
+    }
+    let refs = |node: Node<'_>, into_functions: bool| { let mut found = Vec::new(); references(node, source, into_functions, &mut found); found };
+    let directory = Path::new(path).parent().unwrap_or(Path::new(""));
+    let mut bound: BTreeMap<String, String> = BTreeMap::new();
+    let mut declarators = Vec::new();
+    let mut calls = Vec::new();
+    let mut controls = Vec::new();
+    let mut aliases = BTreeMap::new();
+    imported_aliases(tree.root_node(), source, &mut aliases);
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "import_statement" => if let Some(from) = node.child_by_field_name("source")
+                && let Some(data) = title(from, source).map(|literal| normalize_relative(directory, &literal))
+                    .and_then(|data| data.to_str().map(str::to_owned)).filter(|data| imported.contains(data))
+            {
+                let mut cursor = node.walk();
+                for clause in node.named_children(&mut cursor).filter(|child| child.kind() == "import_clause") {
+                    for name in refs(clause, false) { bound.insert(name, data.clone()); }
+                }
+            },
+            "variable_declarator" => declarators.push(node),
+            "call_expression" => calls.push(node),
+            "for_statement" | "for_in_statement" | "while_statement" | "if_statement" | "switch_statement" => controls.push(node),
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    let callee_root = |call: Node<'_>| call.child_by_field_name("function").and_then(|function| refs(function, false).into_iter().next());
+    let suite_or_test = |call: Node<'_>| declaration(call, source, &aliases).map(|(suite, ..)| suite)
+        .or_else(|| callee_root(call).filter(|root| aliases.contains_key(root)).map(|_| false));
+    fn callback_of(function: Node<'_>) -> Option<Node<'_>> {
+        function.parent().filter(|parent| parent.kind() == "arguments").and_then(|arguments| arguments.parent())
+    }
+    let local_name = |function: Node<'_>| match function.kind() {
+        "function_declaration" | "generator_function_declaration" => function.child_by_field_name("name"),
+        "arrow_function" | "function_expression" => function.parent().filter(|parent| parent.kind() == "variable_declarator")
+            .and_then(|declarator| declarator.child_by_field_name("name")),
+        _ => None,
+    }.map(|name| text(name, source).to_owned());
+    let deferred = |node: Node<'_>, eager: &BTreeSet<String>| {
+        let mut scope = node.parent();
+        while let Some(current) = scope {
+            if FUNCTIONS.contains(&current.kind()) {
+                match callback_of(current) {
+                    Some(call) if suite_or_test(call) == Some(false) || call.child_by_field_name("function").is_some_and(|function|
+                        matches!(text(function, source).rsplit('.').next(), Some("beforeEach" | "afterEach" | "beforeAll" | "afterAll"))) => return true,
+                    Some(_) => {}
+                    None if local_name(current).is_some_and(|name| eager.contains(&name))
+                        || current.parent().filter(|parent| parent.kind() == "parenthesized_expression")
+                            .and_then(|parent| parent.parent()).is_some_and(|call| call.kind() == "call_expression") => {}
+                    None => return true,
+                }
+            }
+            scope = current.parent();
+        }
+        false
+    };
+    let mut eager = BTreeSet::new();
+    loop {
+        let found: BTreeSet<String> = calls.iter().copied().filter(|call| !deferred(*call, &eager)).filter_map(callee_root).collect();
+        if found.is_subset(&eager) { break; }
+        eager.extend(found);
+    }
+    loop {
+        let before = bound.len();
+        for declarator in declarators.iter().copied().filter(|declarator| !deferred(*declarator, &eager)) {
+            let (Some(name), Some(value)) = (declarator.child_by_field_name("name"), declarator.child_by_field_name("value")) else { continue };
+            let data = refs(value, true).into_iter().find_map(|word| bound.get(&word).cloned()).or_else(|| {
+                relative_literals(path, text(value, source)).ok()?.into_iter()
+                    .filter_map(|resolved| resolved.to_str().map(str::to_owned)).find(|data| imported.contains(data))
+            });
+            if let Some(data) = data {
+                for word in refs(name, false) { bound.entry(word).or_insert_with(|| data.clone()); }
+            }
+        }
+        if bound.len() == before { break; }
+    }
+    let mut registering = BTreeSet::new();
+    for call in calls.iter().copied().filter(|call| !deferred(*call, &eager)) {
+        let mut used = call.child_by_field_name("function").map(|function| refs(function, false)).unwrap_or_default();
+        let mut cursor = call.walk();
+        for argument in call.child_by_field_name("arguments").into_iter().flat_map(|arguments| arguments.named_children(&mut cursor).collect::<Vec<_>>()) {
+            used.extend(refs(argument, false));
+        }
+        registering.extend(used.into_iter().filter_map(|word| bound.get(&word).cloned()));
+    }
+    for control in controls.into_iter().filter(|control| !deferred(*control, &eager)) {
+        let body = ["body", "consequence", "alternative"].map(|field| control.child_by_field_name(field));
+        let mut cursor = control.walk();
+        for part in control.named_children(&mut cursor).filter(|child| !body.contains(&Some(*child))) {
+            registering.extend(refs(part, false).into_iter().filter_map(|word| bound.get(&word).cloned()));
+        }
+    }
+    Ok(registering)
+}
+
+fn normalize_relative(directory: &Path, literal: &str) -> PathBuf {
+    let mut resolved = PathBuf::new();
+    for part in directory.join(literal).components() {
+        match part {
+            Component::ParentDir => { resolved.pop(); }
+            Component::CurDir => {}
+            other => resolved.push(other),
+        }
+    }
+    resolved
+}
+
 /// Repository paths that a source's relative string literals name, resolved
 /// from the source's own directory (`'./scenarios.json'`, `'../prisma/migrations'`).
 fn relative_literals(path: &str, source: &str) -> Result<Vec<PathBuf>> {
     let directory = Path::new(path).parent().unwrap_or(Path::new(""));
     let literal = regex::Regex::new(r#"["'`](\.{1,2}/[^"'`\s$]+)["'`]"#)?;
-    Ok(literal.captures_iter(source).map(|capture| {
-        let mut resolved = PathBuf::new();
-        for part in directory.join(&capture[1]).components() {
-            match part {
-                Component::ParentDir => { resolved.pop(); }
-                Component::CurDir => {}
-                other => resolved.push(other),
-            }
-        }
-        resolved
-    }).collect())
+    Ok(literal.captures_iter(source).map(|capture| normalize_relative(directory, &capture[1])).collect())
 }
 
 /// GH #2221: the test files at `head` that import the changed catalogue
@@ -327,7 +437,7 @@ pub(crate) fn catalogue_specs(repo: &Path, head: &str, data: &str) -> Result<Vec
             continue;
         }
         let source = String::from_utf8_lossy(&show(repo, head, spec)?.unwrap_or_default()).into_owned();
-        if json_imports(spec, &source)?.contains(data) {
+        if registering_json_imports(spec, &source)?.contains(data) {
             specs.push(spec.to_owned());
         }
     }
@@ -538,13 +648,28 @@ fn callee(function: Node<'_>, source: &str, aliases: &BTreeMap<String, String>, 
 
 /// A conditional callee that names the test API yet resolves to no single kind.
 fn unresolved_callee(function: Node<'_>, source: &str, aliases: &BTreeMap<String, String>) -> bool {
+    let mut root = function;
+    while let Some(inner) = match root.kind() {
+        "member_expression" => root.child_by_field_name("object"),
+        "call_expression" => root.child_by_field_name("function"),
+        _ => None,
+    } { root = inner; }
     (matches!(function.kind(), "parenthesized_expression" | "ternary_expression")
-        || text(function, source).split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
-            .any(|word| aliases.get(word).is_some_and(|api| api == UNRESOLVED_API)))
+        || (root.kind() == "identifier" && aliases.get(text(root, source)).is_some_and(|api| api == UNRESOLVED_API)))
         && callee(function, source, aliases, false).is_none()
-        && text(function, source)
-            .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
-            .any(|word| matches!(word, "test" | "it" | "describe") || aliases.contains_key(word))
+        && names_test_api(function, source, aliases)
+}
+
+fn names_test_api(node: Node<'_>, source: &str, aliases: &BTreeMap<String, String>) -> bool {
+    match node.kind() {
+        "identifier" => matches!(text(node, source), "test" | "it" | "describe") || aliases.contains_key(text(node, source)),
+        "member_expression" => node.child_by_field_name("object").is_some_and(|object| names_test_api(object, source, aliases)),
+        "call_expression" => node.child_by_field_name("function").is_some_and(|function| names_test_api(function, source, aliases)),
+        "parenthesized_expression" => node.named_child(0).is_some_and(|inner| names_test_api(inner, source, aliases)),
+        "ternary_expression" => ["consequence", "alternative"].iter()
+            .any(|field| node.child_by_field_name(field).is_some_and(|branch| names_test_api(branch, source, aliases))),
+        _ => false,
+    }
 }
 
 fn named_declaration(name: &str, aliases: &BTreeMap<String, String>) -> Option<(bool, bool)> {
@@ -1274,9 +1399,18 @@ fn walk(
 /// followed by a space. Anything whose exact Vitest rendering is not known
 /// (other `%` directives, nested keys, long or quoted strings, objects, a
 /// variable or spread table) gives `None`.
+fn unwrapped(mut node: Node<'_>) -> Node<'_> {
+    while matches!(node.kind(), "as_expression" | "satisfies_expression" | "parenthesized_expression" | "non_null_expression")
+        && let Some(inner) = node.named_child(0)
+    {
+        node = inner;
+    }
+    node
+}
+
 fn expand_table(call: Node<'_>, source: &str, title: &str, prefix: &str) -> Option<Expansion> {
     let arguments = call.child_by_field_name("function")?.child_by_field_name("arguments")?;
-    let table = arguments.named_child(0).filter(|_| arguments.named_child_count() == 1)?;
+    let table = unwrapped(arguments.named_child(0).filter(|_| arguments.named_child_count() == 1)?);
     if table.kind() != "array" {
         return None;
     }
@@ -1290,7 +1424,7 @@ fn expand_table(call: Node<'_>, source: &str, title: &str, prefix: &str) -> Opti
             "," => previous_comma = true,
             "spread_element" => return None,
             _ => {
-                rows.push(child);
+                rows.push(unwrapped(child));
                 previous_comma = false;
             }
         }
@@ -1346,7 +1480,7 @@ fn percent_title(title: &str, index: usize, row: Node<'_>, source: &str) -> Opti
                 "," if previous_comma => return None,
                 "," => previous_comma = true,
                 _ => {
-                    args.push(child);
+                    args.push(unwrapped(child));
                     previous_comma = false;
                 }
             }
@@ -1393,7 +1527,7 @@ fn dollar_title(pattern: &str, row: Node<'_>, source: &str) -> Option<String> {
                     "string" => title(key, source)?,
                     _ => return None,
                 };
-                values.insert(key, quoted_literal(pair.child_by_field_name("value")?, source)?);
+                values.insert(key, quoted_literal(unwrapped(pair.child_by_field_name("value")?), source)?);
             }
             _ => return None,
         }
@@ -1537,8 +1671,11 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
         match changed_tests(&repo, &base, &head, std::slice::from_ref(file), None) {
             Ok(selected) if !selected.is_empty() => tests.extend(selected),
             result => {
-                let scope = super::widened::scope(&repo, file);
                 let cause = result.err().map(|error| format!("{error:#}")).unwrap_or_else(|| "no static changed-test selection".into());
+                let Some(scope) = super::widened::scope(&repo, file) else {
+                    eprintln!("Nothing to run for {file}: no capped run can select a test for it ({cause}); park owes it none");
+                    continue;
+                };
                 eprintln!("Widening {file} to {scope:?} for one capped pass: {cause}");
                 widened.entry(scope).or_insert_with(|| (file.clone(), cause));
             }
@@ -1771,8 +1908,20 @@ fn playwright_config_selects(repo: &Path, dir: &Path, config: &Path, spec: &Path
 /// config or no plugin `vitest related <file>.vue` crashes (GH #2352).
 pub(crate) fn vitest_loads_vue(repo: &Path, path: &str) -> bool {
     runner_root(repo, path, "vitest").ok().and_then(|(_, config)| config)
-        .and_then(|config| std::fs::read_to_string(config).ok())
-        .is_some_and(|config| ["plugin-vue", "@nuxt/test-utils", "unplugin-vue"].iter().any(|plugin| config.contains(plugin)))
+        .is_some_and(|config| config_sources(&config).iter()
+            .any(|source| ["plugin-vue", "@nuxt/test-utils", "unplugin-vue"].iter().any(|plugin| source.contains(plugin))))
+}
+
+pub(super) fn config_sources(config: &Path) -> Vec<String> {
+    static IMPORT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(||
+        regex::Regex::new(r#"(?:\bfrom|\bimport)\s*\(?\s*['"](\.\.?/[^'"\n]+)['"]"#).expect("import pattern"));
+    let Ok(own) = std::fs::read_to_string(config) else { return Vec::new() };
+    let imported = IMPORT.captures_iter(&own).filter_map(|capture| {
+        let base = config.parent()?.join(&capture[1]);
+        std::iter::once(base.clone()).chain(["ts", "mts", "cts", "js", "mjs", "cjs"].iter()
+            .map(|ext| PathBuf::from(format!("{}.{ext}", base.display())))).find(|path| path.is_file())
+    }).filter_map(|path| std::fs::read_to_string(path).ok()).collect::<Vec<_>>();
+    std::iter::once(own).chain(imported).collect()
 }
 
 /// The repository-relative non-default Playwright config that lists `path`,
@@ -1782,6 +1931,20 @@ pub(crate) fn playwright_owner(repo: &Path, path: &str) -> Option<PathBuf> {
     let config = config?;
     if runner_config(&dir, "playwright").as_ref() == Some(&config) { return None; }
     config.strip_prefix(repo).ok().map(Path::to_path_buf)
+}
+
+fn config_name(name: &str, runner: &str) -> bool {
+    javascript(name) && name.contains(".config.") && match runner {
+        "jest" => name.contains("jest"),
+        "playwright" => name.starts_with("playwright"),
+        "vitest" => name.starts_with("vitest") || name.starts_with("vite."),
+        _ => false,
+    }
+}
+
+pub(crate) fn runner_config_file(path: &str) -> bool {
+    let name = Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    !test_match(path, None) && ["jest", "vitest", "playwright"].iter().any(|runner| config_name(name, runner))
 }
 
 /// The runner configs in `dir`, nearest default first. Jest repositories keep
@@ -1797,8 +1960,7 @@ fn runner_configs(dir: &Path, runner: &str) -> Vec<PathBuf> {
             .flatten()
             .filter(|entry| {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                (if runner == "jest" { name.contains("jest") } else { name.starts_with("playwright") })
-                    && name.contains(".config.") && javascript(&name) && !defaults.contains(&name.as_str())
+                config_name(&name, runner) && !defaults.contains(&name.as_str())
             })
             .map(|entry| entry.path())
             .collect();
@@ -1859,7 +2021,7 @@ fn local_runners(dir: &Path) -> BTreeSet<&'static str> {
     const RUNNERS: [&str; 3] = ["jest", "vitest", "playwright"];
     let configs: BTreeSet<_> = RUNNERS
         .into_iter()
-        .filter(|runner| runner_config(dir, runner).is_some())
+        .filter(|runner| !runner_configs(dir, runner).is_empty())
         .collect();
     if !configs.is_empty() {
         return configs;
@@ -1911,12 +2073,12 @@ pub(crate) fn runner_hint(repo: &Path, path: &str) -> Option<&'static str> {
     if source.contains("@jest/globals") {
         return Some("jest");
     }
-    if source.contains("@playwright/test") {
-        return Some("playwright");
-    }
     // GH #2055: a node:test file beside a Jest config is Node's own runner.
     if source.contains("'node:test'") || source.contains("\"node:test\"") {
         return Some("node --test");
+    }
+    if source.contains("@playwright/test") {
+        return Some("playwright");
     }
     let mut current = repo.join(path);
     while current.pop() && current.starts_with(repo) {
@@ -2046,7 +2208,8 @@ fn execute_selection(
         // discovered runner config (cas-1468); never pass both.
         let (package, discovered) = if let Some((super::widened::Scope::Package(directory), _, _)) = widened {
             let package = repo.join(directory);
-            let config = self::runner_config(&package, runner);
+            let config = runner_root(repo, path, runner).ok().filter(|(owner, _)| *owner == package)
+                .and_then(|(_, config)| config).or_else(|| self::runner_config(&package, runner));
             (package, config)
         } else { runner_root(repo, path, runner)? };
         let discovered = if consumers.is_empty() || runner != "playwright" || runner_config.is_some() { discovered } else {
@@ -2072,6 +2235,9 @@ fn execute_selection(
         let cwd = if runner == "jest" { owning_package(repo, &package) } else { package.clone() };
         let source = std::fs::read_to_string(repo.join(path))?;
         let expected_rows = source_rows(path, &source).unwrap_or_default();
+        let whole_file = runner == "vitest" && widened.is_none()
+            && selected.iter().any(|test| test.parameterized && !expected_rows.contains_key(*test));
+        if whole_file { eprintln!("Running all of {path}: its changed table rows cannot be named from source"); }
         let sites = if widened.is_none() { declared_sites(path, &source)? } else { Vec::new() };
         if !sites.is_empty() {
             if runner != "playwright" {
@@ -2088,7 +2254,7 @@ fn execute_selection(
                 .args(["--list", "--reporter=json"])
                 .arg(regex::escape(&repo.join(path).to_string_lossy()))
                 .env("PLAYWRIGHT_JSON_OUTPUT_FILE", &report);
-            if !run_scoped_javascript(command, high, &reports.path().join("discovery-scope"))? {
+            if !run_scoped_javascript(command, high, &reports.path().join("discovery-scope"))?.success() {
                 bail!("Playwright native discovery failed for {path}");
             }
             let report = serde_json::from_slice(
@@ -2109,7 +2275,7 @@ fn execute_selection(
             format!("^(?:{pattern})$")
         };
         let selected: Vec<_> = selected.into_iter().cloned().collect();
-        let run = |iteration| -> Result<(bool, Value)> {
+        let run = |iteration| -> Result<(Exit, Value)> {
             let report = reports.path().join(format!("report-{iteration}.json"));
             let mut command = Command::new(&executable);
             command.current_dir(&cwd).env("CI", "1").envs(environment.iter().copied());
@@ -2178,7 +2344,7 @@ fn execute_selection(
                 }
                 _ => bail!("unsupported stability runner: {runner}"),
             }
-            if widened.is_none() {
+            if widened.is_none() && !whole_file {
                 match runner {
                     "node" => { command.arg(format!("--test-name-pattern={pattern}")); }
                     "playwright" => { command.args(["--grep", &pattern]); }
@@ -2195,7 +2361,8 @@ fn execute_selection(
                 else { command.arg(&file); }
             }
             let marker = reports.path().join(format!("scope-{iteration}"));
-            let success = run_scoped_javascript(command, high, &marker)?;
+            let status = run_scoped_javascript(command, high, &marker)?;
+            let success = status.success();
             let value: Value =
                 serde_json::from_slice(&std::fs::read(&report).with_context(|| {
                     format!("{runner} did not produce a stability report for {path}")
@@ -2207,10 +2374,11 @@ fn execute_selection(
                         super::RedFirstFailure::JavaScript { runner: runner.into(), tests }, format!("{runner} {path}"))?;
                 }
             }
-            Ok((success, value))
+            Ok((if success { Ok(()) } else { Err(status.to_string()) }, value))
         };
         let (ran, skipped) = if widened.is_some() && runner == "playwright" {
-            let (success, report) = run(0)?;
+            let (exit, report) = run(0)?;
+            let success = exit.is_ok();
             let inherited = if success { BTreeSet::new() } else {
                 if playwright_found_no_tests(&report) {
                     let mut has_specs = false;
@@ -2230,7 +2398,7 @@ fn execute_selection(
             };
             validate_report_with_inherited(runner, repo, &report, &selected, 1, &inherited, None,
                 if consumers.is_empty() { &[] } else { std::slice::from_ref(&path) })?
-        } else { verify_repeats(runner, repo, &selected, &expected_rows, run)? };
+        } else { verify_repeats(runner, repo, &selected, &expected_rows, whole_file, run)? };
         count += ran;
         inactive.extend(skipped);
         // GH #2146: a stability run that executed every test of a spec under
@@ -2463,7 +2631,7 @@ fn failed_javascript_tests(runner: &str, repo: &Path, report: &Value) -> BTreeSe
     failed
 }
 
-fn run_scoped_javascript(command: Command, high: u64, marker: &Path) -> Result<bool> {
+fn run_scoped_javascript(command: Command, high: u64, marker: &Path) -> Result<std::process::ExitStatus> {
     let _ = std::fs::remove_file(marker);
     let mut command = crate::factory_build_memory::scope_command(
         command,
@@ -2485,7 +2653,7 @@ fn run_scoped_javascript(command: Command, high: u64, marker: &Path) -> Result<b
     let status = super::wait_for_worker_command(&mut child)?;
     #[cfg(not(unix))]
     let status = child.wait()?;
-    Ok(status.success())
+    Ok(status)
 }
 
 /// GH #2146: Playwright's own `--list` of `spec` under `config`, every test the
@@ -2501,7 +2669,7 @@ fn playwright_listing(
         .arg("test").arg("--config").arg(config).args(["--list", "--reporter=json"])
         .arg(regex::escape(&repo.join(spec).to_string_lossy()))
         .env("PLAYWRIGHT_JSON_OUTPUT_FILE", &report);
-    if !run_scoped_javascript(command, high, &scratch.join("listing-scope")).ok()? { return None; }
+    if !run_scoped_javascript(command, high, &scratch.join("listing-scope")).ok()?.success() { return None; }
     let listed: Value = serde_json::from_slice(&std::fs::read(&report).ok()?).ok()?;
     let root = playwright_report_root(repo, &listed);
     let mut tests = BTreeSet::new();
@@ -2547,33 +2715,82 @@ fn found_no_tests(runner: &str, success: bool, report: &Value) -> bool {
     }
 }
 
+type Exit = std::result::Result<(), String>;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) struct ProcessFailed {
+    runner: String,
+    iteration: usize,
+    status: String,
+    report_passed: bool,
+}
+
+impl std::fmt::Display for ProcessFailed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { runner, iteration, status, report_passed } = self;
+        let report = if *report_passed {
+            "its report recorded every selected test passing, so the failure is outside test assertions (setup, teardown, an unhandled error, a coverage threshold or the memory limit); see the runner output above"
+        } else { "its report shows no selected test running" };
+        write!(formatter, "{runner} process failed at iteration {iteration} ({status}); {report}; no retry")
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{runner} did not run the selected changed test {path} :: {name} (reported {status}): its capped name selection did not match it at runtime, or the source skips it")]
+pub(crate) struct NotRun {
+    runner: String,
+    path: String,
+    name: String,
+    status: String,
+}
+
 /// Executed count and the environment-gated selected tests every repeat
 /// reported inactive.
+// gate-audit[whole_file]: selector Drops the name filter so a run executes more tests; every row it reports must still pass and match iteration 1, so it waives no G-61 check.
 fn verify_repeats(
     runner: &str,
     repo: &Path,
     tests: &[Identity],
     expected: &BTreeMap<Identity, Expansion>,
-    mut run: impl FnMut(usize) -> Result<(bool, Value)>,
+    whole_file: bool,
+    mut run: impl FnMut(usize) -> Result<(Exit, Value)>,
 ) -> Result<(usize, BTreeSet<Identity>)> {
     let mut count = 0;
     let mut inactive: Option<BTreeSet<Identity>> = None;
+    let mut expected = expected.clone();
     for iteration in 0..if runner == "playwright" || tests.is_empty() { 1 } else { 5 } {
-        let (success, report) = run(iteration)?;
+        let (exit, report) = run(iteration)?;
+        let mut selection = tests.to_vec();
+        if whole_file {
+            let rows = report_rows(repo, &report);
+            selection.extend(rows.iter().filter(|(row, status)| *status == "passed" && !tests.iter().any(|test| test.selects(row)))
+                .map(|(row, _)| row.clone()).collect::<BTreeSet<_>>());
+            if iteration == 0 {
+                let underivable: Vec<_> = tests.iter().filter(|test| test.parameterized && !expected.contains_key(*test)).collect();
+                for test in underivable {
+                    let mut names = Expansion::new();
+                    for (row, _) in rows.iter().filter(|(row, _)| test.selects(row)) { *names.entry(row.name.clone()).or_default() += 1; }
+                    expected.insert(test.clone(), names);
+                }
+            }
+        }
+        let failed = |report_passed| ProcessFailed {
+            runner: runner.into(), iteration: iteration + 1, status: exit.clone().err().unwrap_or_default(), report_passed,
+        };
         let (ran, skipped) = match validate_report_with_inherited(
             runner,
             repo,
             &report,
-            tests,
+            &selection,
             if runner == "playwright" && !tests.is_empty() { 5 } else { 1 },
             &BTreeSet::new(),
             // cas-c1df: Vitest's expanded row names are derived from the
             // source tables and every iteration must produce exactly them.
-            (runner == "vitest").then_some(expected),
+            (runner == "vitest").then_some(&expected),
             &[],
         ) {
-            Err(error) if error.downcast_ref::<ZeroTests>().is_some() && !found_no_tests(runner, success, &report) => {
-                bail!("{runner} stability failed at iteration {}; no retry", iteration + 1)
+            Err(error) if error.downcast_ref::<ZeroTests>().is_some() && !found_no_tests(runner, exit.is_ok(), &report) => {
+                return Err(failed(false).into());
             }
             result => result?,
         };
@@ -2584,14 +2801,20 @@ fn verify_repeats(
             )));
         }
         inactive = Some(skipped);
-        if !success {
-            bail!(
-                "{runner} stability failed at iteration {}; no retry",
-                iteration + 1
-            );
+        if exit.is_err() {
+            return Err(failed(true).into());
         }
     }
     Ok((count, inactive.unwrap_or_default()))
+}
+
+fn report_rows(repo: &Path, report: &Value) -> Vec<(Identity, String)> {
+    report["testResults"].as_array().into_iter().flatten().filter_map(|file| {
+        let path = report_path(repo, file["name"].as_str()?).ok()?;
+        Some(file["assertionResults"].as_array().into_iter().flatten().filter_map(move |test| Some((
+            Identity::exact(path.clone(), test["fullName"].as_str()?), test["status"].as_str().unwrap_or_default().to_owned(),
+        ))).collect::<Vec<_>>())
+    }).flatten().collect()
 }
 
 fn validate_report(
@@ -2633,7 +2856,11 @@ fn validate_report_with_inherited(
             .flat_map(|(each, project)| ["id", "name"].into_iter()
                 .filter_map(move |key| Some((project.get(key)?.as_str()?, each))))
             .collect();
+        let required: BTreeSet<String> = projects.keys()
+            .filter(|(identity, _)| files.contains(&identity.path.as_str())).map(|(_, project)| project.clone()).collect();
         for ((identity, project), count) in projects {
+            if !files.is_empty() && !files.contains(&identity.path.as_str()) && !required.contains(&project)
+                && !tests.iter().any(|test| test.selects(&identity)) { continue; }
             let dependency = declared.get(project.as_str()).copied()
                 .filter(|each| *each != repeats as u64);
             if let Some(each) = dependency && !tests.iter().any(|test| test.selects(&identity)) {
@@ -2718,6 +2945,9 @@ fn validate_report_with_inherited(
                         if tests.iter().any(|test| test.environment_gated && test.selects(&id)) => {
                         skipped_rows.insert(id);
                     }
+                    Some(status @ ("pending" | "skipped" | "todo" | "disabled")) => bail!(NotRun {
+                        runner: runner.into(), path: id.path, name: id.name, status: status.into(),
+                    }),
                     _ => bail!("{runner} stability failed: {} :: {}", id.path, id.name),
                 }
             }
@@ -2888,6 +3118,7 @@ mod tests {
         Identity::exact(path, name)
     }
 
+
     #[test]
     fn red_first_playwright_timeout_matches_selected_spec_gh_2422() {
         let report = serde_json::from_str(include_str!("javascript/playwright-timed-out.txt")).unwrap();
@@ -3006,6 +3237,18 @@ mod tests {
         }
         let unknown = "const suite = true ? describe : unknown; suite('legal', () => { test('consent', () => {}); });";
         assert!(source_tests(file, unknown, &[(1, 1)]).is_err());
+        let module = "cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs";
+        let lines = |handler: &str| format!(
+            "export function target(parsed, base) {{\n  const url = parsed.url === undefined ? undefined : /^(?:file|https?):\\/\\//i.test(parsed.url) ? parsed.url : pathToFileURL(resolve(base, parsed.url)).href;\n  return url;\n}}\n\
+             export function capture(page) {{\n  const scripts = new Map();\n  page.on('response', response => {{\n{handler}  }});\n  return scripts;\n}}\n");
+        std::fs::create_dir_all(repo.path().join(module).parent().unwrap()).unwrap();
+        std::fs::write(repo.path().join(module), lines("")).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "module base"]);
+        let module_base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join(module), lines("    if (response.ok() && response.request().resourceType() === 'script') scripts.set(response.url(), response);\n")).unwrap();
+        git(&["commit", "--quiet", "-am", "module head"]);
+        assert_eq!(changed_tests(repo.path(), &module_base, "HEAD", &[module.to_string()], None).unwrap(), []);
 
         // Branches of different kinds cannot name a runtime identity.
         std::fs::write(repo.path().join(file), source("", prelude).replace("describe.skip)(", "test)(")).unwrap();
@@ -3188,7 +3431,7 @@ mod tests {
         assert_eq!(widened, [super::super::widened::Scope::Package(String::new())]);
         assert_eq!(
             super::super::widened::scope(repo.path(), spec),
-            super::super::widened::Scope::File(spec.into())
+            Some(super::super::widened::Scope::File(spec.into()))
         );
     }
 
@@ -3324,9 +3567,9 @@ mod tests {
         let error = validate_report_with_inherited("playwright", &repo, &report, &[], 1, &BTreeSet::new(), None, &[summary]).unwrap_err();
         assert!(format!("{error:#}").contains("[G-61]"), "{error:#}");
         assert!(validate_report_with_inherited("playwright", &repo, &report, &[], 1, &BTreeSet::new(), None, &[history]).is_ok());
-        assert_eq!(widened::scope(&repo, "e2e/journeys/orphan.ts"), Scope::Package(String::new()));
+        assert_eq!(widened::scope(&repo, "e2e/journeys/orphan.ts"), Some(Scope::Package(String::new())));
         let runtime = "e2e/journeys/hub-double-runtime.ts";
-        let scopes = [widened::scope(&repo, runtime)];
+        let scopes = [widened::scope(&repo, runtime).unwrap()];
         assert_eq!(widened::commands(Path::new("/cas"), &repo, &[runtime.into()], &scopes, &Default::default()),
             [format!("cas factory worker-check --cas-root /cas -- vitest related --run {runtime}")]);
         assert!(related_tests(&repo, "src/shared.ts").is_none());
@@ -3528,6 +3771,7 @@ process.exit(ok ? 0 : 1);
         git(&["commit", "--quiet", "-m", "base"]);
         let base = git(&["rev-parse", "HEAD"]);
         write(&repo.path().join(spec), &source(""));
+        write(&sibling, &format!("{}\n// owned by the integration suite\n", std::fs::read_to_string(&sibling).unwrap()));
         git(&["commit", "--quiet", "-am", "head"]);
         let head = git(&["rev-parse", "HEAD"]);
 
@@ -3536,6 +3780,9 @@ process.exit(ok ? 0 : 1);
         assert_eq!(tests, [id(spec, "pool drains")]);
         let cas_root = tempfile::tempdir().unwrap();
         let config = "apps/backend/test/jest-inbox-tools.integration.config.js";
+        assert_eq!(super::super::stability::requirements(repo.path(), &head, &base, &[spec.into(), config.into()], None).unwrap(),
+            (tests.clone(), Vec::new()));
+        assert_eq!(super::super::widened::scope(repo.path(), config), None);
         let passing = || super::super::PassingTests::new(cas_root.path(), repo.path(), &head);
         assert_eq!(super::super::stability::missing(&passing(), &tests), tests);
 
@@ -3766,6 +4013,9 @@ process.exit(listed.length ? 0 : 1);
         )
         .unwrap();
         assert_eq!(runner_hint(repo.path(), "api/app-boot.test.cjs"), Some("node --test"));
+        std::fs::write(repo.path().join("api/browser.test.mjs"),
+            "import { test } from 'node:test';\nimport { chromium } from '@playwright/test';\ntest('opens', async () => { await chromium.launch(); });\n").unwrap();
+        assert_eq!(runner_hint(repo.path(), "api/browser.test.mjs"), Some("node --test"));
         assert_eq!(invocation(&["node".into(), "--test".into(), "api/app-boot.test.cjs".into()]).map(|invocation| invocation.runner), Some("node"));
         assert_eq!(runner_hint(repo.path(), "bin/a.test.ts"), Some("vitest"));
         assert_eq!(runner_hint(repo.path(), "bare/a.test.ts"), None);
@@ -4182,12 +4432,39 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         write(catalogue, "[[\"sms\", false]]");
         write("src/__scenarios__/legacy.json", "[[\"fax\", true]]");
         write(spec, &source("scenarios.json", ""));
+        let labels = "src/__scenarios__/labels.spec.ts";
+        write(labels, "import locale from './scenarios.json';\nconst t = (key: string) => {\n  let value: any = locale;\n\
+            for (const part of key.split('.')) value = value?.[part];\n  return String(value ?? key);\n};\n\
+            describe('workbench', () => {\n  beforeEach(() => { vi.stubGlobal('useI18n', () => ({ t })); });\n  it('names the first channel', () => {});\n});\n");
+        write("src/__scenarios__/copy.spec.ts", "it('locks the subject', () => {\n  const en = require('./scenarios.json') as Record<string, string>;\n  expect(en.subject).toBe('x');\n});\n");
+        write("src/__scenarios__/settings.test.ts", "import en from './scenarios.json';\n\
+            const render = () => mount(View, { global: { plugins: [createI18n({ legacy: false, locale: 'en', messages: { en } })] } });\n\
+            it('renders', () => { render(); });\n");
+        let constructed = "src/__scenarios__/i18n.test.ts";
+        write(constructed, "import en from './scenarios.json';\nconst i18n = createI18n({ legacy: false, locale: 'en', messages: { en } });\n\
+            it('renders', () => { mount(View, { global: { plugins: [i18n] } }); });\n");
+        let titled = "src/__scenarios__/handoff.spec.ts";
+        write(titled, "import en from './scenarios.json';\nfor (const plan of [{ id: 'solo', cta: en[0][0] }] as const) {\n\
+            test(`signed out, \"${plan.cta}\" asks`, async () => {});\n}\n");
+        let script = "docs/evidence/scripts/report.cjs";
+        let derived = "src/__scenarios__/derived.spec.ts";
+        write(derived, "import cases from './scenarios.json';\nconst rows = cases.filter(([, listed]) => !listed);\n\
+            const check = (channel) => it(`sends ${channel}`, () => {});\nfor (const [channel] of rows) check(channel);\n");
+        let external = "src/__scenarios__/external.spec.ts";
+        write(external, "import rows from './scenarios.json';\nimport { registerCases } from './register';\nregisterCases(rows);\n");
         let base = commit("base");
 
         write(catalogue, "[[\"sms\", false], [\"email\", true]]");
+        write("docs/evidence/scripts/dump.json", "[]");
+        write(script, "const dump = require('./dump.json');\nconst { match } = require('./match.cjs');\nconsole.log(match(dump));\n");
         let catalogue_only = commit("catalogue only");
-        let required = super::super::stability::requirements(repo.path(), &catalogue_only, &base, &[catalogue.into()], None).unwrap();
-        assert_eq!(required, (Vec::new(), vec![Scope::File(spec.into())]));
+        let required = super::super::stability::requirements(repo.path(), &catalogue_only, &base, &[catalogue.into(), script.into(), "docs/evidence/scripts/dump.json".into()], None).unwrap();
+        assert_eq!(required, (Vec::new(), [spec, derived, external, titled, constructed].map(|path| Scope::File(path.into())).into_iter().collect::<BTreeSet<_>>().into_iter().collect()));
+        write(labels, "const t = (key: string) => key;\ndescribe('workbench', () => {\n\
+            beforeEach(() => { vi.stubGlobal('useI18n', () => ({ t })); });\n  it('names the first channel', () => { t('x'); });\n});\n");
+        let dropped = commit("drop the read-only import");
+        assert_eq!(changed_tests(repo.path(), &catalogue_only, &dropped, &[labels.into()], None).unwrap(),
+            [id(labels, "workbench names the first channel")]);
 
         write(spec, &source("legacy.json", "expect(1).toBe(1);"));
         let switched = commit("switch catalogue");
@@ -4197,7 +4474,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         write(spec, &source("scenarios.json", "expect(2).toBe(2);"));
         let both = commit("harness and catalogue");
         assert!(changed_tests(repo.path(), &base, &both, &[spec.into()], None).is_err());
-        assert_eq!(super::super::widened::scope(repo.path(), spec), Scope::File(spec.into()));
+        assert_eq!(super::super::widened::scope(repo.path(), spec), Some(Scope::File(spec.into())));
     }
 
     /// GH #1977, #2000, #1971: park asks only for tests the task's own
@@ -4334,8 +4611,8 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             ("creator keeps input intact", 2), ("creator menu (compact=false)", 1), ("creator menu (compact=true)", 1),
         ]));
         let repo = Path::new("/project");
-        let iterate = |report: &Value, bad: Option<(usize, &Value)>| verify_repeats("vitest", repo, &templates, &expected, |iteration| {
-            Ok((true, bad.filter(|(at, _)| *at == iteration).map_or(report, |(_, bad)| bad).clone()))
+        let iterate = |report: &Value, bad: Option<(usize, &Value)>| verify_repeats("vitest", repo, &templates, &expected, false, |iteration| {
+            Ok((Ok(()), bad.filter(|(at, _)| *at == iteration).map_or(report, |(_, bad)| bad).clone()))
         });
         iterate(&report, None).expect("five complete iterations are accepted");
         // One of two rows sharing a name is gone while its sibling still passes
@@ -4344,7 +4621,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let mut one_duplicate = report.clone();
         one_duplicate["testResults"][0]["assertionResults"].as_array_mut().unwrap().remove(6);
         assert_eq!(one_duplicate["testResults"][0]["assertionResults"].as_array().unwrap().len(), 6);
-        assert!(verify_repeats("vitest", repo, &templates, &expected, |_| Ok((true, one_duplicate.clone()))).is_err());
+        assert!(verify_repeats("vitest", repo, &templates, &expected, false, |_| Ok((Ok(()), one_duplicate.clone()))).is_err());
         for lost in 0..5 {
             assert!(iterate(&report, Some((lost, &one_duplicate))).is_err(), "iteration {lost} lost one duplicate row");
         }
@@ -4364,7 +4641,17 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let variable_expected = source_rows("a.test.ts", variable).unwrap();
         assert!(variable_expected.is_empty());
         validate_report("vitest", repo, &variable_report, &variable_templates, 1).unwrap();
-        assert!(verify_repeats("vitest", repo, &variable_templates, &variable_expected, |_| Ok((true, variable_report.clone()))).is_err());
+        assert!(verify_repeats("vitest", repo, &variable_templates, &variable_expected, false, |_| Ok((Ok(()), variable_report.clone()))).is_err());
+        let mut whole = variable_report.clone();
+        whole["testResults"][0]["assertionResults"].as_array_mut().unwrap()
+            .extend([json!({"fullName": "unchanged", "status": "passed"}), json!({"fullName": "parked", "status": "skipped"})]);
+        let iterate = |lost: Option<usize>| verify_repeats("vitest", repo, &variable_templates, &variable_expected, true, |iteration| {
+            let mut report = whole.clone();
+            if Some(iteration) == lost { report["testResults"][0]["assertionResults"].as_array_mut().unwrap().remove(1); }
+            Ok((Ok(()), report))
+        });
+        assert_eq!(iterate(None).unwrap().0, 3);
+        assert!(iterate(Some(3)).is_err());
     }
 
     /// The names derived from a source table are the ones Vitest 4.0.18 printed
@@ -4387,13 +4674,20 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
   it.each([['a']])('short %s %s', () => {});
   it.each([['a'], ['b']])('index %# %$ %s', () => {});
   it.each([{ n: 1 }, { n: 2 }])('static title', () => {});
+  it.each(['p', 'q'] as const)('const flat %s', () => {});
+  it.each([{ s: 'x', on: true }] satisfies Row[])('const prop $s $on', () => {});
+  it.each(['en', 'es'] as const)(
+    'keeps the draft destination and follow-up without exposing the internal ID in %s',
+    () => {});
 });"#;
         let derived: BTreeMap<String, usize> = source_rows("a.test.ts", source).unwrap().into_values().flatten().collect();
         let printed = ["p prop bool false", "p prop bool true", "p prop str 'x'", "p prop str ''", "p prop num 1", "p prop num -2",
             "p prop num 1.5", "p prop num +0", "p prop nullish null", "p prop nullish undefined", "p two 1 and 'q' and 1",
             "p two 2 and 'r' and 2", "p missing undefined here", "p pct Funnel Drop then a", "p pct AIDA then c", "p pct one x",
             "p pct one y", "p flat p", "p flat q", "p lit true null undefined", "p extra a", "p short a undefined", "p index 0 1 a",
-            "p index 1 2 b", "p static title", "p static title"];
+            "p index 1 2 b", "p static title", "p static title", "p const flat p", "p const flat q", "p const prop 'x' true",
+            "p keeps the draft destination and follow-up without exposing the internal ID in en",
+            "p keeps the draft destination and follow-up without exposing the internal ID in es"];
         let mut expected = BTreeMap::new();
         for name in printed { *expected.entry(name.to_string()).or_default() += 1; }
         assert_eq!(derived, expected);
@@ -4401,6 +4695,12 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             ("[1, 2]", "int %d and %i"), ("[['a']]", "percent %% and %s"), ("[{ a: 1 }]", "mixed %s and $a"),
             ("[{ s: \"it's\" }]", "quoted $s"), ("[{ s: 'long string value that is well over the forty character threshold' }]", "long $s"),
             ("[[{ k: 1 }]]", "object %s"), ("[[[1, 2]]]", "array %s"), ("[{ a: { b: 1 } }]", "nested $a.b"),
+            ("[390, 1440].flatMap(width =>\n      (['idea', 'revision', 'audit_fixes'] as const).map(flow => ({ width, flow }))\n    )",
+                "keeps the $flow draft preview above progress without a leave control at $width, then opens Content"),
+            ("[\n    { rapid: false, firstSaved: true, lastSaved: true },\n    { rapid: true, firstSaved: false, lastSaved: true }\n  ]",
+                "swaps hook slots before saving and reconciles ordered choices: %j"),
+            ("[\n      [{ status: 'refused', reason: 'protected_zaprite_source' }, true],\n      [{ status: 'skipped' }, false]\n    ]",
+                "maps API outcome %j to an informational protection notice (%s)"),
         ] {
             let unknown = format!("it.each({fragment})('{title}', () => {{}});");
             assert!(source_rows("a.test.ts", &unknown).unwrap().is_empty(), "{title}: rendering is not known exactly");
@@ -4467,6 +4767,18 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             test["results"] = json!([]);
         }
         assert!(validate_report("playwright", repo, &report, &changed, 5).is_err());
+        let once = |project: &str| json!({"projectId":project,"expectedStatus":"passed","results":[{"status":"passed","retry":0}]});
+        let mut related = json!({"config":{"rootDir":"/project/tests","projects":[
+            {"id":"setup","name":"setup","repeatEach":1}, {"id":"journeys","name":"journeys","repeatEach":1}]},
+            "errors":[],"suites":[
+            {"title":"journeys/auth.setup.ts","file":"journeys/auth.setup.ts","column":0,"line":0,"specs":[
+                {"file":"journeys/auth.setup.ts","title":"seeded session for owner","tests":[once("setup")]}]},
+            {"title":"token-login.spec.ts","file":"token-login.spec.ts","column":0,"line":0,"specs":[
+                {"file":"token-login.spec.ts","title":"token login lands","tests":[once("journeys")]}]}]});
+        let spec = ["tests/token-login.spec.ts"];
+        assert_eq!(validate_report_with_inherited("playwright", repo, &related, &[], 1, &BTreeSet::new(), None, &spec).unwrap().0, 1);
+        related["suites"][0]["specs"][0]["tests"][0]["projectId"] = json!("journeys");
+        assert!(validate_report_with_inherited("playwright", repo, &related, &[], 1, &BTreeSet::new(), None, &spec).is_err());
     }
 
     #[test]
@@ -4506,11 +4818,11 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let tests = [id("a.test.js", "seeded")];
         for fail_at in [None, Some(2)] {
             let mut invocations = 0;
-            let result = verify_repeats("vitest", Path::new("/project"), &tests, &BTreeMap::new(), |index| {
+            let result = verify_repeats("vitest", Path::new("/project"), &tests, &BTreeMap::new(), false, |index| {
                 invocations += 1;
                 let pass = Some(index) != fail_at;
                 Ok((
-                    pass,
+                    if pass { Ok(()) } else { Err("exit status: 1".into()) },
                     json!({"success":pass,"testResults":[{"name":"/project/a.test.js", "status":if pass {"passed"} else {"failed"},
                     "assertionResults":[{"fullName":"seeded","status":if pass {"passed"} else {"failed"}}]}]}),
                 ))
@@ -4518,6 +4830,17 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             assert_eq!(result.is_ok(), fail_at.is_none());
             assert_eq!(invocations, if fail_at.is_some() { 3 } else { 5 });
         }
+        let passing = json!({"success":true,"testResults":[{"name":"/project/a.test.js","status":"passed",
+            "assertionResults":[{"fullName":"seeded","status":"passed"}]}]});
+        let error = verify_repeats("vitest", Path::new("/project"), &tests, &BTreeMap::new(), false,
+            |_| Ok((Err("exit status: 1".into()), passing.clone()))).unwrap_err();
+        assert!(error.downcast_ref::<ProcessFailed>().is_some_and(|failed| failed.report_passed && failed.iteration == 1), "{error:#}");
+        let mut skipped = passing.clone();
+        skipped["testResults"][0]["assertionResults"][0]["status"] = json!("skipped");
+        let error = validate_report("vitest", Path::new("/project"), &skipped, &tests, 1).unwrap_err();
+        assert!(error.downcast_ref::<NotRun>().is_some(), "{error:#}");
+        skipped["testResults"][0]["assertionResults"][0]["status"] = json!("failed");
+        assert!(validate_report("vitest", Path::new("/project"), &skipped, &tests, 1).unwrap_err().downcast_ref::<NotRun>().is_none());
     }
 
     /// GH #2172/cas-7b09: producer exit must leave readable traces or assertion

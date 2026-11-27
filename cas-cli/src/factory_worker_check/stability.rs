@@ -244,9 +244,13 @@ pub(crate) fn requirements(repo: &Path, head: &str, target: &str, paths: &[Strin
             Ok(selected) => tests.extend(selected),
             Err(error) => {
                 if error.downcast_ref::<rust::MissingTest>().is_some() { return Err(error); }
-                let scope = super::widened::scope(repo, path);
-                eprintln!("Changed-test classification uncertain for {path} ({error:#}); widening to {scope:?}");
-                widened.insert(scope);
+                match super::widened::scope(repo, path) {
+                    Some(scope) => {
+                        eprintln!("Changed-test classification uncertain for {path} ({error:#}); widening to {scope:?}");
+                        widened.insert(scope);
+                    }
+                    None => eprintln!("Changed-test classification uncertain for {path} ({error:#}); no capped run can select a test for it"),
+                }
             }
         }
     }

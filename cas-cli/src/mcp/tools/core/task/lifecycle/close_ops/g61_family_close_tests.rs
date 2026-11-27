@@ -157,7 +157,7 @@ async fn g61_gate_family_ends_runnable_or_accepted_cas_fcb1() {
                 ("docs/qa/journeys.yaml", REGISTRY.into()),
                 ("apps/web/package.json", "{}".into()), ("apps/web/vitest.config.ts", "export default {};\n".into()),
                 ("apps/web/locales/en.json", "{\"hi\": \"hi\"}\n".into()),
-                ("apps/web/src/chat.history.spec.ts", "import { it } from 'vitest';\nimport { chromium } from '@playwright/test';\nimport en from '../locales/en.json';\nit('renders history', () => { chromium; en; });\n".into()),
+                ("apps/web/src/chat.history.spec.ts", "import { it } from 'vitest';\nimport { chromium } from '@playwright/test';\nimport en from '../locales/en.json';\nfor (const key of Object.keys(en)) it(`renders ${key}`, () => { chromium; });\n".into()),
                 ("tests/journeys/join.spec.ts", format!("{pw}import copy from '../../apps/web/locales/en.json';\ntest('joins', () => {{ copy; }});\n")),
             ], vec![("apps/web/locales/en.json", "{\"hi\": \"hello\"}\n".into())], vec![]),
             ("#2369", vec![

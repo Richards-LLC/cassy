@@ -546,19 +546,24 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
         Phase::Deferred => {
             state.focus_epic_id = crate::ops::fleet::pinned_epic(turn.factory_session);
             let handoff_id = save_handoff(root, turn.agent, &state)?;
+            let (reset_action, summary) = if turn.cli == cas_mux::SupervisorCli::Codex {
+                ("restarts your session", "Context budget: save judgement, then Cassy restarts")
+            } else {
+                ("clears your context", "Context budget: save judgement, then Cassy clears")
+            };
             let notice = format!(
                 "Context budget: your latest call at {} used {} input tokens; the context threshold is {}. Cassy saved your handoff as {handoff_id} \
                  from facts (owned tasks, operator approvals from decision notes, pending asks, workers). In this turn, add only \
                  judgement Cassy can't know (what you were about to do, promises, risks) with `memory action=remember \
                  entry_type=handoff content=\"<your lines>\"`; Cassy merges it under the facts. Start no new work. When this \
-                 turn ends and nothing is in flight, Cassy clears your context. Workers keep running, and the handoff is \
+                 turn ends and nothing is in flight, Cassy {reset_action}. Workers keep running, and the handoff is \
                  injected into your new session.",
                 crate::cli::release_report::eastern_time(state.triggered_at),
                 tokens(state.trigger_tokens),
                 tokens(state.budget),
             );
             let notice_id = queue.enqueue_idempotent(
-                SOURCE, &turn.agent.name, &notice, Some(turn.factory_session), Some("Context budget: save judgement, then Cassy clears"),
+                SOURCE, &turn.agent.name, &notice, Some(turn.factory_session), Some(summary),
                 Some(NotificationPriority::High), &format!("{SOURCE}:notice:{handoff_id}"), Some(&QueueOrigin::Daemon),
             )?;
             let notice_id = match notice_id {

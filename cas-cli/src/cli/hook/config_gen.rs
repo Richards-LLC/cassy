@@ -1312,6 +1312,16 @@ mod codex_provision_tests {
             assert_eq!(additional_context.matches(body).count(), usize::from(index >= 10));
             assert!(queue.message_delivery_report(*id).unwrap().unwrap().delivered_at.is_some());
         }
+        let large_bodies = [format!("payload-large-a{}", "界".repeat(2400)), format!("payload-large-b{}", "界".repeat(2400))];
+        let large_ids: Vec<_> = large_bodies.iter().map(|body| queue.enqueue_with_session("worker", "supervisor", body, "codex-mail").unwrap()).collect();
+        for turn in 0..2 {
+            let output = crate::hooks::handle_hook("UserPromptSubmit", input.clone()).unwrap();
+            let Some(HookSpecificOutput::UserPromptSubmit { additional_context }) = output.hook_specific_output else { panic!("missing character-bounded turn context") };
+            for (index, (id, body)) in large_ids.iter().zip(&large_bodies).enumerate() {
+                assert_eq!(additional_context.matches(body).count(), usize::from(index == turn));
+                assert_eq!(queue.message_delivery_report(*id).unwrap().unwrap().delivered_at.is_some(), index <= turn);
+            }
+        }
         let tool = "mcp__cs__coordination";
         let matcher = hooks["hooks"]["PostToolUse"][0]["matcher"].as_str().unwrap();
         assert!(regex::Regex::new(matcher).unwrap().is_match(tool));

@@ -2,8 +2,9 @@
 
 ### Codex supervisor delivery and continuity
 
-Codex supervisors receive queued messages in one turn-start context block and
-receive new messages after Cassy MCP calls. Idle wake decisions read the
+Codex supervisors receive queued messages at turn start within the existing
+10-row / 5,000-character budget. Overflow remains pending for the next turn;
+new messages also arrive after Cassy MCP calls. Idle wake decisions read the
 supervisor's own account and rollout, including recipient ownership for an
 unbound native session, and preserve the in-flight tool veto.
 

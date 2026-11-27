@@ -2,7 +2,6 @@
 """Measure release-stage budgets without filing tasks."""
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 import sqlite3
@@ -61,8 +60,7 @@ class BudgetBreach(unittest.TestCase):
 
     def file_breach(self, events: str) -> subprocess.CompletedProcess:
         (self.run_dir / "stage-events.tsv").write_text(events)
-        env = dict(os.environ, PATH=f"{self.tmp}{os.pathsep}{os.environ['PATH']}",
-                   FAKE_CAS_LOG=str(self.log),
+        env = dict(os.environ, FAKE_CAS_LOG=str(self.log),
                    LANDED=str(self.run_dir / "landed-main.sha"), GH_BIN=str(self.gh))
         measured = subprocess.run(
             ["bash", str(SCRIPTS / "release-latency-receipt.sh"), "v9.99.8",
@@ -71,10 +69,8 @@ class BudgetBreach(unittest.TestCase):
         return subprocess.run(
             [sys.executable, str(SCRIPTS / "release-budget-breach.py"), "v9.99.8",
              str(self.run_dir)],
-            cwd=self.tmp, env=env, capture_output=True, text=True)
-
-    def calls(self) -> list[dict]:
-        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+            cwd=self.tmp, env=dict(env, PATH=f"{self.tmp}{os.pathsep}{env['PATH']}"),
+            capture_output=True, text=True)
 
     def test_budget_misses_remain_measured_without_filing_or_markers(self):
         for events in (STAGE_EVENTS, "1791997729\tgate\tstart\n1791998329\tgate\tdone\n"):
@@ -85,7 +81,7 @@ class BudgetBreach(unittest.TestCase):
                               (self.run_dir / "release-latency.receipt").read_text().splitlines())
                 expected = "gate:3029/900,publish:1526/1200" if events == STAGE_EVENTS else "none"
                 self.assertEqual(values["BUDGET_BREACHES"], expected)
-                self.assertEqual(self.calls(), [])
+                self.assertFalse(self.log.exists())
                 self.assertFalse((self.run_dir / "budget-breach.task").exists())
 
 

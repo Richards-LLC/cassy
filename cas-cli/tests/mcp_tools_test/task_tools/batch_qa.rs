@@ -1095,6 +1095,9 @@ async fn batch_qa_default_defers_and_explicit_per_task_keeps_evidence_gate_cas_a
     assert_eq!(open_task_store(&root).unwrap().get("cas-bq01").unwrap().status,
         TaskStatus::AwaitingMerge, "{unset}");
     assert!(cas_store::has_qa_batch_deferral(&root, "cas-bq01").unwrap());
+    // Integrate cas-bq01 so cas-bq02's range holds only its own rendered file.
+    let anchor = open_task_store(&root).unwrap().get("cas-bq01").unwrap().deliverables.factory_branch_anchor.unwrap();
+    git(&fx.repo, &["branch", "-f", "main", &anchor]);
     fx.reconfigure("mode='per_task'");
     let explicit = fx.close("cas-bq02").await;
     assert!(explicit.contains("no `qa-bundle:` note"), "{explicit}");
@@ -1307,7 +1310,7 @@ async fn batch_qa_changed_ledger_and_advanced_anchor_cannot_reuse_receipt_cas_d6
 #[tokio::test]
 async fn batch_qa_explicit_request_remains_available_cas_d697() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture_with(&mut env, &["cas-bq03"]);
+    let fx = fixture_with(&mut env, &["cas-bq01", "cas-bq02", "cas-bq03"]);
     fx.unmerge();
     let park = fx.close("cas-bq03").await;
     assert_eq!(
@@ -1403,7 +1406,7 @@ async fn batch_qa_debt_survives_disabled_gate_cas_d697() {
 #[tokio::test]
 async fn batch_qa_receipt_preserves_skip_marker_gate_cas_d697() {
     let mut env = TestEnvGuard::temp_home();
-    let mut fx = fixture_with(&mut env, &["cas-bq01"]);
+    let mut fx = fixture_with(&mut env, &["cas-bq01", "cas-bq02", "cas-bq03"]);
     fx.unmerge();
     let test = fx.repo.join("hub-web/e2e/spacing.spec.ts");
     std::fs::create_dir_all(test.parent().unwrap()).unwrap();

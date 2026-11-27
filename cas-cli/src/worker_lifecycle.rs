@@ -63,6 +63,7 @@ pub(crate) fn bind_task(root: &Path, worker_id: &str, task_id: &str) -> crate::R
 fn finished(task: &Task) -> bool {
     task.is_terminal()
         || task.status == TaskStatus::AwaitingMerge && !task.deliverables.merge_conflicted
+        || task.pending_verification && task.deliverables.parked_branch.is_some()
 }
 
 pub(crate) fn retire_after_delivery(root: &Path, task_id: &str) -> crate::Result<()> {
@@ -106,10 +107,10 @@ fn retire(root: &Path, worker: &Agent, task: &Task) -> crate::Result<()> {
         .map_err(|e| crate::error::CasError::Other(e.to_string()))?;
     let agents = crate::store::open_agent_store(root)?;
     let mut current = agents.get(&worker.id)?;
-    current
-        .metadata
-        .insert("worker_retired_task".into(), task.id.clone());
-    agents.update(&current)?;
+    if !current.metadata.contains_key("worker_retired_task") {
+        current.metadata.insert("worker_retired_task".into(), task.id.clone());
+        agents.update(&current)?;
+    }
     let queue = crate::store::open_spawn_queue_store(root)?;
     let pending = queue.peek(1000)?.iter().any(|request| {
         request.action == cas_store::SpawnAction::Shutdown

@@ -8144,7 +8144,11 @@ impl CasCore {
         }
         #[cfg(test)]
         lifecycle_race_hook::fire_before_handoff(&id);
-        if result.as_ref().is_ok_and(|result| result.is_error.unwrap_or(false)) {
+        if result.as_ref().is_ok_and(|result| {
+            result.is_error.unwrap_or(false)
+                && !result.content.iter().any(|content| matches!(content,
+                    rmcp::model::ContentBlock::Text(text) if text.text.lines().any(is_merge_handoff)))
+        }) {
             return result;
         }
         let note = self.advance_queue_after_delivery(&id).await;

@@ -575,6 +575,12 @@ async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_ca
         .unwrap().peek(10).unwrap().is_empty());
     let refused = prowl.claim("cas-a2").await.unwrap_err();
     assert!(refused.contains("SPLIT TO A PEER"), "{refused}");
+    for (side, id) in [(&soundwave, "cas-d2"), (&prowl, "cas-a2")] {
+        let store = open_task_store(&side.machine.cas_dir).unwrap();
+        let mut task = store.get(id).unwrap();
+        task.assignee = None;
+        store.update(&task).unwrap();
+    }
     let refused = soundwave
         .factory(json!({"action": "spawn_workers", "count": 1, "task_id": "cas-d1", "isolate": true}))
         .await

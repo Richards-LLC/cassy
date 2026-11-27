@@ -11,7 +11,7 @@ use std::process::Command;
 
 async fn squash_deferred_delivery_cas_5129a(receipt: bool) {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
+    let fx = fixture_with(&mut env, &["cas-bq01"]);
     fx.unmerge();
     let parked = fx.close("cas-bq01").await;
     let root = fx.repo.join(".cas");
@@ -138,7 +138,7 @@ async fn squash_close_with_batch_receipt_cas_5129a() {
 #[tokio::test]
 async fn unreviewed_squash_cannot_clear_debt_cas_5129a() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
+    let fx = fixture_with(&mut env, &["cas-bq01"]);
     fx.unmerge();
     let parked = fx.close("cas-bq01").await;
     let root = fx.repo.join(".cas");
@@ -309,7 +309,7 @@ async fn shared_checkout_handoff_names_the_recorder_only_with_delivery_commits_c
 #[tokio::test]
 async fn cas_d697_round2_stale_origin_cannot_defer_integrated_delivery() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
+    let fx = fixture_with(&mut env, &["cas-bq01"]);
     fx.unmerge();
     let seed = git(&fx.repo, &["rev-parse", "main"]);
     git(&fx.repo, &["update-ref", "refs/remotes/origin/main", &seed]);
@@ -347,7 +347,7 @@ async fn cas_d697_round2_stale_origin_cannot_defer_integrated_delivery() {
 #[tokio::test]
 async fn cas_d697_round2_final_close_backstop_covers_unassigned_path() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
+    let fx = fixture_with(&mut env, &["cas-bq01"]);
     fx.unmerge();
     let parked = fx.close("cas-bq01").await;
     let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
@@ -389,7 +389,7 @@ async fn cas_d697_round2_final_close_backstop_covers_unassigned_path() {
 #[tokio::test]
 async fn cas_d697_round2_mode_switch_retains_batch_debt() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
+    let fx = fixture_with(&mut env, &["cas-bq01"]);
     fx.unmerge();
     let parked = fx.close("cas-bq01").await;
     let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
@@ -421,7 +421,7 @@ async fn cas_d697_round2_mode_switch_retains_batch_debt() {
 #[tokio::test]
 async fn cas_d697_round2_passed_explicit_qa_satisfies_deferred_close() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
+    let fx = fixture_with(&mut env, &["cas-bq01"]);
     fx.unmerge();
     let parked = fx.close("cas-bq01").await;
     let root = fx.repo.join(".cas");
@@ -483,7 +483,7 @@ async fn cas_d697_round2_passed_explicit_qa_satisfies_deferred_close() {
 #[tokio::test]
 async fn cas_d697_round2_direct_update_cannot_drop_debt() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
+    let fx = fixture_with(&mut env, &["cas-bq01"]);
     fx.unmerge();
     let parked = fx.close("cas-bq01").await;
     let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
@@ -542,6 +542,7 @@ struct Fx {
     staging: String,
     artifact: String,
     ledger: PathBuf,
+    api: Vec<String>,
 }
 
 /// GH #1447 / #1427: shipped cas-3575/cas-13f3 had neither a usable
@@ -611,12 +612,21 @@ async fn shipped_identity_recovery_unblocks_batch_close_cas_d853() {
     }
 }
 
+/// Batch-identity cases park an API-only delivery (`api/<id>.rs`). It is still
+/// batch-deferred, but has no rendered surface for the cas-0304 G-171 walk.
+const API_PATHS: &str = "api_paths=['api/**']";
+
 fn fixture(env: &mut TestEnvGuard) -> Fx {
+    fixture_with(env, &[])
+}
+
+fn fixture_with(env: &mut TestEnvGuard, api: &[&str]) -> Fx {
     let (temp, core) = setup_cas(env);
     let repo = temp.path().to_path_buf();
     env.set("CAS_AGENT_ROLE", "supervisor");
-    std::fs::write(repo.join(".cas/config.toml"),
-        "[project]\ncanonical_id='batch-project'\n[verification]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
+    std::fs::write(repo.join(".cas/config.toml"), format!(
+        "[project]\ncanonical_id='batch-project'\n[verification]\nenabled=false\n[qa]\nmode='batch'\n{API_PATHS}\n")).unwrap();
+    std::fs::create_dir_all(repo.join("api")).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
     std::fs::write(repo.join("README.md"), "seed\n").unwrap();
     git(&repo, &["add", "README.md"]);
@@ -629,8 +639,9 @@ fn fixture(env: &mut TestEnvGuard) -> Fx {
         task.assignee = Some("test-agent".into());
         task.demo_statement = "See the changed spacing on staging".into();
         tasks.add(&task).unwrap();
-        std::fs::write(repo.join(format!("{id}.css")), "body{gap:8px}\n").unwrap();
-        git(&repo, &["add", &format!("{id}.css")]);
+        let file = if api.contains(&id) { format!("api/{id}.rs") } else { format!("{id}.css") };
+        std::fs::write(repo.join(&file), "body{gap:8px}\n").unwrap();
+        git(&repo, &["add", &file]);
         git(&repo, &["commit", "-qm", &format!("{id}: spacing")]);
         task = tasks.get(id).unwrap();
         task.deliverables.factory_branch_anchor = Some(git(&repo, &["rev-parse", "HEAD"]));
@@ -682,10 +693,14 @@ fn fixture(env: &mut TestEnvGuard) -> Fx {
         staging,
         artifact,
         ledger,
+        api: api.iter().map(|id| id.to_string()).collect(),
     }
 }
 
 impl Fx {
+    fn delivery_file(&self, id: &str) -> String {
+        if self.api.iter().any(|api| api == id) { format!("api/{id}.rs") } else { format!("{id}.css") }
+    }
     fn with_declared_coverage(mut self) -> Self {
         let root = self.repo.join(".cas");
         let owner = open_task_store(&root).unwrap().get("cas-bq01").unwrap();
@@ -735,7 +750,7 @@ impl Fx {
 async fn reviewed_delivery_with_legacy_producer_ledger_closes_cas_dd03() {
     for batch in [true, false] {
         let mut env = TestEnvGuard::temp_home();
-        let fx = fixture(&mut env);
+        let fx = fixture_with(&mut env, &["cas-bq01"]);
         fx.unmerge();
         let root = fx.repo.join(".cas");
         let tasks = open_task_store(&root).unwrap();
@@ -910,7 +925,7 @@ impl Fx {
     }
     fn reconfigure(&self, qa: &str) {
         std::fs::write(self.repo.join(".cas/config.toml"), format!(
-            "[project]\ncanonical_id='batch-project'\n[verification]\nenabled=false\n[qa]\n{qa}\n")).unwrap();
+            "[project]\ncanonical_id='batch-project'\n[verification]\nenabled=false\n[qa]\n{API_PATHS}\n{qa}\n")).unwrap();
     }
     async fn record(&self) -> String {
         extract_text(
@@ -943,7 +958,7 @@ impl Fx {
 #[tokio::test]
 async fn batch_qa_deferred_park_requires_receipt_after_integration_cas_d697() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
+    let fx = fixture_with(&mut env, &["cas-bq01"]);
     fx.unmerge();
     let root = fx.repo.join(".cas");
     // Waiving a pending review preserves both records with the same round
@@ -1002,7 +1017,7 @@ async fn batch_qa_deferred_park_requires_receipt_after_integration_cas_d697() {
 #[tokio::test]
 async fn batch_qa_restart_recovers_merged_delivery_anchor_cas_e5ac9() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
+    let fx = fixture_with(&mut env, &["cas-bq01"]);
     fx.unmerge();
     let root = fx.repo.join(".cas");
     let tasks = open_task_store(&root).unwrap();
@@ -1050,8 +1065,8 @@ async fn batch_qa_restart_recovers_merged_delivery_anchor_cas_e5ac9() {
 
     // History identifies the old delivery; it must not let its approval cover
     // a new correction that has not acquired a current parked anchor yet.
-    std::fs::write(fx.repo.join("cas-bq01.css"), "body{gap:16px}\n").unwrap();
-    git(&fx.repo, &["add", "cas-bq01.css"]);
+    std::fs::write(fx.repo.join(fx.delivery_file("cas-bq01")), "body{gap:16px}\n").unwrap();
+    git(&fx.repo, &["add", &fx.delivery_file("cas-bq01")]);
     git(&fx.repo, &["commit", "-qm", "cas-bq01: unreviewed correction after restart"]);
     let corrected = git(&fx.repo, &["rev-parse", "HEAD"]);
     git(&fx.repo, &["branch", "-f", "main", &corrected]);
@@ -1072,7 +1087,7 @@ async fn batch_qa_restart_recovers_merged_delivery_anchor_cas_e5ac9() {
 #[tokio::test]
 async fn batch_qa_default_defers_and_explicit_per_task_keeps_evidence_gate_cas_a56a() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
+    let fx = fixture_with(&mut env, &["cas-bq01"]);
     fx.unmerge();
     fx.reconfigure("");
     let unset = fx.close("cas-bq01").await;
@@ -1292,7 +1307,7 @@ async fn batch_qa_changed_ledger_and_advanced_anchor_cannot_reuse_receipt_cas_d6
 #[tokio::test]
 async fn batch_qa_explicit_request_remains_available_cas_d697() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
+    let fx = fixture_with(&mut env, &["cas-bq03"]);
     fx.unmerge();
     let park = fx.close("cas-bq03").await;
     assert_eq!(
@@ -1339,8 +1354,8 @@ async fn batch_qa_explicit_request_remains_available_cas_d697() {
         let mut task = tasks.get("cas-bq03").unwrap();
         task.status = TaskStatus::InProgress;
         tasks.update(&task).unwrap();
-        std::fs::write(fx.repo.join("cas-bq03.css"), format!("body{{gap:{}px}}\n", 9 + index)).unwrap();
-        git(&fx.repo, &["add", "cas-bq03.css"]);
+        std::fs::write(fx.repo.join(fx.delivery_file("cas-bq03")), format!("body{{gap:{}px}}\n", 9 + index)).unwrap();
+        git(&fx.repo, &["add", &fx.delivery_file("cas-bq03")]);
         git(&fx.repo, &["commit", "-qm", "fix(cas-bq03): correct spacing"]);
         let head = git(&fx.repo, &["rev-parse", "HEAD"]);
         // Fx::close sends the stored delivery anchor as commit_receipt.
@@ -1362,7 +1377,7 @@ async fn batch_qa_explicit_request_remains_available_cas_d697() {
 #[tokio::test]
 async fn batch_qa_debt_survives_disabled_gate_cas_d697() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
+    let fx = fixture_with(&mut env, &["cas-bq01"]);
     fx.unmerge();
     let park = fx.close("cas-bq01").await;
     let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
@@ -1388,7 +1403,7 @@ async fn batch_qa_debt_survives_disabled_gate_cas_d697() {
 #[tokio::test]
 async fn batch_qa_receipt_preserves_skip_marker_gate_cas_d697() {
     let mut env = TestEnvGuard::temp_home();
-    let mut fx = fixture(&mut env);
+    let mut fx = fixture_with(&mut env, &["cas-bq01"]);
     fx.unmerge();
     let test = fx.repo.join("hub-web/e2e/spacing.spec.ts");
     std::fs::create_dir_all(test.parent().unwrap()).unwrap();

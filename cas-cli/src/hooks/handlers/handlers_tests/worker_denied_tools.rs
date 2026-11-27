@@ -360,7 +360,9 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
     let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
     let store = home.join(".config/neonctl");
     std::fs::create_dir_all(&store).unwrap();
-    std::fs::write(store.join("credentials.json"), r#"{"token":"fixture-only"}"#).unwrap();
+    let credential = store.join("credentials.json");
+    let fixture_bytes = br#"{"token":"fixture-only"}"#;
+    std::fs::write(&credential, fixture_bytes).unwrap();
     // From a project dir, as a worker runs it; the fixture's config home is
     // itself a store parent.
     let project = tempfile::tempdir().unwrap();
@@ -371,6 +373,8 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
     for listing in [
         "rg --files /Applications/Postgres.app /opt /usr/local ~/.local/share ~/Library/pnpm 2>/dev/null",
         "find ~ -path '*cas-worker/references/discipline.md' 2>/dev/null",
+        "find ~ -maxdepth 4 -type l -lname '*APPS/*'",
+        "find ~ -maxdepth 4 -type l -ilname '*APPS/*'",
         "find node_modules -maxdepth 3 -type l -lname '*apps/*'",
         "find apps/frontend/node_modules apps/backend/node_modules -maxdepth 2 -type l -lname '/*'",
         "find apps/frontend/node_modules apps/backend/node_modules -maxdepth 2 -type l -name '/*'",
@@ -390,6 +394,10 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
     // A listed name that reaches a reader is still a credential read.
     for command in [
         "find ~/.config/neonctl -type l -lname '/*'",
+        "find ~/.config/neonctl -type l -ilname '/*'",
+        "find ~ -type l -ilname '*APPS/*' -exec cat {} +",
+        "find ~ -type l -ilname '*APPS/*' | xargs cat",
+        "find ~ -type l -ilname '*APPS/*' -fprint ~/.config/neonctl/credentials.json",
         "find ~ -name credentials.json -print0 | sort --files0-from=-",
         "find ~ -name credentials.json | (xargs cat)",
         // Another segment of the compound command reads a store.
@@ -417,6 +425,7 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
         let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
         assert_operator_credential_refusal(output, command);
     }
+    assert_eq!(std::fs::read(credential).unwrap(), fixture_bytes);
 }
 
 #[test]

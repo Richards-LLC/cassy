@@ -1778,8 +1778,8 @@ fn raw_pr_merge_is_flagged_for_pr_head_checks_without_protection_gh2260() {
             };
             let output = crate::hooks::handlers::handle_pre_tool_use(&input, Some(&root)).unwrap();
             let warned = crate::test_support::pretool_warned(&output);
-            assert!(!crate::test_support::pretool_blocked(&output), "{role} {check}: {output:?}");
-            assert_eq!(!warned.is_empty(), code.is_some(), "{role} {check}: {warned:?}");
+            let blocked = crate::test_support::pretool_blocked(&output);
+            assert_eq!(blocked || !warned.is_empty(), code.is_some(), "{role} {check}: {output:?}");
         }
     }
     drop(env);

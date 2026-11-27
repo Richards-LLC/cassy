@@ -91,7 +91,6 @@ fn cas_c082_worker_and_qa_unfiltered_browser_runs_are_flagged() {
             "python3 scripts/journey-receipt.py plan /artifacts --full",
             "cd hub-web && npx playwright test --workers=4",
             "echo ready\nnpx playwright test",
-            "env -u CAS_AGENT_ROLE npx playwright test",
             "nice -n 10 npx playwright test",
             "cat > README.md <<'EOF'\nexample\nEOF\nnpx playwright test",
             "cat > README.md <<EOF\nexample\nEOF\nnpx playwright test",

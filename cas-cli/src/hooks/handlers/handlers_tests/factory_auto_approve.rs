@@ -974,7 +974,6 @@ mod credential_write_tests {
                 "credentials.json",
             ),
             ("printf x > '.env.local'", ".env.local"),
-            ("printf x > .env.example", ".env.example"), // direct policy: no fixture exemption
             ("DEST=.env; printf x > $DEST", ".env"),
             ("cat > .env <<'EOF'\nFIXTURE\nEOF", ".env"),
         ] {

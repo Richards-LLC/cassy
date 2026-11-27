@@ -554,22 +554,63 @@ fn refuse(input: &HookInput, cas_root: Option<&Path>, reason: String, warnings: 
         return Some(HookOutput::with_pre_tool_permission("deny", &reason));
     }
     if let Some(root) = cas_root {
-        let actor = std::env::var("CAS_AGENT_NAME")
-            .ok()
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| current_agent_id(input));
-        let harness = format!("{:?}", crate::harness_policy::own_harness_from_env()).to_lowercase();
-        let task_id = agent_active_tasks(&mut ToolHookStores::new(root), input).into_iter().next().map(|task| task.id);
-        let recorded = crate::store::open_event_store(root).map_err(anyhow::Error::from).and_then(|store| {
-            crate::gates::facts::record_allowed(store.as_ref(), &codes, task_id.as_deref(), &actor, &harness, &reason)
-        });
-        if let Err(error) = recorded {
-            tracing::warn!(%error, ?codes, "could not record demoted guard fact");
-        }
+        record_demoted(Some(input), root, &reason);
     }
     let heading = reason.lines().find(|line| !line.trim().is_empty()).unwrap_or_default();
     warnings.push(format!("Warning only, the call proceeds: {heading} {}", codes.iter().map(|code| format!("[{code}]")).collect::<Vec<_>>().join(" ")));
     None
+}
+
+pub(crate) fn record_demoted(input: Option<&HookInput>, cas_root: &Path, reason: &str) {
+    let codes = crate::gates::codes_in(reason);
+    let actor = std::env::var("CAS_AGENT_NAME")
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| input.map(current_agent_id))
+        .unwrap_or_else(|| "unknown".into());
+    let harness = cas_core::env_overlay::var("CAS_HOOK_HARNESS")
+        .ok()
+        .filter(|harness| !harness.trim().is_empty())
+        .unwrap_or_else(|| format!("{:?}", crate::harness_policy::own_harness_from_env()))
+        .to_lowercase();
+    let task_id = input
+        .and_then(|input| agent_active_tasks(&mut ToolHookStores::new(cas_root), input).into_iter().next())
+        .map(|task| task.id);
+    let recorded = crate::store::open_event_store(cas_root).map_err(anyhow::Error::from).and_then(|store| {
+        crate::gates::facts::record_allowed(store.as_ref(), &codes, task_id.as_deref(), &actor, &harness, reason)
+    });
+    if let Err(error) = recorded {
+        tracing::warn!(%error, ?codes, "could not record demoted guard fact");
+    }
+}
+
+/// The native entry's fail-open answer when the hook cannot run with its stores: the
+/// guards that need none, then the default secret-file patterns.
+pub(crate) fn pre_tool_without_stores(input: &HookInput) -> HookOutput {
+    let output = handle_pre_tool_use(input, None).unwrap_or_else(|_| HookOutput::empty());
+    if crate::gates::facts::hook_denial(&output).is_some() {
+        return output;
+    }
+    let protection = crate::config::PreToolUseProtectionConfig::default();
+    let shell_targets: Vec<String> = input
+        .tool_input
+        .as_ref()
+        .and_then(|tool_input| tool_input.get("command").and_then(|command| command.as_str()))
+        .filter(|_| input.tool_name.as_deref() == Some("Bash"))
+        .map(bash_write_targets)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|target| Path::new(&input.cwd).join(target).to_string_lossy().into_owned())
+        .collect();
+    let file_path = input.tool_input.as_ref().and_then(|tool_input| tool_input.get("file_path")).and_then(|path| path.as_str());
+    for path in file_path.into_iter().chain(shell_targets.iter().map(String::as_str)) {
+        let secret = protection.files.iter().any(|pattern| (path.ends_with(pattern.as_str()) || path.contains(&format!("/{pattern}"))) && !is_env_fixture(path))
+            || protection.patterns.iter().any(|pattern| path.ends_with(pattern.as_str()) || path.contains(pattern.as_str()));
+        if secret {
+            return HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-33", "Protected file: may contain secrets or credentials"));
+        }
+    }
+    output
 }
 
 /// Pure admission selection; safe before logging, DB discovery or telemetry.

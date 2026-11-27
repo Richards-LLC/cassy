@@ -28,7 +28,7 @@ pub use codemap::detect_codemap_structural_changes;
 pub use message_display::handle_message_display;
 pub use notifications::{handle_notification, handle_permission_request, handle_pre_compact};
 pub use pre_tool::handle_pre_tool_use;
-pub(crate) use pre_tool::worker_cargo_request;
+pub(crate) use pre_tool::{pre_tool_without_stores, record_demoted, worker_cargo_request};
 /// `cas violet post|thread` applies the same deliverable gate as a `violet_post` tool call.
 pub(crate) use publication_gate::denial_with_overrides as violet_publication_check;
 #[cfg(test)]

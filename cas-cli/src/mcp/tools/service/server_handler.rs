@@ -1911,7 +1911,7 @@ mod tests {
             #[cfg(feature = "mcp-proxy")] None);
         let request = |count| serde_json::from_value(json!({
             "action": "spawn_workers", "count": count, "isolate": true,
-            "task_id": task_id, "cli": "grok", "worker_names": "steady-owl-21"
+            "task_id": task_id, "cli": "grok"
         })).unwrap();
 
         let refused = service.factory_with_budget_for_testing(

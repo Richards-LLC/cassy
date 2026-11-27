@@ -346,7 +346,9 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     crate::store::open_skill_store(dir.path()).unwrap().init().unwrap();
     let agents = crate::store::open_agent_store(dir.path()).unwrap();
     agents.init().unwrap();
-    agents.register(&Agent::new_with_role("gate-supervisor".into(), "supervisor".into(), AgentRole::Supervisor)).unwrap();
+    let mut actor = Agent::new_with_role("gate-supervisor".into(), "supervisor".into(), AgentRole::Supervisor);
+    actor.metadata.insert("supervisor_cli".into(), "codex".into());
+    agents.register(&actor).unwrap();
     core.set_agent_id_for_testing("gate-supervisor".into());
     assert!(core.load_config().verification_enabled());
     crate::store::open_verification_store(dir.path()).unwrap();
@@ -370,6 +372,20 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     let response = client.call_tool(request).await;
     assert!(response.is_err());
     assert!(codes_in(&format!("{response:?}")).contains(&"G-116"));
+    let request = serde_json::from_value(serde_json::json!({
+        "name":"task", "arguments":{"action":"show", "id":"cas-does-not-exist"},
+    })).unwrap();
+    let response = client.call_tool(request).await;
+    assert!(response.as_ref().is_err_or(|answer| answer.is_error == Some(true)));
+    work.wait_idle().await;
+    let uncoded = store.list_by_type(cas_types::EventType::GateRefused, 100).unwrap().into_iter()
+        .find(|event| event.entity_id == UNCODED && event.metadata.as_ref().is_some_and(|m| m["task_id"] == "cas-does-not-exist"))
+        .expect("uncoded MCP refusal must be retained");
+    let metadata = uncoded.metadata.unwrap();
+    assert_eq!(metadata["actor"], "gate-supervisor");
+    assert_eq!(metadata["harness"], "codex");
+    assert_eq!(metadata["tool"], "task");
+    assert_eq!(metadata["action"], "show");
     // The real task-close producer must identify the verification gate it
     // waived, and the common MCP observer must persist exactly one fact.
     let request = serde_json::from_value(serde_json::json!({

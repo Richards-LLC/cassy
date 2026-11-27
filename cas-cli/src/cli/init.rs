@@ -530,9 +530,6 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     let mut builtins_count = 0;
     let mut codex_configured = false;
     let mut grok_configured = false;
-    let gitignore_updated = ensure_gitignore(cwd).is_ok();
-    let _ = gitignore_updated;
-
     if config.agents.claude {
         hooks_configured = configure_claude_hooks(cwd, false).unwrap_or(false);
         // MCP registration is required for a usable Claude install, just as
@@ -580,6 +577,7 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     // AGENTS.md carries the harness-neutral Cassy directive every harness
     // reads (audit D3); CLAUDE.md imports it.
     let _ = update_agents_md(cwd);
+    let _ = ensure_gitignore(cwd);
 
     // Setup factory tooling
     let factory_tooling_result = factory_tooling::setup_factory_tooling(cwd).unwrap_or_default();
@@ -1041,9 +1039,6 @@ fn apply_configuration(
         })?;
     }
 
-    // Step 2: Ensure .cas is in .gitignore
-    execute_step("Updating .gitignore", animate, || ensure_gitignore(cwd))?;
-
     if config.agents.claude {
         // Step 2: Configure local editor hooks
         execute_step("Configuring editor hooks", animate, || {
@@ -1112,6 +1107,7 @@ fn apply_configuration(
         update_agents_md(cwd)?;
         Ok("AGENTS.md".to_string())
     })?;
+    execute_step("Updating .gitignore", animate, || ensure_gitignore(cwd))?;
 
     // Step 7: Setup factory tooling helper templates
     execute_step("Setting up factory tooling", animate, || {
@@ -1482,31 +1478,16 @@ fn write_colored(
 
 /// Ensure `.cas` is listed in `.gitignore`. If no `.gitignore` exists, create one.
 fn ensure_gitignore(cwd: &Path) -> anyhow::Result<String> {
-    let gitignore_path = cwd.join(".gitignore");
-    if gitignore_path.exists() {
-        let content = std::fs::read_to_string(&gitignore_path)?;
-        // Check if .cas is already ignored (exact line match)
-        let already_ignored = content.lines().any(|line| {
-            let trimmed = line.trim();
-            trimmed == ".cas" || trimmed == ".cas/" || trimmed == "/.cas" || trimmed == "/.cas/"
-        });
-        if already_ignored {
-            return Ok("already in .gitignore".to_string());
-        }
-        // Append .cas to existing .gitignore
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&gitignore_path)?;
-        // Ensure we start on a new line
-        if !content.ends_with('\n') {
-            std::io::Write::write_all(&mut file, b"\n")?;
-        }
-        std::io::Write::write_all(&mut file, b".cas/\n")?;
-        Ok(".gitignore (appended)".to_string())
-    } else {
-        std::fs::write(&gitignore_path, ".cas/\n")?;
-        Ok(".gitignore (created)".to_string())
+    let existed = cwd.join(".gitignore").exists();
+    let harnesses = crate::cli::project_files::harnesses(cwd);
+    let report = crate::builtins::ensure_builtin_gitignore(cwd, &harnesses)?;
+    Ok(match (report.authoring_repo_skipped, report.updated, existed) {
+        (true, _, _) => ".gitignore (authoring checkout, unchanged)",
+        (_, true, false) => ".gitignore (created)",
+        (_, true, true) => ".gitignore (updated)",
+        _ => "already in .gitignore",
     }
+    .into())
 }
 
 // ============================================================================

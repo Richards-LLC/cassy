@@ -249,8 +249,7 @@ pub(crate) fn plan_claude_md(project_root: &Path) -> anyhow::Result<ClaudeMdPlan
         });
     }
 
-    // Prepend new section to existing content
-    let new_content = format!("{new_section}\n\n{content}");
+    let new_content = crate::cli::project_files::prepend_claude_block(&content, &new_section);
     Ok(ClaudeMdPlan::Modify {
         old: content,
         new: new_content,

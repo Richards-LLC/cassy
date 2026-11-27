@@ -3083,6 +3083,64 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     let working = hook_timeouts(&std::fs::read_to_string(linked.join(unchanged[0])).unwrap());
     let committed = hook_timeouts(&cas_6718_git(&linked, &["show", "HEAD:.claude/settings.json"]));
     assert!(working.contains(&17) && committed.contains(&17), "working: {working:?}, committed: {committed:?}");
+
+    let fresh = env.home().join("fresh-consumer");
+    std::fs::create_dir_all(fresh.join(".claude")).unwrap();
+    let instructions = "# Project guidance\n\nUse the project's own fixtures.\n";
+    std::fs::write(fresh.join("CLAUDE.md"), instructions).unwrap();
+    cas_6718_git(&fresh, &["init", "-q", "-b", "main"]);
+    cas_6718_git(&fresh, &["add", "CLAUDE.md"]);
+    cas_6718_git(
+        &fresh,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "project baseline",
+        ],
+    );
+    let baseline = cas_6718_git(&fresh, &["rev-parse", "HEAD"]);
+    let fresh_root = fresh.join(".cas");
+    env.set_current_dir(&fresh);
+    env.set("CAS_ROOT", &fresh_root);
+    env.set("CAS_INIT_NO_TIMEOUT", "1");
+    crate::cli::init::execute(
+        &crate::cli::init::InitArgs {
+            yes: true,
+            no_integrations: true,
+            ..Default::default()
+        },
+        &update_test_cli(false),
+    )
+    .unwrap();
+    cas_6718_git(&fresh, &["checkout", "-qb", "repair/managed-files"]);
+    let sync = || {
+        let (result, output) =
+            capture_phase(true, || execute(&args, &update_test_cli(true), Some(&fresh_root)));
+        result.unwrap();
+        serde_json::from_str::<serde_json::Value>(output.lines().last().unwrap()).unwrap()
+    };
+    let applied = sync();
+    assert_eq!(applied["managed_files"]["outcome"], "committed");
+    assert_eq!(cas_6718_git(&fresh, &["rev-parse", "HEAD^", "main"]), baseline.repeat(2));
+    let head = cas_6718_git(&fresh, &["rev-parse", "HEAD"]);
+    assert_eq!(applied["managed_files"]["commit"], head.trim());
+    assert!(cas_6718_git(&fresh, &["show", "HEAD:CLAUDE.md"]).contains(instructions));
+    for path in [".cas/probe", ".env.worktree", ".fallow/probe"] {
+        cas_6718_git(&fresh, &["check-ignore", "--", path]);
+    }
+    let status = || cas_6718_git(&fresh, &["status", "--porcelain", "--", "CLAUDE.md", ".gitignore"]);
+    let first = status();
+    assert!(first.is_empty(), "fresh init left tracked managed residue: {first}");
+    let index = std::fs::read(fresh.join(".git/index")).unwrap();
+    let repeated = sync();
+    assert_eq!(repeated["managed_files"]["outcome"], "current");
+    assert_eq!(cas_6718_git(&fresh, &["rev-parse", "HEAD"]), head);
+    assert_eq!(std::fs::read(fresh.join(".git/index")).unwrap(), index);
+    assert!(status().is_empty());
 }
 
 #[test]

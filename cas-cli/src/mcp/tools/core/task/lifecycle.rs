@@ -5043,7 +5043,115 @@ mod related_recall_response_tests {
     /// is a hotfix.
     #[tokio::test]
     async fn standalone_create_joins_the_release_train_on_main_or_staging_cas_1896() {
+        use cas_store::{Result as StoreResult, StoreError, TaskStore};
+        use cas_types::{Dependency, DependencyType};
+        use chrono::{DateTime, Utc};
+        use serde_json::Value;
         use std::process::Command;
+        use std::sync::{Arc, Mutex};
+
+        enum CandidateReplay {
+            Disabled,
+            CaptureNext,
+            Reoffer(String),
+        }
+
+        struct ReofferingTaskStore {
+            inner: Arc<dyn TaskStore>,
+            replay: Mutex<CandidateReplay>,
+        }
+
+        macro_rules! forward_task_store {
+            ($(fn $name:ident(&self $(, $arg:ident: $ty:ty)*) -> $result:ty;)*) => {
+                $(fn $name(&self $(, $arg: $ty)*) -> $result {
+                    self.inner.$name($($arg),*)
+                })*
+            };
+        }
+
+        impl TaskStore for ReofferingTaskStore {
+            fn generate_id(&self) -> StoreResult<String> {
+                let mut replay = self.replay.lock().unwrap();
+                match std::mem::replace(&mut *replay, CandidateReplay::Disabled) {
+                    CandidateReplay::Disabled => self.inner.generate_id(),
+                    CandidateReplay::CaptureNext => {
+                        let id = self.inner.generate_id()?;
+                        eprintln!("[cas-78cf] captured candidate={id}");
+                        *replay = CandidateReplay::Reoffer(id.clone());
+                        Ok(id)
+                    }
+                    CandidateReplay::Reoffer(id) => match self.inner.get(&id) {
+                        Err(StoreError::TaskNotFound(_)) => {
+                            eprintln!("[cas-78cf] reoffered absent candidate={id}");
+                            Ok(id)
+                        }
+                        Ok(_) => self.inner.generate_id(),
+                        Err(error) => Err(error),
+                    },
+                }
+            }
+
+            fn create_atomic(
+                &self,
+                task: &Task,
+                blocked_by: &[String],
+                epic_id: Option<&str>,
+                created_by: Option<&str>,
+            ) -> StoreResult<()> {
+                eprintln!("[cas-78cf] create_atomic id={} type={:?} title={:?}", task.id, task.task_type, task.title);
+                self.inner.create_atomic(task, blocked_by, epic_id, created_by)
+            }
+
+            forward_task_store! {
+                fn init(&self) -> StoreResult<()>;
+                fn project_id(&self) -> Option<&str>;
+                fn add(&self, task: &Task) -> StoreResult<()>;
+                fn add_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> StoreResult<()>;
+                fn record_mutation_receipt(&self, task_id: &str, receipt_id: &str) -> StoreResult<()>;
+                fn publish_current_row(&self, task_id: &str) -> StoreResult<()>;
+                fn publish_dependency_move(&self, removed: &Dependency, added: &Dependency) -> StoreResult<()>;
+                fn create_atomic_with_mutation_receipt(&self, task: &Task, blocked_by: &[String], epic_id: Option<&str>, created_by: Option<&str>, receipt_id: &str) -> StoreResult<()>;
+                fn get(&self, id: &str) -> StoreResult<Task>;
+                fn get_execution_state(&self, task_id: &str) -> StoreResult<Option<Value>>;
+                fn patch_execution_state(&self, task_id: &str, patch: &Value) -> StoreResult<Value>;
+                fn update(&self, task: &Task) -> StoreResult<DateTime<Utc>>;
+                fn update_if_current(&self, task: &Task, expected: &Task) -> StoreResult<DateTime<Utc>>;
+                fn update_if_current_with_mutation_receipt(&self, task: &Task, expected: &Task, receipt_id: &str) -> StoreResult<DateTime<Utc>>;
+                fn update_from_sync(&self, task: &Task, expected: &Task) -> StoreResult<Option<DateTime<Utc>>>;
+                fn update_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> StoreResult<DateTime<Utc>>;
+                fn append_note(&self, task_id: &str, formatted_note: &str) -> StoreResult<DateTime<Utc>>;
+                fn append_trusted_note(&self, task_id: &str, formatted_note: &str) -> StoreResult<DateTime<Utc>>;
+                fn rewind_sync_clock(&self, task_id: &str, expected: DateTime<Utc>, to: DateTime<Utc>) -> StoreResult<bool>;
+                fn append_trusted_note_with_mutation_receipt(&self, task_id: &str, formatted_note: &str, receipt_id: &str) -> StoreResult<DateTime<Utc>>;
+                fn append_note_with_mutation_receipt(&self, task_id: &str, formatted_note: &str, receipt_id: &str) -> StoreResult<DateTime<Utc>>;
+                fn record_green_merge(&self, task_id: &str, merge_commit: &str) -> StoreResult<bool>;
+                fn record_merge_admission(&self, task_id: &str, merge_commit: &str, admission: cas_types::MergeCiAdmission) -> StoreResult<bool>;
+                fn delete(&self, id: &str) -> StoreResult<()>;
+                fn list(&self, status: Option<TaskStatus>) -> StoreResult<Vec<Task>>;
+                fn ids_by_assignees_and_statuses(&self, assignees: &[&str], statuses: &[TaskStatus]) -> StoreResult<Vec<String>>;
+                fn epic_for_branch(&self, branch: &str) -> StoreResult<Option<Task>>;
+                fn epic_for_branch_excluding(&self, branch: &str, excluded: &[String]) -> StoreResult<Option<Task>>;
+                fn list_with_suppressed(&self, status: Option<TaskStatus>) -> StoreResult<(Vec<Task>, Vec<Task>)>;
+                fn list_ready(&self) -> StoreResult<Vec<Task>>;
+                fn list_ready_scoped(&self, project_id: Option<&str>, include_foreign: bool) -> StoreResult<Vec<Task>>;
+                fn list_blocked(&self) -> StoreResult<Vec<(Task, Vec<Task>)>>;
+                fn list_blocked_scoped(&self, project_id: Option<&str>, include_foreign: bool) -> StoreResult<Vec<(Task, Vec<Task>)>>;
+                fn list_pending_verification(&self) -> StoreResult<Vec<Task>>;
+                fn list_pending_worktree_merge(&self) -> StoreResult<Vec<Task>>;
+                fn close(&self) -> StoreResult<()>;
+                fn add_dependency(&self, dep: &Dependency) -> StoreResult<()>;
+                fn remove_dependency(&self, from_id: &str, to_id: &str) -> StoreResult<()>;
+                fn remove_dependency_of_type(&self, from_id: &str, to_id: &str, dep_type: DependencyType) -> StoreResult<bool>;
+                fn get_dependencies(&self, task_id: &str) -> StoreResult<Vec<Dependency>>;
+                fn get_dependents(&self, task_id: &str) -> StoreResult<Vec<Dependency>>;
+                fn get_blockers(&self, task_id: &str) -> StoreResult<Vec<Task>>;
+                fn would_create_cycle(&self, from_id: &str, to_id: &str) -> StoreResult<bool>;
+                fn list_dependencies(&self, dep_type: Option<DependencyType>) -> StoreResult<Vec<Dependency>>;
+                fn get_subtasks(&self, parent_id: &str) -> StoreResult<Vec<Task>>;
+                fn get_sibling_notes(&self, epic_id: &str, exclude_task_id: &str) -> StoreResult<Vec<(String, String, String)>>;
+                fn get_parent_epic(&self, task_id: &str) -> StoreResult<Option<Task>>;
+            }
+        }
 
         let _env = TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().expect("host registry");
@@ -5064,7 +5172,11 @@ mod related_recall_response_tests {
         git(&["branch", "staging"]);
 
         let core = CasCore::with_daemon(repo.to_path_buf(), None, None);
-        let store = core.open_task_store().unwrap();
+        let store = Arc::new(ReofferingTaskStore {
+            inner: crate::store::open_task_store(repo).unwrap(),
+            replay: Mutex::new(CandidateReplay::Disabled),
+        });
+        assert!(core.cached_task_store.set(store.clone()).is_ok());
         let create = |title: &'static str| {
             let core = &core;
             async move {
@@ -5094,6 +5206,7 @@ mod related_recall_response_tests {
         // Cassy's own repository opts in.
         std::fs::create_dir_all(repo.join(".cas")).unwrap();
         std::fs::write(repo.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
+        *store.replay.lock().unwrap() = CandidateReplay::CaptureNext;
         let first = create("Fix one").await;
 
         let train = trains("main").pop().expect("train opened from main");

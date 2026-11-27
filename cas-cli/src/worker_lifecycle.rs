@@ -303,7 +303,7 @@ mod tests {
         let mut task = Task::new(format!("cas-{cli}"), "Work".into());
         task.assignee = Some(worker.name.clone());
         task.status = TaskStatus::InProgress;
-        tasks.create(&task).unwrap();
+        tasks.add(&task).unwrap();
         (root, worker, task)
     }
 
@@ -322,7 +322,7 @@ mod tests {
                 None,
             );
             let second = Task::new(format!("cas-{cli}-second"), "Next".into());
-            tasks.create(&second).unwrap();
+            tasks.add(&second).unwrap();
             for state in [
                 TaskStatus::InProgress,
                 TaskStatus::AwaitingMerge,
@@ -398,7 +398,7 @@ mod tests {
             let core = CasCore::with_daemon(root.clone(), None, None);
             core.set_agent_id_for_testing("owner".into());
             let pending = Task::new(format!("cas-{cli}-tail"), "Legacy tail".into());
-            tasks.create(&pending).unwrap();
+            tasks.add(&pending).unwrap();
             let queues =
                 cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&root)
                     .unwrap();

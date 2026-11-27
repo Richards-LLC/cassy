@@ -599,6 +599,10 @@ fn processed_but_unexecuted_shutdown() -> Fixture {
 }
 
 fn processed_but_unexecuted_shutdown_with_dead_worker(include_dead: bool) -> Fixture {
+    processed_shutdown_fixture(include_dead, false)
+}
+
+fn processed_shutdown_fixture(include_dead: bool, finish_tasks: bool) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
     let mut daemon = daemon(&cas_dir);
@@ -628,9 +632,19 @@ fn processed_but_unexecuted_shutdown_with_dead_worker(include_dead: bool) -> Fix
         names.push(name.to_string());
     }
     let queue = open_spawn_queue_store(&cas_dir).unwrap();
-    let request_id = queue
-        .enqueue_shutdown(None, &names, false, Some(SESSION))
-        .unwrap();
+    let request_id = if finish_tasks {
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        for (index, name) in names.iter().enumerate() {
+            let mut task = cas_types::Task::new(format!("cas-retire-{index}"), "Finished work".into());
+            task.assignee = Some(name.clone());
+            task.status = if index == 0 { cas_types::TaskStatus::AwaitingMerge } else { cas_types::TaskStatus::Cancelled };
+            tasks.add(&task).unwrap();
+            crate::worker_lifecycle::retire_after_delivery(&cas_dir, &task.id).unwrap();
+        }
+        queue.peek(10).unwrap()[0].id
+    } else {
+        queue.enqueue_shutdown(None, &names, false, Some(SESSION)).unwrap()
+    };
     daemon.enqueue_spawn_requests().unwrap();
     assert!(
         queue
@@ -679,7 +693,7 @@ async fn processed_shutdown_stops_idle_claude_and_codex_workers_under_a_spent_bu
         mut daemon,
         request_id,
         pids,
-    } = processed_but_unexecuted_shutdown();
+    } = processed_shutdown_fixture(false, true);
     let cas_dir = daemon.app.cas_dir().to_path_buf();
 
     let lock = hold_write_lock(&cas_dir, Duration::from_millis(300));

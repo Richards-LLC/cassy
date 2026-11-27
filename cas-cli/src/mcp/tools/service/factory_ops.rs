@@ -5059,7 +5059,7 @@ impl CasService {
             return Err(Self::error(ErrorCode::INVALID_PARAMS,
                 "Worker task queues are retired; spawn a fresh worker with task_id for each task"));
         }
-        self.inner.configure_worker_task_queue(worker, req.task_ids, req.expected_generation).await.map(Self::success)
+        self.inner.inspect_worker_task_queue(worker).map(Self::success)
     }
 
     pub(super) async fn factory_worker_status(

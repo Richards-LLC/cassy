@@ -907,12 +907,35 @@ mod tests {
     /// instead of opening a second one; a cut with none still opens one.
     #[test]
     fn cut_adopts_the_lazy_successor_and_opens_one_only_when_none_gh2181() {
-        let _env = TestEnvGuard::temp_home();
+        let mut env = TestEnvGuard::temp_home();
+        env.remove("CAS_ROOT");
+        env.remove("CAS_SKIP_FAST_ROWS");
+        env.remove("ZERO_BASE_REF");
+        env.set("CAS_BIN", "/bin/false");
         let temp = repo();
         let repo = temp.path();
         let bare = TempDir::new().unwrap();
         git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
         git(repo, &["config", &format!("url.{}.insteadOf", bare.path().display()), "https://github.com/example/train-test.git"]);
+        std::fs::create_dir(repo.join("scripts")).unwrap();
+        for (name, source) in [
+            ("fast-rows-pre-push.sh", include_str!("../../../../../../scripts/fast-rows-pre-push.sh")),
+            ("worker-run.sh", include_str!("../../../../../../scripts/worker-run.sh")),
+            ("classify-web-inputs.py", "print('web false')\n"),
+            ("release-gate.sh", concat!(
+                "set -eu\n",
+                "test \"$1\" = --fast-rows\n",
+                "test \"$2\" = --base\n",
+                "tip=$(git rev-parse HEAD)\n",
+                "test \"$tip\" = \"$(git rev-parse \"$3\")\"\n",
+                "common=$(git rev-parse --path-format=absolute --git-common-dir)\n",
+                "printf 'fast-rows: PASS %s base=%s fixture\\n' \"$tip\" \"$3\" > \"$common/cas/fast-rows/$tip.pass\"\n",
+            )),
+        ] {
+            std::fs::write(repo.join("scripts").join(name), source).unwrap();
+        }
+        git(repo, &["add", "scripts"]);
+        git(repo, &["commit", "-qm", "fast-row fixture"]);
         git(repo, &["push", "-q", "origin", "main"]);
         git(repo, &["checkout", "-qb", "epic/cut"]);
         std::fs::write(repo.join("work.txt"), "work\n").unwrap();
@@ -921,10 +944,12 @@ mod tests {
         git(repo, &["checkout", "-q", "main"]);
         git(repo, &["branch", "epic/lazy"]);
         git(repo, &["push", "-q", "origin", "epic/cut", "epic/lazy"]);
-        let tip = |branch: &str| {
-            let output = Command::new("git").args(["rev-parse", branch]).current_dir(repo).output().unwrap();
+        let read_git = |checkout: &Path, args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(checkout).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
             String::from_utf8(output.stdout).unwrap().trim().to_string()
         };
+        let tip = |branch: &str| read_git(repo, &["rev-parse", branch]);
         let cas_root = crate::store::init_cas_dir(repo).unwrap();
         let store = crate::store::open_task_store(&cas_root).unwrap();
         let train = |id: &str, lane: &str, age: i64| {
@@ -948,9 +973,38 @@ mod tests {
         assert_eq!(successor("cas-b111").as_deref(), Some("cas-b222"));
         assert_eq!(trains().len(), 2);
 
+        git(repo, &["checkout", "-q", "epic/cut"]);
+        git(repo, &["config", "extensions.worktreeConfig", "true"]);
+        git(repo, &["config", "--worktree", "core.hooksPath", "fixture-hooks"]);
+        let hook = repo.join("fixture-hooks/pre-push");
+        std::fs::create_dir(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\nexec bash scripts/fast-rows-pre-push.sh \"$@\"\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(repo.join("seed.txt"), "staged\n").unwrap();
+        git(repo, &["add", "seed.txt"]);
+        std::fs::write(repo.join("seed.txt"), "unstaged\n").unwrap();
+        let before = read_git(repo, &["status", "--porcelain"]);
+        let worktrees = read_git(repo, &["worktree", "list", "--porcelain"]);
+
         mark_cut_trains(&cas_root, repo, store.as_ref(), "cas-b222", &tip("main"), "main", &[]).unwrap();
         let opened = successor("cas-b222").unwrap();
-        assert!(!["cas-b111", "cas-b222"].contains(&opened.as_str()), "{opened}");
+        let next = store.get(&opened).unwrap();
+        let lane = next.effective_epic_branch().unwrap();
+        let base = tip("main");
+        let receipt = repo.join(format!(".git/cas/fast-rows/{base}.pass"));
+        assert_eq!(read_git(bare.path(), &["rev-parse", lane]), base);
+        assert!(receipt.is_file());
+        assert_eq!(read_git(repo, &["symbolic-ref", "--short", "HEAD"]), "epic/cut");
+        assert_eq!(read_git(repo, &["status", "--porcelain"]), before);
+        assert_eq!(read_git(repo, &["show", ":seed.txt"]), "staged");
+        assert_eq!(std::fs::read_to_string(repo.join("seed.txt")).unwrap(), "unstaged\n");
+        assert_eq!(read_git(repo, &["worktree", "list", "--porcelain"]), worktrees);
         assert_eq!(trains().len(), 3);
+
+        git(repo, &["branch", "epic/unproved", "epic/cut"]);
+        let refused = publish_train_branch(repo, "epic/unproved", "main").unwrap_err();
+        assert!(refused.contains("[C-07]") && refused.contains("[H-38]"), "{refused}");
+        assert!(!ref_exists(bare.path(), "refs/heads/epic/unproved"));
     }
 }

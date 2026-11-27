@@ -1,0 +1,4 @@
+title: Published release closeout binds the frozen QA
+statement: A tag that ships the tracked release commit directly, or as a same-tree two-parent queue merge, binds the QA recorded at the train's frozen tip. This includes a retried cut that audited its prepared commit. An audit that does not identify the tag binds no proof and never borrows an older release review. A settled partial closeout resumes only when its review or proof bindings change.
+tasks: [cas-a771]
+journeys: [CLI-RELEASE]

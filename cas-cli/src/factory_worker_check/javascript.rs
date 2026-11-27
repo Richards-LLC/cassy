@@ -281,7 +281,91 @@ fn changed_data_import(repo: &Path, base: &str, head: &str, path: &str, source: 
         return Ok(Some(switched.clone()));
     }
     let changed = super::git(repo, &["diff", "--name-only", base, head, "--", "*.json"])?;
-    Ok(changed.lines().find(|data| imported.contains(*data)).map(str::to_owned))
+    for data in changed.lines().filter(|data| imported.contains(*data)) {
+        if !catalogue_versions(repo, base, head, data)?.is_some_and(|versions|
+            unchanged_catalogue_reads(path, source, data, &versions)
+                && (old == source || unchanged_catalogue_reads(path, old, data, &versions)))
+        {
+            return Ok(Some(data.to_owned()));
+        }
+    }
+    Ok(None)
+}
+
+fn catalogue_versions(repo: &Path, base: &str, head: &str, data: &str) -> Result<Option<(Value, Value)>> {
+    if base == head { return Ok(None); }
+    let object = |revision| -> Result<Option<Value>> {
+        Ok(show(repo, revision, data)?.and_then(|bytes| serde_json::from_slice(&bytes).ok()).filter(Value::is_object))
+    };
+    Ok(object(base)?.zip(object(head)?))
+}
+
+fn unchanged_catalogue_reads(path: &str, source: &str, data: &str, versions: &(Value, Value)) -> bool {
+    literal_catalogue_reads(path, source, data).is_some_and(|reads| reads.iter().all(|keys| {
+        let leaves = keys.iter().try_fold((&versions.0, &versions.1), |(before, after), key| {
+            Some((before.as_object()?.get(key)?, after.as_object()?.get(key)?))
+        });
+        matches!(leaves, Some((Value::String(before), Value::String(after))) if before == after)
+    }))
+}
+
+fn literal_catalogue_reads(path: &str, source: &str, data: &str) -> Option<Vec<Vec<String>>> {
+    let tree = source_tree(path, source).ok()?;
+    let root = tree.root_node();
+    let directory = Path::new(path).parent()?;
+    let names_catalogue = |literal| title(literal, source)
+        .filter(|from| from.starts_with("./") || from.starts_with("../"))
+        .is_some_and(|from| normalize_relative(directory, &from) == Path::new(data));
+    let mut cursor = root.walk();
+    let import = root.named_children(&mut cursor).find(|node| node.kind() == "import_statement"
+        && node.child_by_field_name("source").is_some_and(names_catalogue))?;
+    let from = import.child_by_field_name("source")?;
+    let mut cursor = import.walk();
+    let clause = import.named_children(&mut cursor).find(|node| node.kind() == "import_clause")?;
+    let binding = clause.named_child(0).filter(|node| node.kind() == "identifier" && clause.named_child_count() == 1)?;
+    let name = text(binding, source);
+    let mut stack = vec![root];
+    let mut reads = Vec::new();
+    while let Some(node) = stack.pop() {
+        if node != from && matches!(node.kind(), "string" | "template_string")
+            && (names_catalogue(node) || text(node, source).get(1..).is_some_and(|raw| raw.starts_with('.') && raw.contains('\\')))
+        {
+            return None;
+        }
+        if node != binding && matches!(node.kind(), "identifier" | "shorthand_property_identifier" | "shorthand_property_identifier_pattern") {
+            let identifier = text(node, source);
+            if identifier.contains('\\') || identifier == "eval" { return None; }
+            if identifier == name {
+                if node.kind() != "identifier" { return None; }
+                reads.push(literal_catalogue_read(node, source)?);
+            }
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    (!reads.is_empty()).then_some(reads)
+}
+
+fn literal_catalogue_read(mut expression: Node<'_>, source: &str) -> Option<Vec<String>> {
+    let mut keys = Vec::new();
+    while let Some(parent) = expression.parent() {
+        if parent.child_by_field_name("object") != Some(expression) { break; }
+        let key = match parent.kind() {
+            "member_expression" => text(parent.child_by_field_name("property")?, source).to_owned(),
+            "subscript_expression" => title(parent.child_by_field_name("index").filter(|index| index.kind() == "string")?, source)?,
+            _ => return None,
+        };
+        if key == "__proto__" || key.contains('\\') { return None; }
+        keys.push(key);
+        expression = parent;
+    }
+    let parent = expression.parent()?;
+    let read = match parent.kind() {
+        "arguments" | "template_substitution" => true,
+        "pair" | "variable_declarator" => parent.child_by_field_name("value") == Some(expression),
+        _ => false,
+    };
+    (read && !keys.is_empty()).then_some(keys)
 }
 
 /// Repository paths of the JSON files a source imports by relative literal.
@@ -421,25 +505,32 @@ fn relative_literals(path: &str, source: &str) -> Result<Vec<PathBuf>> {
     Ok(literal.captures_iter(source).map(|capture| normalize_relative(directory, &capture[1])).collect())
 }
 
-/// GH #2221: the test files at `head` that import the changed catalogue
-/// `data` by relative path. Its generated tests have no changed source line.
-pub(crate) fn catalogue_specs(repo: &Path, head: &str, data: &str) -> Result<Vec<String>> {
+/// GH #2221: specs whose registrations may depend on the changed catalogue.
+pub(crate) fn catalogue_specs(repo: &Path, base: Option<&str>, head: &str, data: &str) -> Result<Vec<String>> {
     let Some(name) = Path::new(data).file_name().and_then(|name| name.to_str()) else { return Ok(Vec::new()) };
     let output = Command::new("git").env("GIT_OPTIONAL_LOCKS", "0").current_dir(repo)
         .args(["grep", "-l", "-F", "-e", name, head]).output()?;
     if !matches!(output.status.code(), Some(0 | 1)) {
         bail!("git grep {name} {head} failed");
     }
+    let versions = base.map(|base| catalogue_versions(repo, base, head, data)).transpose()?.flatten();
     let prefix = format!("{head}:");
     let mut specs = Vec::new();
     for spec in String::from_utf8(output.stdout)?.lines().filter_map(|line| line.strip_prefix(&prefix)) {
         if !javascript(spec) || !test_match(spec, runner_hint(repo, spec)) {
             continue;
         }
-        let source = String::from_utf8_lossy(&show(repo, head, spec)?.unwrap_or_default()).into_owned();
-        if registering_json_imports(spec, &source)?.contains(data) {
-            specs.push(spec.to_owned());
+        let bytes = show(repo, head, spec)?.unwrap_or_default();
+        let source = String::from_utf8_lossy(&bytes);
+        if !registering_json_imports(spec, &source)?.contains(data) { continue; }
+        if let (Some(base), Some(versions), Ok(source)) = (base, &versions, std::str::from_utf8(&bytes))
+            && unchanged_catalogue_reads(spec, source, data, versions)
+            && let Some(old) = show(repo, base, spec)?.and_then(|bytes| String::from_utf8(bytes).ok())
+            && (old == source || unchanged_catalogue_reads(spec, &old, data, versions))
+        {
+            continue;
         }
+        specs.push(spec.to_owned());
     }
     Ok(specs)
 }
@@ -4480,23 +4571,45 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let billing = "src/__scenarios__/billing.spec.ts";
         let dynamic = "src/__scenarios__/dynamic.spec.ts";
         let unresolved = "src/__scenarios__/unresolved.spec.ts";
-        write(billing, "import en from './en.json';\nit(en.billing.cta, () => {});\n");
+        let mutating = "src/__scenarios__/mutating.spec.ts";
+        let billing_source = "import en from './en.json';\nit(en.billing['cta'], () => {});\nit('static billing case', () => { oldCheck(); });\n";
+        write(billing, billing_source);
         write(dynamic, "import en from './en.json';\nit(en.billing[plan], () => {});\n");
         write(unresolved, "import en from './en.json';\nimport { registerCases } from './register';\nregisterCases(en);\n");
+        write(mutating, "import en from './en.json';\nen.billing.cta = 'Stub';\nit(en.billing.cta, () => {});\n");
         write(locale, r#"{"billing":{"cta":"Subscribe"}}"#);
         let locale_base = commit("locale consumers");
-        write(locale, r#"{"billing":{"cta":"Subscribe"},"settings":{"saving":"Saving"}}"#);
+        let added_key = r#"{"billing":{"cta":"Subscribe"},"settings":{"saving":"Saving"}}"#;
+        write(locale, added_key);
         let additive = commit("add an independent saving label");
         write(locale, r#"{"billing":{"cta":"Choose a plan"},"settings":{"saving":"Saving"}}"#);
         let renamed = commit("change the billing registration title");
+        write(locale, added_key);
+        write(billing, &billing_source.replace("oldCheck()", "newCheck()"));
+        let mixed = commit("restore the billing title and edit a static case");
+        write(locale, "{");
+        let malformed = commit("malformed catalogue");
+        std::fs::remove_file(repo.path().join(locale)).unwrap();
+        let missing = commit("missing catalogue");
 
-        for (base, head, requires_billing) in [(&additive, &renamed, true), (&locale_base, &additive, false)] {
-            let (tests, widened) = stability::requirements(repo.path(), head, base, &[locale.into()], None).unwrap();
+        let landed_ranges = [(locale_base.clone(), mixed.clone())];
+        for (base, head, ranges, requires_billing) in [
+            (additive.as_str(), &renamed, None, true),
+            (&locale_base, &additive, None, false),
+            (&locale_base, &mixed, None, false),
+            (&mixed, &mixed, Some(landed_ranges.as_slice()), false),
+            (&locale_base, &malformed, None, true),
+            (&locale_base, &missing, None, true),
+            ("missing-proof-base", &additive, None, true),
+        ] {
+            let (tests, widened) = stability::requirements(repo.path(), head, base, &[locale.into()], ranges).unwrap();
             assert!(tests.is_empty());
-            let mut expected = BTreeSet::from([Scope::File(dynamic.into()), Scope::File(unresolved.into())]);
+            let mut expected = [dynamic, unresolved, mutating].map(|path| Scope::File(path.into())).into_iter().collect::<BTreeSet<_>>();
             if requires_billing { expected.insert(Scope::File(billing.into())); }
             assert_eq!(widened.into_iter().collect::<BTreeSet<_>>(), expected, "{base}..{head}");
         }
+        assert_eq!(changed_tests(repo.path(), &locale_base, &mixed, &[billing.into()], None).unwrap(),
+            [id(billing, "static billing case")]);
     }
 
     /// GH #1977, #2000, #1971: park asks only for tests the task's own

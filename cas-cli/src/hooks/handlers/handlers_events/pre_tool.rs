@@ -533,8 +533,6 @@ fn shadowed_by_sandbox(input: &HookInput, tool_name: &str, cas_root: Option<&Pat
     true
 }
 
-/// A template or test environment file (`.env.example`, `.env.test.local`)
-/// holds no live secret.
 fn is_env_fixture(path: &str) -> bool {
     Path::new(path).file_name().and_then(|name| name.to_str()).is_some_and(|name| {
         name.starts_with(".env.")
@@ -542,20 +540,14 @@ fn is_env_fixture(path: &str) -> bool {
     })
 }
 
-/// cas-a2ea: the pre-tool guards that keep refusing: unsaved work and secrets,
-/// policy, config and role tampering, production DB writes, host build caps,
-/// Slack through Violet and the trunk-push guard. Every other H guard records
-/// its refusal as a fact and lets the call proceed. Refusals that carry any
-/// other code (G) are not H guards and always deny.
-pub(crate) const BLOCKING_GUARDS: [&str; 16] = [
+/// Pre-tool guards that keep denying. Every other H guard records a fact and warns.
+const BLOCKING_GUARDS: [&str; 16] = [
     "H-02", "H-03", "H-04", "H-06", "H-09", "H-11", "H-12", "H-14", "H-16", "H-17", "H-22", "H-23",
     "H-28", "H-29", "H-31", "H-33",
 ];
 
-/// The one pre-tool switch. `Some(deny)` for a refusal that blocks; a demoted
-/// guard records its fact (code, actor, harness, task), queues a one-line
-/// warning for the call's context and returns `None`, so the caller falls
-/// through to the remaining guards.
+/// `Some(deny)` for a blocking refusal; a demoted H guard records its fact, queues a
+/// warning and returns `None` so the remaining guards still run. Any G code denies.
 fn refuse(input: &HookInput, cas_root: Option<&Path>, reason: String, warnings: &mut Vec<String>) -> Option<HookOutput> {
     let codes = crate::gates::codes_in(&reason);
     if codes.is_empty() || codes.iter().any(|code| !code.starts_with("H-") || BLOCKING_GUARDS.contains(code)) {
@@ -657,8 +649,6 @@ fn handle_pre_tool_use_checked(
     }
 
     // gate[H-09 pre-tool]: Worker operator-credential store read
-    // A shell command the recognizer cannot project is judged by the store
-    // paths its words name literally.
     if let Some(reason) =
         super::worker_denied_tools::credential_store_access_denial(input, tool_name)
     {
@@ -1660,7 +1650,6 @@ fn handle_pre_tool_use_checked(
         use crate::mcp::tools::core::task::lifecycle::close_ops::gate_text::{
             VerifierSpawnDenial, verifier_spawn_denial,
         };
-        // The demoted guard proceeds without a handoff; the spawn is the caller's.
         let mut verifier_denial = |denial: VerifierSpawnDenial, task_id: Option<&str>| {
             let reason = crate::gates::tag("H-35", verifier_spawn_denial(denial, task_id, crate::harness_policy::own_tool_prefix()));
             refuse(input, Some(cas_root), reason, warnings).unwrap_or_else(HookOutput::empty)
@@ -6037,8 +6026,6 @@ fn factory_write_decision(
         .collect();
     let shell_effects = if tool == "Bash" {
         let command = tool_input.get("command").and_then(|value| value.as_str()).unwrap_or("");
-        // A command the recognizer cannot resolve is judged by the writes and
-        // deletes it names literally; the rest of it is left to the shell.
         shell_effects::collect(command, &cwd).unwrap_or_else(|_| {
             let mut literal = shell_effects::ShellEffects::default();
             literal.writes = bash_write_targets(command).into_iter().map(|path| (path, None)).collect();

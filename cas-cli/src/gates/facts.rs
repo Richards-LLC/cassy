@@ -81,9 +81,7 @@ pub fn codes_named(text: &str) -> Vec<&'static str> {
     codes
 }
 
-/// A guard that no longer blocks: the refusal is a countable fact and the
-/// call it would have denied proceeds. `outcome: allowed` tells it apart from a
-/// refusal that stopped the call.
+/// A demoted guard's refusal: counted like any refusal, `outcome: allowed` marks that the call proceeded.
 pub fn record_allowed(
     store: &dyn EventStore,
     codes: &[&str],

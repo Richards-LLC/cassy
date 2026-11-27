@@ -116,10 +116,9 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
     shell_references_store_with(command, initial_cwd, depth, false)
 }
 
-/// A command that cannot be projected is judged by its words alone: it is
-/// refused only when one names a store path literally. An unresolved directory
-/// may be any directory, so its statements are judged from every one that could
-/// matter, or, with `known_only`, not at all.
+/// A command that cannot be projected is refused only when a word names a store
+/// path. An unresolved directory may be any directory, so its statements are
+/// judged from every one that could matter, or, with `known_only`, not at all.
 fn shell_references_store_with(command: &str, initial_cwd: &Path, depth: usize, known_only: bool) -> bool {
     if depth > 3 { return words_name_store(command, initial_cwd); }
     let Some(contexts) = super::pre_tool::shell_read_contexts(command, initial_cwd) else {
@@ -167,7 +166,6 @@ fn shell_references_store_with(command: &str, initial_cwd: &Path, depth: usize, 
     false
 }
 
-/// Any word of the text that names a store path, wherever it sits.
 fn words_name_store(text: &str, cwd: &Path) -> bool {
     text.split(|c: char| c.is_whitespace() || "\"'`();|&<>=".contains(c))
         .filter(|word| !word.is_empty())

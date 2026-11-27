@@ -1817,14 +1817,14 @@ mod tests {
             *supersedes = Some(original_id);
         }
         crate::quality_ledger::emit_checked(dir.path(), &legacy_detail).unwrap();
-        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake).unwrap(), (true, false));
-        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake).unwrap(), (false, false));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake, &[]).unwrap(), (true, false));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake, &[]).unwrap(), (false, false));
         let mut missing_stamp = wake.clone();
         if let QualityPayload::Turn { notice_kind, .. } = &mut missing_stamp.payload { *notice_kind = None; }
-        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &missing_stamp).unwrap(), (false, false));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &missing_stamp, &[]).unwrap(), (false, false));
         // A new completed turn remains one new wake.
         wake.natural_key = "fresh-wake".into();
-        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake).unwrap(), (true, true));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake, &[]).unwrap(), (true, true));
         let mut untyped = wake.clone();
         untyped.natural_key = "untyped-wake".into();
         if let QualityPayload::Turn { notice_kind, .. } = &mut untyped.payload { *notice_kind = None; }
@@ -1837,8 +1837,8 @@ mod tests {
             *supersedes = Some(original_id);
         }
         crate::quality_ledger::emit_checked(dir.path(), &legacy_detail).unwrap();
-        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped).unwrap(), (false, false));
-        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped).unwrap(), (false, false));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped, &[]).unwrap(), (false, false));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped, &[]).unwrap(), (false, false));
         events.extend(cas_store::quality_events_between(dir.path(), None, None).unwrap());
         let report = aggregate("v9.99.0".into(), true, None, None, &events);
         let json = serde_json::to_value(report).unwrap();

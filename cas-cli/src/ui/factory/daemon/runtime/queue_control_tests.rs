@@ -1,6 +1,61 @@
 use super::*;
 use cas_store::wait_budget;
 
+#[test]
+fn codex_supervisor_rollout_releases_idle_wake_and_keeps_tool_calls_busy() {
+    use super::super::prompt_queue_jobs::{QueueJobs, QueueSelection};
+    use super::super::queue_control_jobs::PromptPreparation;
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    for busy in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        let name = daemon.app.supervisor_name().to_string();
+        let native = "019f84af-3121-7950-ba14-b01db2daa152";
+        let account = temp.path().join("codex-account");
+        let mut supervisor = cas_types::Agent::new_with_role("sup-8ff0".into(), name.clone(), cas_types::AgentRole::Supervisor);
+        supervisor.cc_session_id = Some(native.into());
+        supervisor.factory_session = Some(daemon.session_name.clone());
+        supervisor.metadata.insert("supervisor_cli".into(), "codex".into());
+        supervisor.metadata.insert("supervisor_account_dir".into(), account.to_string_lossy().into_owned());
+        crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+        let path = account.join("sessions").join(format!("rollout-{native}.jsonl"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let at = (chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339();
+        let mut records = vec![
+            serde_json::json!({"timestamp":at,"type":"session_meta","payload":{"id":native,"cwd":temp.path()}}),
+            serde_json::json!({"timestamp":at,"type":"event_msg","payload":{"type":"task_started","turn_id":"wake-8ff0"}}),
+            serde_json::json!({"timestamp":at,"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-8ff0","arguments":"{}"}}),
+        ];
+        if !busy {
+            records.extend([
+                serde_json::json!({"timestamp":at,"type":"response_item","payload":{"type":"function_call_output","call_id":"call-8ff0","output":"ok"}}),
+                serde_json::json!({"timestamp":at,"type":"event_msg","payload":{"type":"task_complete","turn_id":"wake-8ff0"}}),
+            ]);
+        }
+        std::fs::write(path, records.iter().map(|row| format!("{row}\n")).collect::<String>()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let id = queue.enqueue("worker", &name, "payload-wake").unwrap();
+        let mut raw = Some(QueueSelection { rows: vec![queue.queued_prompt(id).unwrap().unwrap()], ..Default::default() });
+        let mut preparation = PromptPreparation::default();
+        let mut jobs = QueueJobs::inline();
+        let start = Instant::now();
+        let mut prepared = None;
+        for n in 0..3 {
+            prepared = preparation.advance(&mut jobs, raw.take(), root.clone(), name.clone(), vec![], start + Duration::from_millis(n * 101));
+            if prepared.is_some() { break; }
+        }
+        assert!(prepared.is_some());
+        daemon.queue_jobs.prompt_preparation = preparation;
+        let tool_call = daemon.prepared_tool_call_evidence(&name);
+        assert_eq!(tool_call, if busy { ToolCallEvidence::InFlight } else { ToolCallEvidence::Idle });
+        let decision = FactoryDaemon::supervisor_self_reminder_wake(&name, &name, !busy, PaneWakeState {
+            composer_dirty: false, ready_for_injection: true, silent_for: Some(Duration::from_secs(2)), tool_call,
+        });
+        assert_eq!(decision.is_some_and(|decision| decision.allowed), !busy);
+    }
+}
+
 fn assert_unknown_grace_expires(mode: &str) {
     let temp = tempfile::tempdir().unwrap();
     let root = crate::store::init_cas_dir(temp.path()).unwrap();

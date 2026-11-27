@@ -83,9 +83,14 @@ impl Backend for Codex {
             ));
         }
         disable_shadow_cas_servers(&mut config);
-        // The whole native listing goes; the contract names the role skills.
-        // `$name` still expands a skill it no longer lists.
-        config.args.extend(["-c".to_string(), "skills.include_instructions=false".to_string()]);
+        for setting in [
+            "skills.include_instructions=false",
+            "features.apps=false",
+            "features.plugins=false",
+            "features.memories=false",
+        ] {
+            config.args.extend(["-c".to_string(), setting.to_string()]);
+        }
         crate::gateway::apply(&mut config, launch.cas_root, launch.name);
         config
     }

@@ -1,0 +1,3 @@
+### Changed — Bug reports
+
+- **Agent bug reports stay local until they recur** — Was: every `report_cas_bug` call from a worker or supervisor opened or commented on a GitHub issue, and the generated bug-routing text told agents to file on every refusal, apology or workaround. Now: each report is a row in the local `bug-reports.jsonl` ledger (key, gate codes, actor, task, time), and an agent's report reaches GitHub only when the same refusal key has five rows in seven days; the operator still files at once. The generated AGENTS.md block and the supervisor and worker launch contracts no longer tell agents to file per refusal.

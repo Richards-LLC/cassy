@@ -2879,11 +2879,11 @@ axes, while an empty correction resets findings to broken/theoretical. This
 same handler serves MCP and CLI task updates, including removal of a release
 train's `release-train-cut` label.
 
-While a release train is open in the target repository, `worktree_merge` refuses
-direct main/trunk merges, including `allow_trunk=true`. Merge fixes into the
-train; ship a one-item hotfix train with `scripts/release.sh --hotfix` from its
-lane, through the existing release PR, merge queue and publication workflow.
-With no train open, the existing merge behavior applies.
+An open release train does not own main: `worktree_merge` into main or any
+other branch is never refused because a train is open, cut or frozen. Only a
+merge into a cut or frozen train's own lane is refused. Ship a one-item hotfix
+train with `scripts/release.sh --hotfix` from its lane, through the existing
+release PR, merge queue and publication workflow.
 
 Commander **Reload Cassy** (`/mcp`) is a Claude-only native reconnect of the
 managed `cas` MCP server. It preserves the conversation and confirms a new
@@ -5422,11 +5422,11 @@ Commander's `freeze_train` operation does the same for the operator. Both
 `freeze_train` and `lift_train_freeze` require only a verified pairing's baseline
 `machine:read` scope, without worker-management permissions. Preview pairings
 cannot mutate a train. The freeze is a `release-train-frozen:<unix>:<tip>`
-label on the train epic, which syncs to peer machines with the task row. One
-gate in `workflow/release_freeze.rs` refuses `worktree_merge` into the frozen
-lane (through `check_cut_merge`, before and under the target lock), CI retry
-arming (`factory_ci_retry::arm`) and staffing (`ensure_staffing_allowed`,
-covering spawn, assignment and start of tasks that are still open). A
+label on the train epic. One gate in `workflow/release_freeze.rs` refuses
+`worktree_merge` into the frozen lane (through `check_cut_merge`, before and
+under the target lock) and nothing else: merges into other branches, staffing
+(`ensure_staffing_allowed` reads only the epic design-review pause), spawns, task
+starts and CI retries never read the freeze. A
 `release-repair` task is admitted only while the train is red, and each
 admission is noted on the train. A repair's merge admission into the frozen
 train needs `Scoped Validation (fast)` and `Scoped Validation (factory/PR)`
@@ -5569,6 +5569,13 @@ alert during the hold; lifting it alone generates no stale READY backlog.
 `cas ledger estimate pipeline <stage> --instance <sha>` and MCP `system action=estimate query=pipeline:<stage>:<sha>` record promises from successful measured runs; task/epic lookup uses closed project tasks. `--preview` is read-only. `cas ledger backfill --sync` derives historical facts and synchronizes the ledger without inventing promises. Estimate/outcome kinds use migration m297 and store-open reconciliation, preserving append-only sequence and history. See [ESTIMATES](../../docs/ESTIMATES.md) for endpoints, calibration, outcome semantics and supervisor-owned two-machine backfill proof.
 
 ### Delivery detail in the scorecard
+
+For nightly measurements, use `cas scorecard --since <RFC3339> --until <RFC3339>`.
+The interval is `[since, until)` and both bounds are required, excluding
+`--release`. This mode reads local recorded rows only, without fetching Cloud or
+GitHub. Text and JSON include refusal calls per observed merge, supervisor wake
+latency per harness and issue-filing provenance. Closure receipts are counted by
+their update observation; actual issue close timestamps remain unknown.
 
 `cas scorecard --release vX.Y.Z` (alias `cas ledger report`) keeps review history per delivery cycle,
 with independent, supervisor-direct or unknown historical provenance. The check

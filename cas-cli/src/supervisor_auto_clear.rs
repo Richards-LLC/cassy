@@ -194,11 +194,6 @@ pub(crate) fn idle_blockers(
                 if crate::train_guardrails::repair_cycle_open(task, &tasks) {
                     blockers.push(format!("release train {} has a repair cycle open", task.id));
                 }
-                if release_freeze::freeze_of(task).is_some()
-                    && release_freeze::active(root, task).is_some()
-                {
-                    blockers.push(format!("release train {} is frozen for a cut", task.id));
-                }
                 if !task.is_terminal()
                     && task.labels.iter().any(|label| label == release_freeze::REPAIR_LABEL)
                 {

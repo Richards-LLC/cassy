@@ -583,12 +583,8 @@ pub(crate) fn emit_worker_final_git_state(
 /// - Preserves architectural decisions
 /// - Captures unresolved issues for future sessions
 mod stop_flow;
-mod synthesis;
 
 pub use stop_flow::handle_stop;
-pub use synthesis::{
-    synthesize_buffered_observations, synthesize_buffered_observations_with_sources,
-};
 
 // =============================================================================
 // B3 tests

@@ -71,8 +71,7 @@ fn divergent_unparked_target(
 
 /// GH #1919: G-100 asks the supervisor to retarget unfinished work to the
 /// next train. When the corrected target is another open train's lane and the
-/// task's parent is a different train, the parent moves with the target, so
-/// the re-park start is not refused G-06 by the frozen train it left.
+/// task's parent is a different train, the parent moves with the target.
 /// Returns (old parent, new train).
 fn train_parent_move(
     cas_root: &std::path::Path,

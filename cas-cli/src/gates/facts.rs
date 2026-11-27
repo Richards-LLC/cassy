@@ -31,8 +31,9 @@ fn record(
     codes: &[&str],
     task_id: Option<&str>,
     detail: &str,
+    context: Option<&serde_json::Value>,
 ) -> Result<()> {
-    record_with(store, kind, codes, task_id, detail, serde_json::Map::new())
+    record_with(store, kind, codes, task_id, detail, context, serde_json::Map::new())
 }
 
 fn record_with(
@@ -41,14 +42,22 @@ fn record_with(
     codes: &[&str],
     task_id: Option<&str>,
     detail: &str,
+    context: Option<&serde_json::Value>,
     extra: serde_json::Map<String, serde_json::Value>,
 ) -> Result<()> {
     let detail: String = detail.chars().take(400).collect();
+    let fact_id = uuid::Uuid::new_v4().to_string();
     for code in codes {
         let mut metadata = serde_json::json!({
             "task_id": task_id,
             "codes": codes,
             "detail": detail,
+            "fact_id": fact_id,
+            "actor": context.and_then(|c| c.get("actor")),
+            "role": context.and_then(|c| c.get("role")),
+            "harness": context.and_then(|c| c.get("harness")),
+            "tool": context.and_then(|c| c.get("tool")),
+            "action": context.and_then(|c| c.get("action")),
         });
         metadata.as_object_mut().expect("object literal").extend(extra.clone());
         let event = Event::new(kind, EventEntityType::Gate, *code, format!("{kind} {code}"))
@@ -61,10 +70,14 @@ fn record_with(
 /// Record one refusal per code its text emits. A refusal with no registered
 /// code is recorded under [`UNCODED`], so a missing code is itself countable.
 pub fn record_refusal(store: &dyn EventStore, task_id: Option<&str>, text: &str) -> Result<Vec<&'static str>> {
+    record_refusal_with_context(store, task_id, text, None)
+}
+
+fn record_refusal_with_context(store: &dyn EventStore, task_id: Option<&str>, text: &str, context: Option<&serde_json::Value>) -> Result<Vec<&'static str>> {
     let codes = codes_in(text);
     let recorded: Vec<&str> = if codes.is_empty() { vec![UNCODED] } else { codes.clone() };
     let heading = text.lines().find(|line| !line.trim().is_empty()).unwrap_or_default();
-    record(store, EventType::GateRefused, &recorded, task_id, heading)?;
+    record(store, EventType::GateRefused, &recorded, task_id, heading, context)?;
     Ok(codes)
 }
 
@@ -95,7 +108,7 @@ pub fn record_allowed(
         .into_iter()
         .map(|(key, value)| (key.to_string(), serde_json::Value::from(value)))
         .collect();
-    record_with(store, EventType::GateRefused, codes, task_id, heading, extra)
+    record_with(store, EventType::GateRefused, codes, task_id, heading, None, extra)
 }
 
 /// Codes of the latest recorded refusal of `task_id`.
@@ -122,7 +135,7 @@ pub fn record_override(store: &dyn EventStore, task_id: &str, reason: &str) -> R
         codes.push(UNCODED.to_string());
     }
     let refs: Vec<&str> = codes.iter().map(String::as_str).collect();
-    record(store, EventType::GateOverridden, &refs, Some(task_id), reason)?;
+    record(store, EventType::GateOverridden, &refs, Some(task_id), reason, None)?;
     Ok(codes)
 }
 
@@ -143,7 +156,7 @@ pub fn record_override_codes(
             registered.push(row.code);
         }
     }
-    record(store, EventType::GateOverridden, &registered, task_id, reason)
+    record(store, EventType::GateOverridden, &registered, task_id, reason, None)
 }
 
 /// Record a supervisor-declared false positive of a registered code.
@@ -156,7 +169,7 @@ pub fn record_false_positive(
     let Some(row) = find(code) else {
         anyhow::bail!("{code} is not a registered gate code; `cas gates list` prints them");
     };
-    record(store, EventType::GateFalsePositive, &[row.code], task_id, reason)
+    record(store, EventType::GateFalsePositive, &[row.code], task_id, reason, None)
 }
 
 fn task_of(event: &Event) -> Option<String> {
@@ -198,7 +211,7 @@ pub fn summarize(store: &dyn EventStore, since: DateTime<Utc>) -> Result<BTreeMa
 /// whether the text guard can be deleted after the shadow release.
 pub fn record_shadowed(store: &dyn EventStore, code: &'static str, detail: &str) -> Result<()> {
     let heading = detail.lines().find(|line| !line.trim().is_empty()).unwrap_or_default();
-    record(store, EventType::GateShadowed, &[code], None, heading)
+    record(store, EventType::GateShadowed, &[code], None, heading, None)
 }
 
 /// Open the project event store and record a tool refusal; failures only warn.
@@ -211,13 +224,20 @@ pub fn observe_refusal(cas_root: &Path, task_id: Option<&str>, text: &str) {
     }
 }
 
-/// Observe the one MCP router result shared by every tool. Only tagged
-/// refusals and tagged accepted overrides are gate facts; ordinary successful
-/// reads may quote historical codes without creating new facts.
 pub fn observe_tool_result(
     cas_root: &Path,
     arguments: Option<&serde_json::Map<String, serde_json::Value>>,
     result: &std::result::Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
+) {
+    observe_tool_result_as(cas_root, arguments, result, None, None);
+}
+
+pub(crate) fn observe_tool_result_as(
+    cas_root: &Path,
+    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+    result: &std::result::Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
+    actor: Option<&crate::agent_model::AgentModel>,
+    tool: Option<&str>,
 ) {
     let (refused, text) = match result {
         Err(error) => (true, error.message.to_string()),
@@ -231,8 +251,18 @@ pub fn observe_tool_result(
     let value = |name: &str| arguments.and_then(|args| args.get(name));
     let task_id = value("task_id").and_then(|id| id.as_str())
         .or_else(|| value("id").and_then(|id| id.as_str()).filter(|id| id.starts_with("cas-")));
-    if (refused || !super::refusal_codes_in(&text).is_empty()) && !codes_in(&text).is_empty() {
-        observe_refusal(cas_root, task_id, &text);
+    if refused || !super::refusal_codes_in(&text).is_empty() {
+        let context = serde_json::json!({
+            "actor": actor.map(|a| &a.id), "role": actor.map(|a| &a.role),
+            "harness": actor.and_then(|a| a.harness.as_ref()), "tool": tool,
+            "action": value("action").and_then(|action| action.as_str()),
+        });
+        let recorded = crate::store::open_event_store(cas_root)
+            .map_err(anyhow::Error::from)
+            .and_then(|store| record_refusal_with_context(store.as_ref(), task_id, &text, Some(&context)));
+        if let Err(error) = recorded {
+            tracing::warn!(%error, "could not record gate refusal fact");
+        }
     } else if !refused {
         let codes = super::override_codes_in(&text);
         if codes.is_empty() { return; }

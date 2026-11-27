@@ -3315,7 +3315,7 @@ fn same_except_close_audit(before: &Task, after: &Task) -> bool {
 pub(crate) mod lifecycle_race_hook {
     type Hook = Box<dyn FnOnce() + Send>;
     #[derive(PartialEq)]
-    enum Phase { BeforeWrite, BeforeCas, BeforeHandoff, BeforeLease, BeforePark, AfterPark }
+    enum Phase { BeforeWrite, BeforeCas, BeforeHandoff, BeforePark, AfterPark }
     static HOOKS: std::sync::Mutex<Vec<(String, Phase, Hook)>> = std::sync::Mutex::new(Vec::new());
 
     pub(crate) fn before_terminal_write(task_id: &str, hook: impl FnOnce() + Send + 'static) {
@@ -3328,10 +3328,6 @@ pub(crate) mod lifecycle_race_hook {
 
     pub(crate) fn before_queue_handoff(task_id: &str, hook: impl FnOnce() + Send + 'static) {
         HOOKS.lock().unwrap().push((task_id.to_string(), Phase::BeforeHandoff, Box::new(hook)));
-    }
-
-    pub(crate) fn before_start_lease(task_id: &str, hook: impl FnOnce() + Send + 'static) {
-        HOOKS.lock().unwrap().push((task_id.to_string(), Phase::BeforeLease, Box::new(hook)));
     }
 
     pub(crate) fn before_park(task_id: &str, hook: impl FnOnce() + Send + 'static) {
@@ -3348,10 +3344,6 @@ pub(crate) mod lifecycle_race_hook {
 
     pub(super) fn fire_before_park(task_id: &str) {
         fire_at(task_id, Phase::BeforePark);
-    }
-
-    pub(crate) fn fire_before_start_lease(task_id: &str) {
-        fire_at(task_id, Phase::BeforeLease);
     }
 
     pub(crate) fn fire(task_id: &str) {

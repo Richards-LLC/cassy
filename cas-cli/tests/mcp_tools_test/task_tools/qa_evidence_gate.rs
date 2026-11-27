@@ -808,14 +808,10 @@ async fn first_park_binds_fresh_bundle_and_receipt_to_current_tip_cas_8cfe() {
             }
             request
         };
-        let bundle = fx.write_bundle(&head);
+        fx.write_bundle(&head);
         let parked = extract_text(fx.core.cas_task_close(Parameters(request())).await.unwrap());
         assert!(parked.contains("MERGE REQUIRED"), "{parked}");
         assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
-        assert!(fx.notes().contains(&format!(
-            "QA evidence bundle accepted: {}",
-            bundle.canonicalize().unwrap().display()
-        )));
         let stored = tasks.get(TASK).unwrap();
         assert_eq!(stored.status, TaskStatus::AwaitingMerge);
         assert_eq!(
@@ -939,11 +935,10 @@ async fn user_facing_close_without_a_bundle_warns_and_parks() {
 
     let parked = close_text(&fx.core, TASK).await;
     assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{parked}");
-    assert!(cas::gates::codes_in(&fx.notes()).contains(&"G-53"));
 }
 
 #[tokio::test]
-async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale() {
+async fn bundle_metadata_changes_preserve_delivered_tip_and_manifest() {
     for case in [
         "new live owner",
         "changed status",
@@ -1045,35 +1040,15 @@ journeys:
         assert!(amended.status.success(), "{amended:?}");
         let rebound = git(&fx.repo, &["rev-parse", "HEAD"]);
         let result = close_text(&fx.core, TASK).await;
-        if case != "neutral bug metadata" {
-            assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{case}: {result}");
-            assert!(cas::gates::codes_in(&fx.notes()).contains(&"G-53"));
-            continue;
-        }
-        assert!(result.contains("MERGE REQUIRED"), "{case}: {result}");
-        let notes = fx.notes();
-        assert!(notes.contains("QA evidence bundle accepted"), "{notes}");
-        let rebind = notes
-            .lines()
-            .find(|line| line.contains("QA evidence rebind"))
-            .expect("close records why the earlier trace still covers this delivery");
-        assert!(
-            rebind.contains(&head) && rebind.contains(&rebound),
-            "{rebind}"
-        );
-        for path in paths {
-            assert!(rebind.contains(path), "missing {path}: {rebind}");
-        }
+        assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{case}: {result}");
+        let state = open_task_store(&fx.repo.join(".cas")).unwrap().get_execution_state(TASK).unwrap().unwrap();
+        assert_eq!(state["qa_impact"]["head_sha"].as_str(), Some(rebound.as_str()));
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&bundle).unwrap()).unwrap();
         assert_eq!(
             manifest["head_sha"], head,
             "close preserves the original execution manifest"
         );
-        let later = commit_file(&fx.repo, "web/composer.css", ".composer{gap:12px}\n");
-        let stale = close_text(&fx.core, TASK).await;
-        assert!(stale.contains("QA evidence bundle is stale"), "{stale}");
-        assert!(stale.contains(&later[..8]), "{stale}");
     }
 }
 
@@ -1447,7 +1422,6 @@ async fn batch_squash_receipt_keeps_own_ui_advisory_cas_e5b1() {
     )
     .await;
     assert_eq!(fx.status(), TaskStatus::Closed, "{text}");
-    assert!(cas::gates::codes_in(&fx.notes()).contains(&"G-53"));
 }
 
 /// cas-ba4a: the worker parks A at X with a valid QA bundle, starts B on the

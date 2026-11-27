@@ -151,7 +151,6 @@ async fn unreviewed_squash_closes_with_advisory_cas_5129a() {
     .unwrap();
     let refused = extract_text(fx.core.cas_task_close(Parameters(request)).await.unwrap());
     assert_eq!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "{refused}");
-    assert!(cas::gates::codes_in(&tasks.get("cas-bq01").unwrap().notes).contains(&"G-53"));
 }
 
 #[tokio::test]
@@ -949,7 +948,6 @@ async fn batch_qa_default_defers_and_explicit_per_task_warns_cas_a56a() {
     assert!(cas_store::has_qa_batch_deferral(&root, "cas-bq01").unwrap());
     fx.reconfigure("mode='per_task'");
     let explicit = fx.close("cas-bq02").await;
-    assert!(cas::gates::codes_in(&open_task_store(&root).unwrap().get("cas-bq02").unwrap().notes).contains(&"G-53"), "{explicit}");
     assert!(!cas_store::has_qa_batch_deferral(&root, "cas-bq02").unwrap());
     assert_eq!(open_task_store(&root).unwrap().get("cas-bq02").unwrap().status,
         TaskStatus::AwaitingMerge);

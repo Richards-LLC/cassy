@@ -213,6 +213,17 @@ impl FactoryDaemon {
     /// whose registration already records this session's end and retires its row.
     pub(super) fn take_supervisor_restart_request(&mut self) {
         let Some(request) = crate::factory_daemon_health::take_supervisor_restart(self.app.cas_dir(), &self.session_name, Utc::now()) else { return };
+        let name = self.app.supervisor_name();
+        if request.requester == crate::supervisor_auto_clear::SOURCE
+            && (self.app.mux.get(name).is_none_or(|pane| pane.has_exited() || !pane.ready_for_injection() || pane.is_composer_dirty())
+                || self.app.mux.pane_inject_busy(name)
+                || command_turn_idle(self.app.cas_dir(), &self.session_name, name, self.app.harness_for(name)) != Some(true))
+        {
+            if let Err(error) = crate::factory_daemon_health::request_supervisor_restart(self.app.cas_dir(), &self.session_name, &request.requester) {
+                tracing::warn!(%error, "could not retain deferred automatic supervisor restart");
+            }
+            return;
+        }
         if let Err(detail) = self.begin_supervisor_restart(&request.requester) {
             let name = self.app.supervisor_name().to_string();
             let (root, session) = (self.app.cas_dir().to_path_buf(), self.session_name.clone());
@@ -427,9 +438,18 @@ pub(super) fn supervisor_transcript(cas_dir: &std::path::Path, session: &str, su
             && agent.role == cas_types::AgentRole::Supervisor
             && agent.factory_session.as_deref() == Some(session))
         .max_by_key(|agent| (agent.status == cas_types::AgentStatus::Active, agent.registered_at))?;
-    if cli == cas_mux::SupervisorCli::Codex
-        && agent.cc_session_id.as_deref().is_some_and(|id| id.starts_with("codex-"))
-    {
+    if cli == cas_mux::SupervisorCli::Codex {
+        if let Some(native) = agent.cc_session_id.as_deref().filter(|id| !id.starts_with("codex-")) {
+            let path = crate::mcp::tools::service::factory_ops::resolve_codex_mirror_transcript(
+                cas_dir.parent()?.to_str()?, agent.metadata.get("supervisor_account_dir").map(String::as_str),
+                &|path| std::fs::File::open(path).ok()
+                    .and_then(|file| std::io::BufRead::lines(std::io::BufReader::new(file)).next())
+                    .and_then(Result::ok)
+                    .and_then(|line| serde_json::from_str::<serde_json::Value>(&line).ok())
+                    .is_some_and(|row| row["type"] == "session_meta" && row["payload"]["id"].as_str() == Some(native)),
+            );
+            if path.is_some() { return path; }
+        }
         let queue = crate::store::open_prompt_queue_store(cas_dir).ok()?;
         return super::commander_mirror::unbound_codex_supervisor_rollout(cas_dir.parent()?, queue.as_ref(), session, &agent);
     }
@@ -495,7 +515,7 @@ fn codex_turn_open(path: &std::path::Path) -> Option<bool> {
 
 /// Positive native completion may release an idle prompt even while a shell
 /// repaints the footer. A newer user turn keeps Finish queued (cas-88ca).
-fn command_turn_idle(root: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli) -> Option<bool> {
+pub(super) fn command_turn_idle(root: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli) -> Option<bool> {
     let path = supervisor_transcript(root, session, supervisor, cli)?;
     native_turn_idle(&path, cli)
 }

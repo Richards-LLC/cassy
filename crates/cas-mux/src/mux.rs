@@ -1481,7 +1481,7 @@ impl Mux {
     /// boundary (cas-eacc): a dirty composer, or an earlier payload still
     /// awaiting its submit CR, returns [`InjectStart::Deferred`] before any
     /// byte is sent, and a draft started during the settle defers the
-    /// payload. Context reset, a destructive control, passes `false`.
+    /// payload.
     /// One urgent inject per pane at a time; a second is deferred.
     pub async fn begin_interrupt_and_inject(
         &mut self,

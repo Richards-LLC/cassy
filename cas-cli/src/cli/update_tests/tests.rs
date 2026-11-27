@@ -353,14 +353,16 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
         .map(|name| {
             let project = projects.join(name);
             std::fs::create_dir_all(&project).unwrap();
-            assert!(
-                std::process::Command::new("git")
-                    .args(["init", "--quiet"])
-                    .arg(&project)
-                    .status()
-                    .unwrap()
-                    .success()
+            cas_6718_git(&project, &["init", "-q", "-b", "main"]);
+            cas_6718_git(&project, &["config", "init.defaultBranch", "main"]);
+            cas_6718_git(
+                &project,
+                &[
+                    "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "--allow-empty", "-qm", "project baseline",
+                ],
             );
+            cas_6718_git(&project, &["checkout", "-qb", "repair/violet-proxy"]);
             crate::store::init_cas_dir(&project).unwrap()
         })
         .collect();
@@ -2798,17 +2800,17 @@ fn managed_sync_commits_on_named_branches_cas_10ad() {
     env.remove("CAS_SKIP_FACTORY_TOOLING");
     let home = env.home().to_path_buf();
     let mut failures = Vec::new();
-    for (branch, can_commit) in [
-        ("main", true),
-        ("staging", true),
-        ("production", true),
-        ("release/base", true),
-        ("epic/shared", true),
-        ("repair/managed", true),
-        ("detached", false),
-        ("repair/config-unreadable", false),
-        ("release/shared-state", true),
-        ("repair/unknown-default", true),
+    for (branch, outcome) in [
+        ("main", "deferred"),
+        ("staging", "deferred"),
+        ("production", "deferred"),
+        ("release/base", "deferred"),
+        ("epic/shared", "deferred"),
+        ("repair/managed", "committed"),
+        ("detached", "staged"),
+        ("repair/config-unreadable", "deferred"),
+        ("release/shared-state", "deferred"),
+        ("repair/unknown-default", "deferred"),
     ] {
         let project = cas_6718_drifted_project(&home.join(branch));
         let root = if branch == "release/shared-state" {
@@ -2838,30 +2840,57 @@ fn managed_sync_commits_on_named_branches_cas_10ad() {
         let path = root.join("config.toml");
         let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         let configured_base = if branch == "release/shared-state" { branch } else { "release/base" };
-        config["factory"]["epic_base_branch"] = toml_edit::value(configured_base);
+        config["factory"]["epic_base_branch"] =
+            toml_edit::value(format!("refs/remotes/origin/{configured_base}"));
         std::fs::write(&path, config.to_string()).unwrap();
+        if branch == "release/shared-state" {
+            let config: crate::config::Config = toml::from_str(&config.to_string()).unwrap();
+            std::fs::remove_file(&path).unwrap();
+            std::fs::write(root.join("config.yaml"), serde_yaml::to_string(&config).unwrap()).unwrap();
+        }
         if branch == "repair/config-unreadable" {
             // A directory fails config reading on every host, including root.
             std::fs::remove_file(&path).unwrap();
             std::fs::create_dir(&path).unwrap();
         }
         if branch == "repair/unknown-default" {
+            cas_6718_git(&project, &["config", "init.defaultBranch", ""]);
             cas_6718_git(&project, &["branch", "-D", "main"]);
             cas_6718_git(&project, &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
             cas_6718_git(&project, &["update-ref", "-d", "refs/remotes/origin/production"]);
         }
+        if branch == "main" {
+            std::fs::write(project.join("README.md"), "Staged project work\n").unwrap();
+            cas_6718_git(&project, &["add", "README.md"]);
+        }
+        let index = std::fs::read(project.join(".git/index")).unwrap();
+        let refs = cas_6718_git(&project, &["show-ref"]);
+        let paths = cas_6718_git(&project, &["ls-files"]);
+        let files = paths.lines().map(|path| project.join(path)).chain([
+            project.join(".claude/skills/cas-search/SKILL.md"),
+            root.join("config.toml"),
+            root.join("config.yaml"),
+            root.join("config.yaml.bak"),
+        ])
+            .map(|path| (std::fs::read(&path).ok(), path))
+            .collect::<Vec<_>>();
         let before = cas_6718_git(&project, &["rev-parse", "HEAD"]);
-        let (result, output) = capture_phase(true, || sync_claude_files_into(
+        let (result, _) = capture_phase(true, || sync_claude_files_into(
             &update_test_cli(branch != "repair/config-unreadable"), Some(&root), Some(&project),
         ));
         let report = match result {
             Ok(report) => report,
             Err(error) => {
-                failures.push(format!("{branch}: update aborted instead of keeping repair staged: {error}"));
+                failures.push(format!("{branch}: update aborted: {error}"));
                 continue;
             }
         };
+        if report.outcome != outcome {
+            failures.push(format!("{branch}: expected {outcome}, got {}", report.outcome));
+            continue;
+        }
         let after = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+        let can_commit = outcome == "committed";
         if (after != before) != can_commit || report.commit.is_some() != can_commit {
             failures.push(format!("{branch}: expected can_commit={can_commit}, outcome={}, commit={:?}", report.outcome, report.commit));
         }
@@ -2870,41 +2899,31 @@ fn managed_sync_commits_on_named_branches_cas_10ad() {
             assert_eq!(cas_6718_git(&project, &["rev-list", "--count", &format!("{}..HEAD", before.trim())]).trim(), "1");
         }
         assert!(report.commit_error.is_none(), "{branch}: {:?}", report.commit_error);
-        if !can_commit && report.commit.is_none() {
-            assert_eq!(report.outcome, "staged", "{branch}");
+        if outcome == "staged" {
             assert!(report.staged > 0);
             assert!(!cas_6718_git(&project, &["diff", "--cached", "--name-only"]).is_empty());
         }
-        if branch == "repair/config-unreadable" {
+        if outcome == "deferred" {
             let json = serde_json::to_value(&report).unwrap();
-            let warning = json["commit_warning"].as_str().expect("guard error needs a structured warning");
-
-            let lines: Vec<_> = output.lines().filter(|line| line.contains(warning)).collect();
-            assert_eq!(lines.len(), 1, "{output}");
-            assert!(lines[0].is_ascii() && lines[0].len() <= 78, "{}", lines[0]);
+            assert_eq!(json["commit"], serde_json::Value::Null, "{branch}");
+            assert_eq!(json["untracked"], 0, "{branch}");
+            assert_eq!(json["staged"], 0, "{branch}");
+            assert!(json["commit_warning"].is_string(), "{branch}");
+            assert_eq!(std::fs::read(project.join(".git/index")).unwrap(), index, "{branch}");
+            assert_eq!(cas_6718_git(&project, &["show-ref"]), refs, "{branch}");
+            for (original, path) in files {
+                assert_eq!(std::fs::read(&path).ok(), original, "{branch}: {}", path.display());
+            }
+        }
+        if branch == "repair/config-unreadable" {
             assert!(path.is_dir(), "update must not replace the unreadable config");
         }
         if branch != "repair/unknown-default" {
             assert_eq!(cas_6718_git(&project, &["rev-parse", "refs/remotes/origin/production"]), before);
         }
         assert!(check_managed_commit(report).is_ok(), "staged guard refusals must exit successfully");
-        if branch == "main" {
-            let head = cas_6718_git(&project, &["rev-parse", "HEAD"]);
-            let settings_path = project.join(".claude/settings.json");
-            let mut settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
-            settings["theme"] = serde_json::json!("staged-project-choice");
-            std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
-            cas_6718_git(&project, &["add", ".claude/settings.json"]);
-            let index: serde_json::Value = serde_json::from_str(&cas_6718_git(&project, &["show", ":.claude/settings.json"])).unwrap();
-            let report = sync_claude_files_into(&update_test_cli(true), Some(&root), Some(&project)).unwrap();
-            assert_eq!(report.outcome, "staged", "project settings are never a managed commit");
-            let _ = report.commit_warning.expect("commit warning recorded");
-            assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), head);
-            let actual: serde_json::Value = serde_json::from_str(&cas_6718_git(&project, &["show", ":.claude/settings.json"])).unwrap();
-            assert_eq!(actual, index);
-        }
         if branch == "detached" {
-            cas_6718_git(&project, &["checkout", "-qB", "main"]);
+            cas_6718_git(&project, &["checkout", "-qB", "repair/detached"]);
             let report = sync_claude_files_into(&update_test_cli(true), Some(&root), Some(&project)).unwrap();
             assert_eq!(report.outcome, "committed", "rerun must clear pure sync staging");
             assert!(cas_6718_git(&project, &["diff", "--cached", "--name-only"]).is_empty());
@@ -2919,7 +2938,10 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     env.remove("CAS_AGENT_ROLE");
     env.remove("CAS_SKIP_FACTORY_TOOLING");
     let project = cas_6718_drifted_project(env.home());
-    cas_6718_git(&project, &["checkout", "-q", "main"]);
+    let unrelated = env.home().join("unrelated");
+    std::fs::create_dir(&unrelated).unwrap();
+    cas_6718_git(&unrelated, &["init", "-q"]);
+    env.set_current_dir(&unrelated);
     let root = project.join(".cas");
     env.set("CAS_ROOT", &root);
     let harnesses = crate::cli::project_files::harnesses(&project);
@@ -2932,6 +2954,7 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     assert_eq!(cas_6718_git(&project, &["status", "--porcelain"]), original);
     args.dry_run = false;
     execute(&args, &update_test_cli(true), Some(&root)).unwrap();
+    assert!(!unrelated.join(".claude").exists());
     let status = cas_6718_git(&project, &["status", "--porcelain"]);
     assert!(
         status.is_empty(),
@@ -3030,6 +3053,36 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
         &std::fs::read(project.join(unchanged[0])).unwrap()).unwrap();
     assert!(settings["hooks"]["PreToolUse"].as_array().unwrap().iter()
         .any(|group| group["hooks"][0]["timeout"] == 17));
+
+    let linked = env.home().join("linked");
+    cas_6718_git(&project, &[
+        "worktree", "add", "-qb", "repair/linked", linked.to_str().unwrap(), "main",
+    ]);
+    let primary_head = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+    let primary_index = std::fs::read(project.join(".git/index")).unwrap();
+    let linked_head = cas_6718_git(&linked, &["rev-parse", "HEAD"]);
+    let nested = linked.join(".claude");
+    env.set_current_dir(&nested);
+    let (result, output) = capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+    result.unwrap();
+    let receipt: serde_json::Value = output.lines().last().unwrap().parse().unwrap();
+    assert_eq!(receipt["managed_files"]["outcome"], "committed");
+    assert_ne!(cas_6718_git(&linked, &["rev-parse", "HEAD"]), linked_head);
+    assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), primary_head);
+    assert_eq!(std::fs::read(project.join(".git/index")).unwrap(), primary_index);
+    for path in [".cas/cas.db", ".cas/config.toml", ".cas/config.yaml"] {
+        assert!(!linked.join(path).exists(), "unexpected local store file: {path}");
+    }
+    assert!(std::fs::read_to_string(linked.join(unchanged[1])).unwrap().contains(&rule.content));
+    let hook_timeouts = |settings: &str| {
+        let settings: serde_json::Value = serde_json::from_str(settings).unwrap();
+        settings["hooks"]["PreToolUse"].as_array().unwrap().iter()
+            .filter_map(|group| group["hooks"][0]["timeout"].as_u64())
+            .collect::<Vec<_>>()
+    };
+    let working = hook_timeouts(&std::fs::read_to_string(linked.join(unchanged[0])).unwrap());
+    let committed = hook_timeouts(&cas_6718_git(&linked, &["show", "HEAD:.claude/settings.json"]));
+    assert!(working.contains(&17) && committed.contains(&17), "working: {working:?}, committed: {committed:?}");
 }
 
 #[test]
@@ -3182,7 +3235,7 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
     env.set("CAS_CREDENTIALS_FILE", host.path().join("credentials.env"));
     let mut diagnostic_failures = Vec::new();
     #[cfg(unix)]
-    for mode in ["all-projects", "sync", "worker-sync", "commit-msg-sync", "human-sync"] {
+    for mode in ["deferred-projects", "all-projects", "sync", "worker-sync", "commit-msg-sync", "human-sync"] {
         use std::os::unix::fs::PermissionsExt;
         let fixture_home = host.path().join(mode);
         let project = cas_6718_drifted_project(&fixture_home);
@@ -3192,8 +3245,12 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
         env.set("CAS_AGENT_ROLE", if mode == "worker-sync" { "worker" } else { "supervisor" });
         env.set("CAS_PROJECT_ROOTS", &fixture_home);
         env.set_current_dir(&project);
-        // Hook refusal is tested on a branch where automatic commits are allowed.
-        cas_6718_git(&project, &["branch", "-M", "repair/hook-refusal"]);
+        let deferred = mode == "deferred-projects";
+        if deferred {
+            cas_6718_git(&project, &["checkout", "-q", "main"]);
+        } else {
+            cas_6718_git(&project, &["branch", "-M", "repair/hook-refusal"]);
+        }
         let head = cas_6718_git(&project, &["rev-parse", "HEAD"]);
         let readme = project.join("README.md");
         std::fs::write(&readme, "Unstaged user work survives refusal\n").unwrap();
@@ -3220,12 +3277,24 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
         let hook_before = std::fs::read(&hook).unwrap();
         let config_before = std::fs::read(project.join(".git/config")).unwrap();
         let mut args = update_test_args();
-        args.all_projects = mode == "all-projects";
-        args.sync = mode != "all-projects";
+        args.all_projects = deferred || mode == "all-projects";
+        args.sync = !args.all_projects;
         let human = mode == "human-sync";
         env.set("COLUMNS", "80");
         let (result, output) =
             capture_phase(true, || execute(&args, &update_test_cli(!human), Some(&root)));
+        if deferred {
+            result.unwrap();
+            let receipt: serde_json::Value = output.lines().last().unwrap().parse().unwrap();
+            assert_eq!(receipt["refresh_status"], "partial");
+            let managed = &receipt["projects"][0]["phase_documents"]["skills"][0]["managed_files"];
+            assert_eq!(managed["outcome"], "deferred");
+            assert_eq!(managed["commit"], serde_json::Value::Null);
+            assert!(managed["commit_warning"].is_string());
+            assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), head);
+            assert_eq!(std::fs::read(&readme).unwrap(), user_before);
+            continue;
+        }
         assert!(
             result.is_err(),
             "{mode}: refused commit must make update incomplete, got success:\n{output}"
@@ -3611,7 +3680,7 @@ fn cas_4585_retired_notices_survive_nested_failure_and_other_modes() {
         );
         // The real index-side hook projection must attribute its copied
         // config to the owning project, never a disposable temp directory.
-        crate::cli::hook::configure_claude_hooks_for_index(projection.path(), &home).unwrap();
+        crate::cli::hook::configure_claude_hooks_for_index(projection.path(), &home, &root).unwrap();
         assert_eq!(crate::config::retire_config(&root, false).status, "failed");
         // A refused or failed maintenance does not resolve this file. Scope
         // exit replays it even if the command never reaches a final receipt.

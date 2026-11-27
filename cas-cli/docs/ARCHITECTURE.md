@@ -289,7 +289,21 @@ the Cassy authoring checkout retains its tracked rendered fixtures.
 | Project tracked | `.claude/settings.json`, `.mcp.json`, `.codex/config.toml`, `.codex/hooks.json` | Cassy hook commands, permissions, statusline and MCP entries; project hooks and configuration keys are preserved. |
 | Project tracked, project customizable | `.env.worktree.template`, `scripts/worktree-boot.sh` | Only exact generated templates are eligible for the initial automatic commit. Subsequent customization belongs to the project. |
 
-Before writing, update checks for unmerged paths, symlinks, malformed documents,
+Before any managed-file writer runs in a consumer checkout, update defers on
+trunk, the detected default, the configured epic base, and `epic/*`. An
+unreadable branch policy also defers. This leaves tracked and ignored
+projections, the index, and Git refs untouched. The receipt reports
+`managed_files.outcome: "deferred"`, zero staged/untracked counts, a null
+commit, and a warning. The multi-project sweep reports a partial refresh, not
+an install failure; other phases, including store maintenance, can still run.
+
+To apply the pending projection, create a repair branch from the reviewed
+published base in an isolated linked checkout, run `cas update --sync` there,
+review the result, and submit a normal PR. Explicit sync in a linked checkout
+of the same repository uses that checkout with the authoritative shared Cassy
+store. It never creates a branch, switches checkouts, or pushes.
+
+Before writing on a repair branch, update checks for unmerged paths, symlinks, malformed documents,
 namespace conflicts and local edits to managed content. Each conflicting path
 is reported and preserved in both the worktree and index while unrelated files
 continue to sync. The same exclusion reaches configuration writers, store
@@ -317,20 +331,18 @@ probes remain unknown; unrelated Git processes conservatively count as busy.
 Update never removes a lock. Recheck writers before manually removing the exact
 stale lock and retrying; recent/live locks require waiting, unknown ownership
 requires inspection.
-With only managed changes staged on a named branch (including the default and
-integration branches), sync owns one `chore(cas): sync managed files to vX.Y.Z`
+With only managed changes staged on an eligible topic branch, sync owns one
+`chore(cas): sync managed files to vX.Y.Z`
 commit with a command-scoped Cassy author identity. The same check compares
 project content inside mixed instruction/configuration files, not just their
 paths, so staged project edits are never included. A rerun commits pure managed
 staging left by an earlier sync even when no renderer changes remain.
-Detached or unreadable HEAD leaves the repair staged. The guard reads
-configuration from the CAS root passed to sync, including shared stores outside
-a worktree. Unreadable configuration leaves a `commit_warning` and staged repair;
-fix it before retrying. Existing merge/rebase state also defers the commit.
-When staged sync changes block `worktree_merge`, the refusal names
-`cas update --sync` in the shared target checkout as the clearing command.
-Mixed project staging retains the ordinary residue refusal. It never
-pushes. A committed repair prints a local-only next step: push it to origin and
+Detached HEAD and existing merge/rebase state leave the repair staged rather
+than creating a commit. When legacy managed staging blocks `worktree_merge`,
+preserve and review the residue outside the shared target, apply any needed
+repair through the topic branch and PR, then clear the reviewed residue from the
+shared checkout before retrying. Mixed project staging retains the ordinary
+residue refusal. A committed repair prints a local-only next step: push it to origin and
 open a normal PR. Doctor checks the default branch against its configured
 upstream and warns about unpublished Cassy-authored reconcile commits, including
 when invoked from a worker branch. Spawn/lane divergence refusals name these
@@ -363,7 +375,7 @@ hard reset. Substitute the actual trunk, remote and a unique recovery name.
 Review any useful managed-file changes on a fresh work branch based on current
 trunk and submit them normally; do not merge the stale recovery branch merely
 to clear the divergence. Run the patched update only after the operator's
-branch recovery decision; its repair remains staged on trunk.
+branch recovery decision; it leaves trunk untouched and reports the repair deferred.
 
 Normal Git hooks remain authoritative. An attempted managed commit that fails
 returns `outcome: "commit_failed"` and an additive `commit_error` containing Git's

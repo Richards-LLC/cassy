@@ -541,7 +541,7 @@ impl WorktreeManager {
                     if target_dirty.blocking.iter().all(|entry| entry.status.ends_with(' '))
                         && crate::cli::project_files::staged_sync_only(&self.repo_root).unwrap_or(false)
                     {
-                        details.push_str("\nCassy-managed sync changes are staged. Run `cas update --sync` in the shared target checkout to commit them, then retry worktree_merge.");
+                        details.push_str("\nCassy-managed sync changes are staged. Preserve and review them off the shared target. Run `cas update --sync` on a repair branch from the published target and submit a PR. Clear the reviewed residue from this checkout before retrying worktree_merge.");
                     }
                     return Err(WorktreeError::Git(GitError::MergeCheckoutDirty(details)));
                 }

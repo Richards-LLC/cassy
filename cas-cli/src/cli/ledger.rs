@@ -17,6 +17,8 @@ mod scorers;
 mod sensors;
 #[path = "ledger_health.rs"]
 mod health;
+#[path = "ledger_window.rs"]
+mod window;
 
 /// `cas scorecard`: the per-release report.
 #[derive(Args)]
@@ -24,6 +26,12 @@ pub struct ScorecardArgs {
     /// Release tag, vX.Y.Z. Omit for work since the last release.
     #[arg(long)]
     release: Option<String>,
+    /// Start of a recorded-row window (inclusive, RFC3339).
+    #[arg(long, requires = "until", conflicts_with = "release")]
+    since: Option<DateTime<Utc>>,
+    /// End of a recorded-row window (exclusive, RFC3339).
+    #[arg(long, requires = "since", conflicts_with = "release")]
+    until: Option<DateTime<Utc>>,
     /// Read local rows only; do not pull from Cloud first
     #[arg(long)]
     offline: bool,
@@ -78,6 +86,15 @@ enum LedgerCommand {
 }
 
 pub fn execute_scorecard(args: &ScorecardArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
+    if let (Some(since), Some(until)) = (args.since, args.until) {
+        let report = window::build(cas_root, since, until, args.park_visibility_minutes)?;
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print!("{}{}", render(&report.ledger), window::render(&report.efficiency));
+        }
+        return Ok(());
+    }
     if !args.offline {
         pull_before_report(cas_root);
     }

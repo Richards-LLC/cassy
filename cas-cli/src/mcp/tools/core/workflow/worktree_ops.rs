@@ -4933,9 +4933,20 @@ impl CasCore {
         } else {
             None
         };
+        let can_prepare_remote_source = receipt_resume.is_none()
+            && (system_a.is_none()
+                || (transactional_delivery.is_none()
+                    && scoped_task.as_deref().is_some_and(|task| {
+                        task.status == cas_types::TaskStatus::AwaitingMerge
+                            && task.delivery_mode == cas_types::DeliveryMode::PushBranch
+                            && task.deliverables.work_target.is_some()
+                    })
+                    && system_a.as_ref().is_some_and(|worktree| {
+                        worktree.branch.starts_with("factory/") && !is_git_worktree(&worktree.path)
+                    })));
         let task_source = if active_source.is_some() {
             active_source
-        } else if system_a.is_none() && receipt_resume.is_none()
+        } else if can_prepare_remote_source
             && (transactional_delivery.is_none()
                 || scoped_task.as_deref().is_some_and(|task| task.deliverables.parked_branch.is_some()))
         {
@@ -4967,7 +4978,7 @@ impl CasCore {
                 data: None,
             });
         }
-        let remote_source = if system_a.is_none() && receipt_resume.is_none() {
+        let remote_source = if can_prepare_remote_source {
             self.prepare_remote_merge_source(
                 &manager, scoped_task.as_deref(), id, cleanup, task_source.as_ref(),
             )?
@@ -5003,7 +5014,7 @@ impl CasCore {
         }
 
         let (mut worktree, is_system_b, source_worktree_live, target_reason, trunk_fallback) =
-            match system_a {
+            match system_a.filter(|_| remote_source.is_none()) {
                 Some(mut wt) => {
                     if let Some(source) = task_source.as_ref() {
                         wt.branch = source.branch.clone();

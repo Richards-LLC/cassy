@@ -1464,6 +1464,81 @@ pub(crate) fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
 mod tests {
     use super::potentially_mutating_call;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worker_catalog_readiness_survives_sibling_front_exit_cas_a43b() {
+        use crate::factory_tools_ready::{FRONT_PID_ENV, await_listing, path_for_test, tools_listed};
+        use crate::mcp::{CasCore, CasService, daemon::pid_alive};
+        use rmcp::ServiceExt;
+        use std::process::Stdio;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_SESSION", "factory-test");
+        env.set("CAS_AGENT_NAME", "worker-test");
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let service = CasService::new(CasCore::with_daemon(root.clone(), None, None),
+            #[cfg(feature = "mcp-proxy")] None);
+        let ready = || tools_listed(&root, "factory-test", "worker-test", pid_alive);
+        let spawn_front = || {
+            tokio::process::Command::new("/bin/cat").stdin(Stdio::piped())
+                .stdout(Stdio::null()).kill_on_drop(true).spawn().unwrap()
+        };
+        let connect = async || {
+            let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+            let service = service.clone();
+            let server = tokio::spawn(async move {
+                service.serve(server_io).await.unwrap().waiting().await.unwrap();
+            });
+            (().serve(client_io).await.unwrap(), server)
+        };
+
+        await_listing(&root, "factory-test", "worker-test");
+        let marker = path_for_test(&root, "factory-test", "worker-test");
+        let mut primary_front = spawn_front();
+        let (primary, primary_server) = connect().await;
+        assert!(!ready());
+        let primary_pid = primary_front.id().unwrap();
+        env.set(FRONT_PID_ENV, &primary_pid.to_string());
+        assert!(primary.list_tools(None).await.unwrap().tools.iter().any(|tool| tool.name == "task"));
+        assert!(ready());
+
+        let mut sibling_front = spawn_front();
+        let (sibling, sibling_server) = connect().await;
+        env.set(FRONT_PID_ENV, &sibling_front.id().unwrap().to_string());
+        sibling.list_tools(None).await.unwrap();
+        sibling.cancel().await.unwrap();
+        sibling_server.await.unwrap();
+        sibling_front.kill().await.unwrap();
+        primary.send_request(rmcp::model::PingRequest::default().into()).await.unwrap();
+        assert!(ready(), "a listed live front must survive a sibling's exit");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().parse::<u32>().unwrap(), primary_pid);
+
+        let mut successor_front = spawn_front();
+        let (successor, successor_server) = connect().await;
+        let successor_pid = successor_front.id().unwrap();
+        env.set(FRONT_PID_ENV, &successor_pid.to_string());
+        successor.list_tools(None).await.unwrap();
+        primary.cancel().await.unwrap();
+        primary_server.await.unwrap();
+        primary_front.kill().await.unwrap();
+        assert!(ready(), "a genuinely listed successor keeps the same launch ready");
+
+        std::fs::write(&marker, "awaiting").unwrap();
+        assert!(!ready(), "a legacy launch reset discards prior acknowledgments");
+        std::fs::write(&marker, primary_pid.to_string()).unwrap();
+        assert!(!ready(), "a legacy dead PID cannot revive old acknowledgments");
+        std::fs::write(&marker, successor_pid.to_string()).unwrap();
+        assert!(ready(), "a legacy reader/writer still uses a numeric ready record");
+        await_listing(&root, "factory-test", "worker-test");
+        assert!(!ready());
+
+        successor.cancel().await.unwrap();
+        successor_server.await.unwrap();
+        successor_front.kill().await.unwrap();
+    }
+
     #[test]
     fn cas_4e19_authenticated_non_worker_verdict_skips_store_access_across_clones() {
         use crate::mcp::server::{AgentIdentitySource, CasCore};

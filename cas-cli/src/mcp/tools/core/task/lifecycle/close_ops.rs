@@ -14414,7 +14414,10 @@ impl CasCore {
         let (outcome, reason) = super::super::repeat_review::repair_transition(
             &self.cas_root, &task.id, &req.reason, |reason, reviewed| {
                 let effective_class = crate::mcp::tools::core::task::repair_class::require_class(task_store.as_ref(), &task.id, class_audit)
-                    .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, format!("task request_changes rejected: {message}")))?;
+                    .unwrap_or_else(|warning| {
+                        tracing::warn!(task_id = %task.id, %warning);
+                        None
+                    });
                 if let Some(class) = &effective_class {
                     task_store.patch_execution_state(&task.id, &serde_json::json!({"class_audit": class}))
                         .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,

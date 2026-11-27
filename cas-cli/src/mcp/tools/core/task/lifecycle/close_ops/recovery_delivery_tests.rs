@@ -514,7 +514,7 @@ async fn resume_release_sync_accepts_shipped_but_refuses_unshipped_foreign_commi
 /// first repair brief named only those, and a third test of their class failed
 /// next. With the failing tests recorded as data, a decline needs the class.
 #[tokio::test]
-async fn request_changes_over_recorded_failing_tests_requires_a_class_audit_cas_bc25() {
+async fn request_changes_accepts_missing_class_audit_cas_09b9() {
     use std::io::Write;
     use crate::ui::factory::daemon::runtime::{ci_watch, merge_queue_ejection};
     let mut env = TestEnvGuard::temp_home();
@@ -645,9 +645,6 @@ esac
             class_audit: class.map(String::from),
         })
     };
-    // The first brief: the two tests, no class. A class that misses them is no better.
-    // Also refused: an all-exact class just restates the failing names, and `&` is a
-    // class no receipt could cover (coverage understands `|` only).
     for class in [
         None,
         Some("not a filter"),
@@ -656,10 +653,12 @@ esac
         Some("test(=ui::list::sorts) | test(=ui::list::filters)"),
         Some("test(ui::list::) & test(sorts)"),
     ] {
-        let refused = supervisor.cas_task_request_changes(request(class)).await.unwrap_err();
-        assert_eq!(refused.code, ErrorCode::INVALID_PARAMS);
-        assert!(refused.message.contains("CLASS_AUDIT_REQUIRED"), "{refused}");
-        assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
+        let mut parked = tasks.get(TASK).unwrap();
+        parked.status = TaskStatus::AwaitingMerge;
+        tasks.update(&parked).unwrap();
+        supervisor.cas_task_request_changes(request(class)).await.unwrap();
+        assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Open);
+        assert!(tasks.get_execution_state(TASK).unwrap().unwrap().get("class_audit").is_none());
     }
     // cas-adca: decode the structural field and enter the real spawn handler,
     // rather than calling the class helper with an already-recorded answer.

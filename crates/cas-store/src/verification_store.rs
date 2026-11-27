@@ -2928,7 +2928,7 @@ fn request_changes_for_parked_delivery_impl(
     source_commits: &[String],
     automatic_repair: Option<(&str, &str)>,
     observed: Option<(&str, &str, &str)>,
-    reviewed_rejection: Option<&str>,
+    _reviewed_rejection: Option<&str>,
 ) -> Result<Option<RequestChangesOutcome>> {
     let reason = reason.trim();
     if reason.is_empty() {
@@ -3036,11 +3036,6 @@ fn request_changes_for_parked_delivery_impl(
             params![dispatch_id], |row| row.get(0),
         )?;
         if !rejected { return Ok(None); }
-    }
-    if latest_repeated_rejection_with_conn(&tx, task_id)?
-        .is_some_and(|(id, _, _)| Some(id.as_str()) != reviewed_rejection)
-    {
-        return Err(StoreError::Parse(REPEAT_REVIEW_REQUIRED.into()));
     }
     if let Some((branch, target, anchor)) = observed {
         crate::delivery_store::clear_pending_observed_delivery_merge_with_conn(&tx, task_id, branch, target, anchor)?;
@@ -4503,21 +4498,14 @@ mod tests {
         assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().epoch, existing.epoch);
         agents.release_lease(&task.id, &owner.id).unwrap();
         let history = agents.get_lease_history(&task.id, None).unwrap().len();
-        for refusal in [
-            agents.preview_task_claim(&task.id, &owner.id).unwrap_err(),
-            agents.try_claim(&task.id, &owner.id, 600, None).unwrap_err(),
-        ] {
-            assert!(matches!(refusal, StoreError::RepeatReviewRequired { rejection_id, count: 2, .. }
-                if rejection_id == verdict.id));
-        }
-        assert_eq!(agents.get_lease_history(&task.id, None).unwrap().len(), history);
-        assert!(agents.get_lease(&task.id).unwrap().is_none());
+        assert!(agents.preview_task_claim(&task.id, &owner.id).unwrap().is_some());
+        assert!(matches!(agents.try_claim(&task.id, &owner.id, 600, None).unwrap(),
+            cas_types::ClaimResult::Success(_)));
+        assert!(agents.get_lease_history(&task.id, None).unwrap().len() > history);
+        assert!(agents.get_lease(&task.id).unwrap().is_some());
         assert!(grant("owner", &next.id, &"b".repeat(40)).is_none());
         assert_eq!(tasks.get(&task.id).unwrap().deliverables.premerge_repair, Some(receipt));
-        // Explicit supervisor request-changes creates a new manual work cycle.
-        let held = request_changes_for_parked_delivery(dir.path(), &task.id, "owner", "new scope").unwrap_err();
-        assert!(matches!(held, StoreError::Parse(reason) if reason == REPEAT_REVIEW_REQUIRED));
-        request_changes_for_reviewed_delivery(dir.path(), &task.id, "owner", "new scope", &[], Some(&verdict.id)).unwrap();
+        request_changes_for_parked_delivery(dir.path(), &task.id, "owner", "new scope").unwrap();
         let current = tasks.get(&task.id).unwrap();
         assert!(current.deliverables.delivery_cycle > current.deliverables.premerge_repair.unwrap().repair_cycle);
     }

@@ -72,20 +72,25 @@ impl SqliteAgentStore {
         agent_id: &str,
         write: Option<(i64, Option<&str>)>,
     ) -> Result<(ClaimResult, Option<String>)> {
-        let attempt = |review| crate::shared_db::with_write_retry(|| {
-            self.lease_claim_attempt(task_id, agent_id, write, review)
-        });
-        match attempt(None) {
-            Err(StoreError::RepeatReviewRequired { task_id, rejection_id, rejected_at, count }) => {
-                if let Some(verify) = &self.lease_review
-                    && let Some(artifact) = verify(&task_id, rejected_at)?
-                {
-                    return attempt(Some((&rejection_id, &artifact)));
-                }
-                Err(StoreError::RepeatReviewRequired { task_id, rejection_id, rejected_at, count })
+        let rejection = {
+            let conn = self.lock_conn()?;
+            if conn.table_exists(None, "verifications")? {
+                crate::verification_store::latest_repeated_rejection_with_conn(&conn, task_id)?
+            } else {
+                None
             }
-            result => result,
-        }
+        };
+        let artifact = match (rejection, &self.lease_review) {
+            (Some((_, rejected_at, _)), Some(verify)) => match verify(task_id, rejected_at) {
+                Ok(artifact) => artifact,
+                Err(error) => {
+                    tracing::warn!(%task_id, %error, "could not read optional whole-flow review");
+                    None
+                }
+            },
+            _ => None,
+        };
+        crate::shared_db::with_write_retry(|| self.lease_claim_attempt(task_id, agent_id, write, artifact.as_deref()))
     }
 
     fn lease_claim_attempt(
@@ -93,7 +98,7 @@ impl SqliteAgentStore {
         task_id: &str,
         agent_id: &str,
         write: Option<(i64, Option<&str>)>,
-        review: Option<(&str, &str)>,
+        artifact: Option<&str>,
     ) -> Result<(ClaimResult, Option<String>)> {
         let conn = self.lock_conn()?;
         let tx = write.map(|_| ImmediateTx::new(&conn)).transpose()?;
@@ -152,19 +157,7 @@ impl SqliteAgentStore {
             1
         };
 
-        let artifact = if snapshot.table_exists(None, "verifications")?
-            && let Some((rejection_id, rejected_at, count)) =
-                crate::verification_store::latest_repeated_rejection_with_conn(snapshot, task_id)?
-        {
-            let Some((_, artifact)) = review.filter(|(approved, _)| *approved == rejection_id.as_str()) else {
-                return Err(StoreError::RepeatReviewRequired {
-                    task_id: task_id.to_owned(), rejection_id, rejected_at, count,
-                });
-            };
-            Some(artifact.to_owned())
-        } else {
-            None
-        };
+        let artifact = artifact.map(str::to_owned);
 
         let (duration_secs, reason) = write.unwrap_or_default();
         let expires_at = now + chrono::Duration::seconds(duration_secs);

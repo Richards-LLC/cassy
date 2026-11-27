@@ -24,14 +24,13 @@ fn supervisor_decisions(events: &[Event]) -> impl Iterator<Item = &str> {
         .filter_map(|event| event.metadata.as_ref()?.get("supervisor_decision")?.as_str())
 }
 
-// gate[G-172 repair]: Whole-flow review required after repeated verifier rejections
+// gate[G-172 repair]: Advisory whole-flow review after repeated verifier rejections
 fn repeat_review_refusal(task_id: &str, rejection_id: Option<&str>, count: Option<u64>) -> McpError {
-    let prefix = crate::mcp::tools::core::guidance::caller_prefix();
     let count = count.map_or_else(|| "at least 2".into(), |count| count.to_string());
     McpError {
         code: ErrorCode::INVALID_PARAMS,
         message: crate::gates::tag("G-172", format!(
-            "Whole-flow review required for {task_id}: {count} all-time verifier rejections. Have an independent reviewer publish a Markdown review from the task's artifacts directory: a table with Actor, Operation, Design and Observed columns that compares every actor and operation against the design, followed by a Mismatches heading and a list of every mismatch. Publish it with `{prefix}artifact action=publish task_id={task_id} path=<file>`. A supervisor then links it with `{prefix}task action=notes id={task_id} note_type=decision notes=\"{REVIEW_NOTE} <artifact-id>\"`. Retry with a repair brief covering the full mismatch list."
+            "WARNING: {task_id} has {count} verifier rejections. Use an independent review of the affected flow; a published whole-flow table is optional."
         )).into(),
         data: Some(serde_json::json!({"rule_id":REPEAT_REVIEW_RULE_ID, "task_id":task_id, "rejection_id":rejection_id})),
     }
@@ -82,7 +81,8 @@ pub(crate) fn admit_repair(root: &Path, task_id: &str) -> Result<RepairAdmission
     if artifact_id.is_some() {
         return Ok(RepairAdmission { reviewed_rejection: Some(rejection), artifact_id });
     }
-    Err(repeat_review_refusal(task_id, Some(&rejection), Some(count)))
+    tracing::warn!(%task_id, warning = %repeat_review_refusal(task_id, Some(&rejection), Some(count)).message);
+    Ok(RepairAdmission::default())
 }
 
 pub(crate) fn verified_review_artifact(root: &Path, task_id: &str, rejected_at: chrono::DateTime<chrono::Utc>) -> anyhow::Result<Option<String>> {

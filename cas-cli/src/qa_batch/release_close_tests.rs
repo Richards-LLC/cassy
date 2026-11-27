@@ -609,6 +609,8 @@ fn unregistered_reconcile_queues_parent_review_cas_d47d() {
     let report_path = repo.join("report.md");
     std::fs::write(&report_path, format!("# Release QA\nReviewed source: {published}\n")).unwrap();
     let report = crate::artifacts::publish(&context, &report_path).unwrap().artifact;
+    artifacts.mark_uploaded(&report.id, "fixture-qa-report").unwrap();
+    artifacts.mark_committed(&report.id, None).unwrap();
     qa.external_ref = Some(format!("artifact:{}/{}", qa.id, report.id));
     tasks.add(&qa).unwrap();
     tasks.add_dependency(&cas_types::Dependency::new(
@@ -618,14 +620,21 @@ fn unregistered_reconcile_queues_parent_review_cas_d47d() {
     let covered = [child.id.clone()];
     std::fs::write(&ledger_path, crate::qa_ledger::scaffold_with_coverage(&qa, &[], &published, &covered)).unwrap();
     let ledger = crate::artifacts::publish(&context, &ledger_path).unwrap().artifact;
+    artifacts.mark_uploaded(&ledger.id, "fixture-qa-ledger").unwrap();
+    artifacts.mark_committed(&ledger.id, None).unwrap();
     let receipt = prepare_receipt(
         &root, &reviewer, "fixture-qa-worker", &covered, &published,
         &ledger.id, &ledger_path, cas_store::QA_BATCH_RECEIPT_SCHEMA,
     ).unwrap();
     cas_store::record_qa_batch_receipt(&root, &receipt).unwrap();
-    let dispatch = cas_store::create_verification_dispatch(
-        &root, &qa.id, "fixture-qa-worker", &reviewer.id,
-        chrono::Utc::now() + chrono::Duration::hours(1),
+    let verification_boundary = cas_types::VerificationProofBoundary::task_at(
+        crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_at_target(
+            &repo, "main", Vec::new(),
+        ).unwrap(),
+    );
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &root, &qa.id, "fixture-qa-worker", &reviewer.id, &verification_boundary,
+        chrono::Utc::now() + chrono::Duration::hours(1), false,
     ).unwrap();
     let mut approval = cas_types::Verification::new("ver-qa-fixture".into(), qa.id.clone());
     approval.agent_id = Some(reviewer.id.clone());
@@ -659,6 +668,29 @@ fn unregistered_reconcile_queues_parent_review_cas_d47d() {
     assert!(inventory.exceptions.is_empty(), "{:?}", inventory.exceptions);
     assert_eq!(inventory.deliveries.iter().map(|delivery| &delivery.task_id).collect::<Vec<_>>(), vec![&child.id]);
     let runtime = tokio::runtime::Runtime::new().unwrap();
+    let assert_held = |input: &ReleaseInventory, expected: &str| {
+        let outcome = runtime.block_on(core.close_release_parent(input, &parent.id));
+        assert!(matches!(outcome, crate::release_reconcile::ParentOutcome::Held { ref gate, .. }
+            if gate.split(':').next() == Some(expected)), "{outcome:?}");
+    };
+    let mut missing = inventory.clone();
+    missing.scope.proof_refs.clear();
+    assert_held(&missing, "RELEASE_PARENT_MEMBER_HELD");
+    let mut stale = inventory.clone();
+    stale.scope.reviewed_sha = git(&["rev-parse", "HEAD^1"]);
+    assert_held(&stale, "RELEASE_PARENT_MEMBER_HELD");
+    let mut all_reports = inventory.clone();
+    all_reports.deliveries.clear();
+    assert_held(&all_reports, "RELEASE_EMPTY_PARENT");
+    let mut foreign = qa.clone();
+    foreign.external_ref = Some(format!("artifact:{}/{}", child.id, report.id));
+    tasks.update(&foreign).unwrap();
+    assert_held(&inventory, "RELEASE_PARENT_MEMBER_HELD");
+    let mut incomplete = qa.clone();
+    incomplete.status = TaskStatus::Open;
+    tasks.update(&incomplete).unwrap();
+    assert_held(&inventory, "RELEASE_PARENT_CHILDREN_INCOMPLETE");
+    tasks.update(&qa).unwrap();
     let result = runtime.block_on(crate::release_reconcile::reconcile_release(
         &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Backfill,
     )).unwrap();
@@ -681,6 +713,11 @@ fn unregistered_reconcile_queues_parent_review_cas_d47d() {
         &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Backfill,
     )).unwrap();
     assert_eq!(result.parents, replay.parents);
+    cas_store::create_verification_dispatch_bound(
+        &root, &qa.id, "fixture-qa-worker", &reviewer.id, &verification_boundary,
+        chrono::Utc::now() + chrono::Duration::hours(1), false,
+    ).unwrap();
+    assert_held(&inventory, "RELEASE_PARENT_MEMBER_HELD");
 }
 
 /// Publication of a later tree cannot turn one missing review into a train-wide hold.

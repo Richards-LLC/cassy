@@ -1,0 +1,4 @@
+title: Release parents recognize independently approved artifact-only QA
+statement: A closed artifact-only QA child can satisfy the parent completion check only when its independent approval, portable report and frozen QA ledger match the task, project and reviewed source. It is not a shipped constituent. Missing, stale, foreign or unapproved proof and incomplete children keep the parent held. Any parent still needs shipped integration evidence and its own acceptance.
+tasks: [cas-22a5e]
+journeys: [CLI-RELEASE]

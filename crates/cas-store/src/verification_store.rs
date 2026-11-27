@@ -4498,7 +4498,7 @@ mod tests {
         assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().epoch, existing.epoch);
         agents.release_lease(&task.id, &owner.id).unwrap();
         let history = agents.get_lease_history(&task.id, None).unwrap().len();
-        assert!(agents.preview_task_claim(&task.id, &owner.id).unwrap().is_some());
+        assert_eq!(agents.preview_task_claim(&task.id, &owner.id).unwrap(), None);
         assert!(matches!(agents.try_claim(&task.id, &owner.id, 600, None).unwrap(),
             cas_types::ClaimResult::Success(_)));
         assert!(agents.get_lease_history(&task.id, None).unwrap().len() > history);

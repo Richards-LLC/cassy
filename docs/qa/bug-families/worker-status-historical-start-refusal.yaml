@@ -1,0 +1,4 @@
+title: Worker status separates refused starts from accepted work
+statement: A queued start refusal remains actionable until the same worker starts that task and holds its active lease. Worker status then retains the task and gate IDs as history without the obsolete retry instructions.
+tasks: [cas-7f7c]
+journeys: [FACTORY-SPAWN]

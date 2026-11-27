@@ -30598,8 +30598,27 @@ mod merge_state_gate_tests {
         git(f.dir.path(), &["branch", "epic/successor", "main"]);
         f.store.add(&next).unwrap();
         f.store.add_dependency(&cas_types::Dependency::new(f.task_id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+        let mut config = crate::config::Config::load(&root).unwrap();
+        config.set("verification.enabled", "true").unwrap();
+        config.save(&root).unwrap();
+        crate::store::open_store(&root).unwrap().init().unwrap();
+        crate::store::open_rule_store(&root).unwrap().init().unwrap();
+        crate::store::open_skill_store(&root).unwrap().init().unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        agents.register(&cas_types::Agent::new_with_role("frozen-reviewer".into(), "supervisor".into(), cas_types::AgentRole::Supervisor)).unwrap();
+        let supervisor = CasCore::with_daemon(root.clone(), None, None);
+        supervisor.set_agent_id_for_testing("frozen-reviewer".into());
+        let mut artifact_only = Task::new("cas-artifact-qa".into(), "Frozen source artifact review".into());
+        artifact_only.status = TaskStatus::InProgress;
+        artifact_only.task_type = TaskType::Chore;
+        artifact_only.assignee = Some("anchor-worker".into());
+        artifact_only.risk = vec![TaskRisk::None];
+        artifact_only.deliverables.work_target = f.store.get(&f.task_id).unwrap().deliverables.work_target;
+        f.store.add(&artifact_only).unwrap();
+        f.store.add_dependency(&cas_types::Dependency::new(artifact_only.id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+        let proof = format!("https://example.test/qa/{}", f.local);
         let close = serde_json::json!({"action":"close", "id":f.task_id, "reason":"ready for review"});
-        for label in ["release-train-cut".to_string(), format!("release-train-frozen:{}:{}", chrono::Utc::now().timestamp(), f.local)] {
+        for (index, label) in ["release-train-cut".to_string(), format!("release-train-frozen:{}:{}", chrono::Utc::now().timestamp(), f.local)].into_iter().enumerate() {
             train.labels = vec!["release-train".into(), label, format!("release-train-successor:{}", next.id)];
             f.store.update(&train).unwrap();
             let result = f.service.task(Parameters(serde_json::from_value(close.clone()).unwrap())).await.unwrap();
@@ -30610,7 +30629,54 @@ mod merge_state_gate_tests {
             assert!(std::fs::read_to_string(&calls).unwrap_or_default().is_empty());
             assert!(cas_store::get_latest_verification_dispatch(&root, &f.task_id).unwrap().is_none());
             assert_eq!(f.store.get(&f.task_id).unwrap().status, TaskStatus::InProgress);
+            let mut own_code = f.store.get(&f.task_id).unwrap();
+            own_code.execution_note = Some("no-code".into());
+            own_code.external_ref = Some(proof.clone());
+            f.store.update(&own_code).unwrap();
+            let refused = f.service.task(Parameters(serde_json::from_value(close.clone()).unwrap())).await.unwrap();
+            assert_eq!(refused.structured_content.unwrap_or_default()["code"], "G-100");
+            assert!(cas_store::get_latest_verification_dispatch(&root, &f.task_id).unwrap().is_none());
+            own_code.execution_note = None;
+            own_code.external_ref = None;
+            f.store.update(&own_code).unwrap();
+
+            let mut qa = artifact_only.clone();
+            if index > 0 {
+                qa.id = "cas-artifact-frozen-qa".into();
+                qa.execution_note = Some("no-code".into());
+                qa.external_ref = Some(proof.clone());
+                f.store.add(&qa).unwrap();
+                f.store.add_dependency(&cas_types::Dependency::new(qa.id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+            }
+            let mut request = serde_json::json!({"action":"close", "id":qa.id, "reason":"Frozen source evidence complete"});
+            if index == 0 {
+                request["execution_note"] = "no-code".into();
+                request["external_ref"] = proof.clone().into();
+            }
+            let response = f.service.task(Parameters(serde_json::from_value(request).unwrap())).await.unwrap();
+            let dispatch = cas_store::get_latest_verification_dispatch(&root, &qa.id).unwrap()
+                .unwrap_or_else(|| panic!("artifact-only close must dispatch independent review: {response:?}"));
+            let pending = f.store.get(&qa.id).unwrap();
+            assert_ne!(pending.status, TaskStatus::Closed);
+            assert_ne!(pending.status, TaskStatus::AwaitingMerge);
+            assert_eq!(pending.execution_note.as_deref(), Some("no-code"));
+            assert_eq!(pending.external_ref.as_deref(), Some(proof.as_str()));
+            assert_eq!(pending.deliverables.work_target, qa.deliverables.work_target);
+            assert!(pending.deliverables.factory_branch_anchor.is_none());
+            assert!(pending.deliverables.parked_branch.is_none());
+            super::super::repository_proof::verify_repository_proof(dispatch.repository.as_ref().unwrap()).unwrap();
+            f._env.set("CAS_AGENT_ROLE", "supervisor");
+            let approved = supervisor.cas_verification_add(Parameters(crate::mcp::tools::VerificationAddRequest {
+                task_id: qa.id.clone(), status: "approved".into(), summary: "Frozen source artifact reviewed".into(), confidence: Some(0.99),
+                issues: None, files_reviewed: None, duration_ms: None, verification_type: None, verifier_capability: None, dispatch_id: Some(dispatch.id),
+            })).await.unwrap();
+            f._env.set("CAS_AGENT_ROLE", "worker");
+            assert_eq!(f.store.get(&qa.id).unwrap().status, TaskStatus::Closed, "{approved:?}");
+            assert_eq!(f.store.get(&qa.id).unwrap().external_ref.as_deref(), Some(proof.as_str()));
+            assert_eq!(f.store.get(&qa.id).unwrap().deliverables.work_target, qa.deliverables.work_target);
         }
+        config.set("verification.enabled", "false").unwrap();
+        config.save(&root).unwrap();
         // A cut release ejected for red CI still admits its own repair.
         train.labels.push("release-train-cut".into());
         f.store.update(&train).unwrap();

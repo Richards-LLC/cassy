@@ -567,7 +567,7 @@ fn secret_path_hit(path: &str, protection: &crate::config::PreToolUseProtectionC
 /// A word that is an existing real secret file once resolved: `.env` and its non-template
 /// variants, credential and key files by basename. Templates and gitignored test files are not secrets.
 fn real_secret_word(word: &str, directory: &Path, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let path = match (word, word.strip_prefix("~/").or_else(|| word.strip_prefix("$HOME/")), &home) {
         ("~" | "$HOME", _, Some(home)) => home.clone(),
         (_, Some(rest), Some(home)) => home.join(rest),
@@ -601,7 +601,7 @@ fn command_reads_real_secret(command: &str, cwd: &Path, protection: &crate::conf
     };
     let unknown = std::ffi::OsStr::new(UNKNOWN_DIRECTORY);
     contexts.iter().any(|context| {
-        let directories: Vec<PathBuf> = context
+        let directories: Vec<std::path::PathBuf> = context
             .directories
             .iter()
             .map(|directory| match directory {
@@ -721,11 +721,11 @@ fn statement_pieces(text: &str) -> Vec<String> {
 }
 
 /// The directory after a statement: a literal `cd` moves it, an unresolvable one leaves it unknown.
-fn directory_after(piece: &str, directory: Option<PathBuf>) -> Option<PathBuf> {
+fn directory_after(piece: &str, directory: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
     let words: Vec<&str> = piece.trim().trim_start_matches(['(', '{']).split_whitespace().collect();
     match words.first().copied() {
         Some("cd") => {
-            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
             let target = words[1..]
                 .iter()
                 .map(|word| word.trim_matches(['\'', '"']))
@@ -735,7 +735,7 @@ fn directory_after(piece: &str, directory: Option<PathBuf>) -> Option<PathBuf> {
                 Some(word) if word.contains(['$', '`', '*', '?', '[']) || word.starts_with('-') => None,
                 Some(word) => match word.strip_prefix("~/") {
                     Some(rest) => home.map(|home| home.join(rest)),
-                    None if word.starts_with('/') => Some(PathBuf::from(word)),
+                    None if word.starts_with('/') => Some(std::path::PathBuf::from(word)),
                     None => directory.map(|directory| directory.join(word)),
                 },
             }

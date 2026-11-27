@@ -5181,6 +5181,51 @@ async fn worker_queue_reports_execution_separately_from_held_cursor_cas_600b() {
     }
 }
 
+#[tokio::test]
+async fn worker_status_keeps_only_history_after_deferred_start_is_accepted_gh2579() {
+    let mut env = TestEnvGuard::temp_home();
+    let fixture = queue_control_fixture(&mut env);
+    let task_id = "cas-8488-one";
+    let cas_root = fixture.cas_dir();
+    let agents = open_agent_store(&cas_root).unwrap();
+    let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&cas_root).unwrap();
+    let correction = "fixture:gh2579:supervisor-correction";
+    let _ = queue_control(&fixture, Some(vec![task_id])).await;
+    crate::store::open_prompt_queue_store(&cas_root).unwrap()
+        .enqueue_with_session("supervisor", WORKER, correction, "queue-session").unwrap();
+    let _ = call(&fixture.worker, serde_json::json!({
+        "action":"close", "id":"cas-8488-current", "reason":"Portable proof recorded",
+    })).await;
+
+    let deferred = queues.get("queue-session", WORKER).unwrap();
+    assert_eq!(deferred.current_task.as_deref(), Some(task_id));
+    assert_eq!(fixture.task(task_id).status, TaskStatus::Open);
+    assert!(agents.get_lease(task_id).unwrap().is_none());
+    let status = || async {
+        let request = serde_json::from_value(serde_json::json!({
+            "action":"worker_status", "summary_mode":true,
+        })).unwrap();
+        fixture.supervisor.factory(Parameters(request)).await.unwrap()
+            .content.iter().filter_map(|content| content.as_text().map(|text| text.text.as_str()))
+            .collect::<Vec<_>>().join("\n")
+    };
+    let before = status().await;
+    assert!(crate::gates::codes_in(&before).contains(&"G-13"), "{before}");
+    assert!(before.contains(correction), "{before}");
+
+    let start = call(&fixture.worker, serde_json::json!({"action":"start", "id":task_id})).await;
+    assert_eq!(fixture.task(task_id).status, TaskStatus::InProgress, "{start}");
+    let lease = agents.get_lease(task_id).unwrap().unwrap();
+    assert_eq!(lease.agent_id, "nocode-worker-session");
+    assert_eq!(lease.status, cas_types::LeaseStatus::Active);
+    assert!(lease.expires_at > chrono::Utc::now());
+    assert_eq!(queues.get("queue-session", WORKER).unwrap().notes, deferred.notes);
+
+    let after = status().await;
+    assert!(crate::gates::codes_in(&after).contains(&"G-13"), "{after}");
+    assert!(!after.contains(correction), "{after}");
+}
+
 /// Queue edits are supervisor operations and only affect pending work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {

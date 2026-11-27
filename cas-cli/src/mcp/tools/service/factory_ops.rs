@@ -5100,7 +5100,7 @@ impl CasService {
                     let queue = queues.get(session, &worker.name).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
                     if queue.revision > 0 {
                         let tasks = self.inner.open_task_store()?;
-                        let report = crate::worker_task_queue::render(&worker, &queue, tasks.as_ref())
+                        let report = crate::worker_task_queue::render(&worker, &queue, tasks.as_ref(), store.as_ref())
                             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
                         binary_versions.push_str(&format!("\n{report}"));
                     }

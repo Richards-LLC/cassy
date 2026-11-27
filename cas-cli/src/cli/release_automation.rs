@@ -1744,6 +1744,9 @@ pub(super) mod tests {
             Some("[factory]\nrelease_train=true\nmax_concurrent_builders=2\n"),
         ] {
             let (temp, root, train, owner, track) = fixture();
+            let repo = temp.path();
+            git(repo, &["config", "--unset-all", &format!("url.{}/.insteadOf", repo.join(".git/fixture-origin").display())]).unwrap();
+            git(repo, &["config", "protocol.https.allow", "never"]).unwrap();
             match config {
                 Some(contents) => fs::write(root.join("config.toml"), contents).unwrap(),
                 None => fs::remove_file(root.join("config.toml")).unwrap(),
@@ -1751,7 +1754,6 @@ pub(super) mod tests {
             let identity = crate::cloud::resolve_canonical_id(&root).unwrap();
             let policy = crate::config::Config::load(&root).unwrap().factory();
             let config_before = fs::read(root.join("config.toml")).ok();
-            let repo = temp.path();
             let _cwd = env.enter_dir(repo);
             let mut child = Task::new("cas-a002".into(), "Child".into());
             child.status = TaskStatus::AwaitingMerge;

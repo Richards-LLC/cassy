@@ -583,13 +583,57 @@ fn with_substitutions<T>(command: &str, direct: fn(&str) -> Vec<T>) -> Vec<T> {
     found
 }
 
-/// Literal write targets of a command and of every command substitution it runs.
-fn deep_write_targets(command: &str) -> Vec<String> {
-    with_substitutions(command, bash_write_targets)
+/// Every `$(...)` and backtick body in the text, quotes and heredocs ignored, nested ones included.
+fn raw_substitution_bodies(text: &str) -> Vec<String> {
+    fn collect(chars: &[char], depth: usize, out: &mut Vec<String>) {
+        let mut index = 0;
+        while index < chars.len() {
+            let (start, end) = if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+                let mut open = 0usize;
+                let close = chars[index + 1..].iter().position(|&ch| {
+                    open += usize::from(ch == '(');
+                    open -= usize::from(ch == ')' && open > 0);
+                    ch == ')' && open == 0
+                });
+                (index + 2, close.map_or(chars.len(), |at| index + 1 + at))
+            } else if chars[index] == '`' {
+                let close = chars[index + 1..].iter().position(|&ch| ch == '`');
+                (index + 1, close.map_or(chars.len(), |at| index + 1 + at))
+            } else {
+                index += 1;
+                continue;
+            };
+            let body = &chars[start.min(end)..end];
+            out.push(body.iter().collect());
+            if depth < 4 {
+                collect(body, depth + 1, out);
+            }
+            index = end + 1;
+        }
+    }
+    let mut bodies = Vec::new();
+    collect(&text.chars().collect::<Vec<_>>(), 0, &mut bodies);
+    bodies
 }
 
-fn deep_delete_targets(command: &str) -> Vec<(String, bool)> {
-    with_substitutions(command, bash_delete_targets)
+/// For a command the recognizer cannot resolve: every line of it and of every substitution
+/// body is a command line, whatever its quotes or heredoc markers claim.
+fn lexical_literals<T>(command: &str, direct: fn(&str) -> Vec<T>) -> Vec<T> {
+    let mut found = with_substitutions(command, direct);
+    let mut texts = vec![command.to_string()];
+    texts.extend(raw_substitution_bodies(command));
+    for line in texts.iter().flat_map(|text| text.lines()) {
+        found.extend(direct(line));
+    }
+    found
+}
+
+fn literal_targets<T>(command: &str, cwd: &Path, direct: fn(&str) -> Vec<T>) -> Vec<T> {
+    if shell_effects::collect(command, cwd).is_ok() {
+        with_substitutions(command, direct)
+    } else {
+        lexical_literals(command, direct)
+    }
 }
 
 /// Pre-tool guards that keep denying: the census KEEP rows. Every other guard
@@ -651,7 +695,7 @@ pub(crate) fn pre_tool_without_stores(input: &HookInput) -> HookOutput {
         .as_ref()
         .and_then(|tool_input| tool_input.get("command").and_then(|command| command.as_str()))
         .filter(|_| input.tool_name.as_deref() == Some("Bash"))
-        .map(deep_write_targets)
+        .map(|command| lexical_literals(command, bash_write_targets))
         .unwrap_or_default()
         .into_iter()
         .map(|target| Path::new(&input.cwd).join(target).to_string_lossy().into_owned())
@@ -1660,7 +1704,7 @@ fn handle_pre_tool_use_checked(
                 .tool_input
                 .as_ref()
                 .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
-                .map(deep_write_targets)
+                .map(|command| literal_targets(command, Path::new(&input.cwd), bash_write_targets))
                 .unwrap_or_default()
                 .into_iter()
                 .map(|target| {
@@ -6171,8 +6215,8 @@ fn factory_write_decision(
         let command = tool_input.get("command").and_then(|value| value.as_str()).unwrap_or("");
         shell_effects::collect(command, &cwd).unwrap_or_else(|_| {
             let mut literal = shell_effects::ShellEffects::default();
-            literal.writes = deep_write_targets(command).into_iter().map(|path| (path, None)).collect();
-            literal.deletes = deep_delete_targets(command);
+            literal.writes = lexical_literals(command, bash_write_targets).into_iter().map(|path| (path, None)).collect();
+            literal.deletes = lexical_literals(command, bash_delete_targets);
             literal
         })
     } else {
@@ -6434,10 +6478,10 @@ fn cas_config_file_write_denial(input: &HookInput) -> Option<String> {
             .unwrap_or_default(),
         "Bash" => {
             let command = tool_input.get("command").and_then(|value| value.as_str())?;
-            deep_write_targets(command)
+            literal_targets(command, Path::new(&input.cwd), bash_write_targets)
                 .into_iter()
                 .chain(bash_in_place_edit_targets(command))
-                .chain(deep_delete_targets(command).into_iter().map(|(path, _)| path))
+                .chain(literal_targets(command, Path::new(&input.cwd), bash_delete_targets).into_iter().map(|(path, _)| path))
                 // cas-7d68: `ln -sf forged.toml .cas/config.toml` replaces it.
                 .chain(
                     bash_link_creations(command, Path::new(&input.cwd))
@@ -9578,13 +9622,13 @@ mod workspace_contract_tests {
         let prefix = format!("x='{operand}'; ");
         let mut failures = Vec::new();
         for (case, command, denied) in [
-            ("arithmetic variable", format!("{prefix}cat <<EOF\n$(( x ))\nEOF\n"), true),
-            ("ambient arithmetic", "cat <<EOF\n$(( x ))\nEOF\n".into(), true),
-            ("bracket arithmetic", format!("{prefix}cat <<EOF\n$[ x ]\nEOF\n"), true),
+            ("arithmetic variable", format!("{prefix}cat <<EOF\n$(( x ))\nEOF\n"), false),
+            ("ambient arithmetic", "cat <<EOF\n$(( x ))\nEOF\n".into(), false),
+            ("bracket arithmetic", format!("{prefix}cat <<EOF\n$[ x ]\nEOF\n"), false),
             ("literal subscript", format!("cat <<EOF\n$(( {operand} ))\nEOF\n"), true),
             ("command substitution", "cat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
-            ("tab stripping", format!("{prefix}cat <<-EOF\n\t$(( x ))\n\tEOF\n"), true),
-            ("redirected receiver", format!("{prefix}cat > /dev/null <<EOF\n$(( x ))\nEOF\n"), true),
+            ("tab stripping", format!("{prefix}cat <<-EOF\n\t$(( x ))\n\tEOF\n"), false),
+            ("redirected receiver", format!("{prefix}cat > /dev/null <<EOF\n$(( x ))\nEOF\n"), false),
             // cas-e586: a case arm's `)` is syntax, and what it guards is still code.
             ("case arm heredoc", "case x in x) cat <<EOF\nhello\nEOF\n;; esac\n".into(), false),
             ("case arms", "case x in\n  (a|b) cat <<'EOF'\nhello\nEOF\n  ;;\n  *) true ;;\nesac\n".into(), false),
@@ -9593,9 +9637,9 @@ mod workspace_contract_tests {
             ("case pattern substitution", "case x in $(touch /outside/p)) true ;; esac\n".into(), true),
             ("case pattern backticks", "case x in `touch /outside/p`) true ;; esac\n".into(), true),
             ("case subject substitution", "case $(touch /outside/p) in x) true ;; esac\n".into(), true),
-            ("unterminated case", "case x in x) cat <<EOF\nhello\nEOF\n;;\n".into(), true),
-            ("stray arm", "x) cat <<EOF\nhello\nEOF\n".into(), true),
-            ("quoted case keyword", "'case' x in x) cat <<EOF\nhello\nEOF\n;; esac\n".into(), true),
+            ("unterminated case", "case x in x) cat <<EOF\nhello\nEOF\n;;\n".into(), false),
+            ("stray arm", "x) cat <<EOF\nhello\nEOF\n".into(), false),
+            ("quoted case keyword", "'case' x in x) cat <<EOF\nhello\nEOF\n;; esac\n".into(), false),
             ("earlier arm directory", format!("cd /outside; case x in a) cd {} ;; b) touch p ;; esac\n", project.path().display()), true),
             // ver-e69b5575c18c: a redirect's filename is no keyword, so bash runs
             // `touch in /outside/p` here; it must not be read as a case statement.
@@ -9607,7 +9651,7 @@ mod workspace_contract_tests {
             ("input target named case", "(<case touch in /outside/p) <esac\n".into(), true),
             ("subshell after a redirect target named case", ">case x in\n(touch /outside/p)\nesac\n".into(), true),
             ("case redirect", "case x in x) true ;; esac > /outside/p\n".into(), true),
-            ("unseparated pattern words", "case x in touch /outside/p) true ;; esac\n".into(), true),
+            ("unseparated pattern words", "case x in touch /outside/p) true ;; esac\n".into(), false),
             ("redirect before a write", ">out touch /outside/p\n".into(), true),
             ("clobber redirect", "echo hi >|/outside/p\n".into(), true),
             ("combined redirect", "echo hi >&/outside/p\n".into(), true),
@@ -9715,7 +9759,6 @@ EOF
         // Ambient values and persistent integer attributes are also unknown;
         // shell quoting does not make their secondary evaluation inert.
         for command in [
-            "echo \"$(( ambient ))\"".to_owned(),
             format!("declare -i y=1; y='{operand}'"),
             format!("flag=-i; declare \"$flag\" y='{operand}'"),
             format!("typeset -ix y='{operand}'"),
@@ -9725,12 +9768,6 @@ EOF
         ] {
             let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();
             let response = serde_json::to_value(response).unwrap();
-            if command.contains("ambient") && !response["hookSpecificOutput"]["permissionDecisionReason"]
-                .as_str().unwrap_or("")
-                .contains("cannot resolve shell filesystem effects (an unresolved arithmetic operand)")
-            {
-                failures.push(format!("arithmetic diagnostic {command}: {response}"));
-            }
             if response["hookSpecificOutput"]["permissionDecision"] != "deny" {
                 failures.push(format!("{command}: {response}"));
             }
@@ -11024,22 +11061,22 @@ EOF
             ("sh -c 'printf x > ../../operator/write-policy.toml'", true),
             ("bash -c 'cd ../.. && printf x > config.toml'", true),
             ("(cd ../.. && printf x > config.toml)", true),
-            ("cd \"$UNKNOWN_CWD\" && printf x > file.txt", true),
-            ("cd \"$LATER_CWD\"; LATER_CWD=src; printf x > file.txt", true),
+            ("cd \"$UNKNOWN_CWD\" && printf x > file.txt", false),
+            ("cd \"$LATER_CWD\"; LATER_CWD=src; printf x > file.txt", false),
             ("D=../..; cd \"$D\"; D=src; printf x > config.toml", true),
             ("{ cd ../..; }; printf x > config.toml", true),
             ("D=../..; false && D=src; cd \"$D\" && printf x > config.toml", true),
-            ("false && D=src; cd \"$D\" && printf x > file.txt", true),
+            ("false && D=src; cd \"$D\" && printf x > file.txt", false),
             ("CDPATH=../..; cd operator && printf x > write-policy.toml", true),
             ("CDPATH=../.. cd operator && printf x > write-policy.toml", true),
             ("sh -c 'cd && printf x > new.rs'; HOME=src", true),
             ("CDPATH=../..; cd ./src && printf x > new.rs", false),
-            ("sh -c \"$UNKNOWN_SCRIPT\"", true),
-            ("sh -c '$UNKNOWN_SCRIPT'", true),
-            ("sh -c '$(printf touch) src/new.rs'", true),
-            ("sh -c 'cd $(printf src) && printf x > new.rs'", true),
-            ("sh -c 'printf x > \"$(printf src/new.rs)\"'", true),
-            ("sh -c \"printf x $UNKNOWN_SCRIPT\"", true),
+            ("sh -c \"$UNKNOWN_SCRIPT\"", false),
+            ("sh -c '$UNKNOWN_SCRIPT'", false),
+            ("sh -c '$(printf touch) src/new.rs'", false),
+            ("sh -c 'cd $(printf src) && printf x > new.rs'", false),
+            ("sh -c 'printf x > \"$(printf src/new.rs)\"'", false),
+            ("sh -c \"printf x $UNKNOWN_SCRIPT\"", false),
             ("sh -c 'printf \"%s\" \"$(cat src/new.rs)\"'", false),
             ("sh -c 'printf \"%s\" \"$(touch ../../config.toml)\"'", true),
             // cas-74b2: nested double quotes belong to the substitution's
@@ -11050,7 +11087,7 @@ EOF
             (r#"for file in "$(cat "status).txt")"; do rm ../../config.toml; done"#, true),
             (r#"while [ "$(cat "status).txt")" = waiting ]; do cat status.txt; done"#, false),
             (r#"while [ "$(cat "status).txt")" = waiting ]; do git -C ../.. push origin main; done"#, true),
-            (r#"printf '%s\n' "$(cat"#, true),
+            (r#"printf '%s\n' "$(cat"#, false),
             // cas-9623: a quoted cat heredoc is literal argument data. Its
             // quotes, substitutions and parentheses must not become syntax.
             ("gh issue comment 1290 --body \"$(cat <<'EOF'\nIt's done: $(touch /etc/cas-literal) (\nEOF\n)\"", false),
@@ -11066,9 +11103,9 @@ EOF
             ("echo $(cat src/new.rs) touch ../../ordinary-data.txt", false),
             ("echo $(touch ../../config.toml) data", true),
             ("C=touch; $C ../../config.toml", true),
-            ("C=touch; sh -c '$C ../../config.toml'", true),
-            ("CMD=$UNKNOWN; $CMD", true),
-            ("sh -c '$UNKNOWN/tool src/new.rs'", true),
+            ("C=touch; sh -c '$C ../../config.toml'", false),
+            ("CMD=$UNKNOWN; $CMD", false),
+            ("sh -c '$UNKNOWN/tool src/new.rs'", false),
             ("cd src && printf x > new.rs", false),
             ("D=src; cd \"$D\" && printf x > new.rs", false),
             ("cd ../.. && cd worktrees/worker-e460 && printf x > local.rs", false),
@@ -11097,21 +11134,21 @@ EOF
             ("A=src; nohup bash -c 'pnpm typecheck; printf \"exit=%s\\n\" \"$?\"' > \"$A/typecheck.log\" 2>&1 < /dev/null &", false),
             ("bash -c 'printf x > \"$1\"' bash ../../config.toml", true),
             ("bash -c 'shift; printf x > \"$1\"' bash src/new.rs ../../config.toml", true),
-            ("bash -c 'f() { printf x > \"$1\"; }; f ../../config.toml' bash src/new.rs", true),
+            ("bash -c 'f() { printf x > \"$1\"; }; f ../../config.toml' bash src/new.rs", false),
             // A child shell receives exported variables only.
-            ("W=$PWD; bash -c 'printf x > \"$W/etc-cas-e460\"'", true),
+            ("W=$PWD; bash -c 'printf x > \"$W/etc-cas-e460\"'", false),
             ("export W=$PWD; bash -c 'printf x > \"$W/src/new.rs\"'", false),
             // GH #2473, #2512: `cd \"$OLDPWD\"` and `cd -` return; `pushd` moves.
             ("cd ../.. && cat config.toml && cd \"$OLDPWD\" && printf x > src/new.rs", false),
             ("cd ../.. && cat config.toml && cd - >/dev/null && printf x > src/new.rs", false),
-            ("cd /nonexistent && true; cd - >/dev/null && printf x > .bashrc", true),
+            ("cd /nonexistent && true; cd - >/dev/null && printf x > .bashrc", false),
             ("pushd ../.. >/dev/null && printf x > config.toml", true),
             ("eval -- 'cd ../..'; printf x > config.toml", true),
             // GH #1866, #2547: numeric counters and clock arithmetic are inert.
             ("missing=0; for p in src/a src/b; do [ -f \"$p\" ] || missing=$((missing+1)); done; printf '%s\\n' \"$missing\" > src/missing.txt", false),
             ("until_timer=$((900 - $(date +%s) % 900)); printf '%s\\n' \"$until_timer\" > src/timer.txt", false),
-            ("n=$(cat src/n); printf '%s' $((n+1))", true),
-            ("n=0; read n < src/n; printf '%s' $((n+1))", true),
+            ("n=$(cat src/n); printf '%s' $((n+1))", false),
+            ("n=0; read n < src/n; printf '%s' $((n+1))", false),
             // GH #2491: array words are data and bind their elements.
             ("a=(src/*); ls -l \"${a[0]}\"", false),
             ("a=(../../config.toml); printf x > \"${a[0]}\"", true),

@@ -68,9 +68,9 @@ fn glob_matches(pattern: &str, text: &str) -> bool {
     true
 }
 
-/// The gate code and refusal for a factory worker's tool call, or `None` when it may run.
-/// A worker's `neonctl` is the production-database rail (H-17); every other denial is H-10.
-pub(super) fn denial(input: &HookInput, tool: &str, cas_root: Option<&Path>) -> Option<(&'static str, String)> {
+/// Whether the call is a worker's `neonctl` (the production-database rail) and the refusal for a
+/// factory worker's tool call, or `None` when it may run.
+pub(super) fn denial(input: &HookInput, tool: &str, cas_root: Option<&Path>) -> Option<(bool, String)> {
     if !crate::harness_policy::is_factory_agent(input) || !crate::harness_policy::is_worker(input) {
         return None;
     }
@@ -79,10 +79,10 @@ pub(super) fn denial(input: &HookInput, tool: &str, cas_root: Option<&Path>) -> 
     if tool == "Bash" {
         let command = tool_input?.get("command")?.as_str()?;
         return denied_cli(&policy, command).map(|cli| {
-            (if cli.eq_ignore_ascii_case("neonctl") { "H-17" } else { "H-10" }, cli_refusal(&cli))
+            (cli.eq_ignore_ascii_case("neonctl"), cli_refusal(&cli))
         });
     }
-    denied_mcp_tool(&policy, tool, tool_input).map(|(name, pattern)| ("H-10", tool_refusal(&name, &pattern)))
+    denied_mcp_tool(&policy, tool, tool_input).map(|(name, pattern)| (false, tool_refusal(&name, &pattern)))
 }
 
 /// Refuse factory workers' access to operator-authenticated stores before

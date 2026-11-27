@@ -757,8 +757,13 @@ fn handle_pre_tool_use_checked(
     // MCP tools are the supervisor's. Workers only; before auto-approval and
     // the missing-root early return.
     // gate[H-10 pre-tool]: Worker-denied CLIs and MCP tools
-    if let Some((code, reason)) = super::worker_denied_tools::denial(input, tool_name, cas_root)
-        && let Some(denial) = refuse(input, cas_root, crate::gates::tag(code, reason), warnings)
+    if let Some((production_rail, reason)) = super::worker_denied_tools::denial(input, tool_name, cas_root)
+        && let Some(denial) = refuse(
+            input,
+            cas_root,
+            if production_rail { crate::gates::tag("H-17", reason) } else { crate::gates::tag("H-10", reason) },
+            warnings,
+        )
     {
         return Ok(denial);
     }

@@ -374,10 +374,13 @@ fn test_configure_codex_creates_config() {
         hooks.pointer("/hooks/PreToolUse/0/hooks/0/timeout"),
         Some(&serde_json::json!(cas_pty::CODEX_PRE_TOOL_TIMEOUT_SECS))
     );
-    assert_eq!(
-        hooks.pointer("/hooks/PostToolUse/0/matcher"),
-        Some(&serde_json::json!("^Bash$"))
-    );
+    let matcher = regex::Regex::new(
+        hooks.pointer("/hooks/PostToolUse/0/matcher").unwrap().as_str().unwrap(),
+    ).unwrap();
+    for (tool, matches) in [("Bash", true), ("mcp__cs__coordination", true),
+        ("mcp__cs__task", true), ("apply_patch", false), ("mcp__other__task", false)] {
+        assert_eq!(matcher.is_match(tool), matches, "{tool}");
+    }
     assert_eq!(
         hooks.pointer("/hooks/PostToolUse/0/hooks/0/type"),
         Some(&serde_json::json!("command"))
@@ -670,10 +673,11 @@ fn test_configure_codex_merges_hooks_and_is_idempotent() {
         post_tool[0].pointer("/hooks/0/command"),
         Some(&serde_json::json!("custom post-tool hook"))
     );
-    assert_eq!(
-        post_tool[1].get("matcher"),
-        Some(&serde_json::json!("^Bash$"))
-    );
+    let matcher = regex::Regex::new(post_tool[1]["matcher"].as_str().unwrap()).unwrap();
+    for (tool, matches) in [("Bash", true), ("mcp__cs__coordination", true),
+        ("mcp__cs__task", true), ("apply_patch", false), ("mcp__other__task", false)] {
+        assert_eq!(matcher.is_match(tool), matches, "{tool}");
+    }
     assert_eq!(
         post_tool[1].pointer("/hooks/0/timeout"),
         Some(&serde_json::json!(3))

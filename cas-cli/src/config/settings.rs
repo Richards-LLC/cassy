@@ -1323,7 +1323,7 @@ fn default_supervisor_message_debounce_secs() -> u64 { 20 }
 
 fn default_supervisor_message_wakes_per_hour() -> u64 { 6 }
 
-fn default_supervisor_wake_input_budget() -> u64 { 1_000_000 }
+fn default_supervisor_wake_input_budget() -> u64 { 300_000 }
 
 fn default_message_max_chars() -> usize {
     1200

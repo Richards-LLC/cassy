@@ -3332,7 +3332,8 @@ fn queue_supervisor_startup_prompt(
 Context and handoff receipts arrive through native SessionStart hooks.\n\
 Run cas-codex-supervisor-checklist once; triage from the supervisor core in your developer instructions.\n\
 Use cas-supervisor for planning, releases or recovery; cas-codebase-design for module design.\n\
-First: mcp__cs__coordination action=whoami; inspect current epics and ready work.\n\
+Call Cassy MCP tools directly, starting with mcp__cs__coordination action=whoami; inspect current epics and ready work.\n\
+Inside functions.exec, use only the callable names listed in ALL_TOOLS; Cassy direct tool names are not JavaScript functions.\n\
 Current workers: {worker_list}",
             worker_names.len()
         ),

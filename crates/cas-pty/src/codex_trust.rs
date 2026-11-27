@@ -100,7 +100,7 @@ fn escape_toml_basic(value: &str) -> String {
 /// The tool guards are required in every file CAS generates. The lifecycle
 /// handlers (cas-d0fe) are written only to the user-level `hooks.json`, so a
 /// project file without them is still a complete CAS file.
-const CAS_CODEX_HOOKS: [CasCodexHook; 4] = [
+const CAS_CODEX_HOOKS: [CasCodexHook; 5] = [
     CasCodexHook {
         event: "PreToolUse",
         event_key: "pre_tool_use",
@@ -112,6 +112,12 @@ const CAS_CODEX_HOOKS: [CasCodexHook; 4] = [
         event_key: "post_tool_use",
         command: "cas hook PostToolUse",
         required: true,
+    },
+    CasCodexHook {
+        event: "UserPromptSubmit",
+        event_key: "user_prompt_submit",
+        command: "CAS_HOOK_HARNESS=codex cas hook UserPromptSubmit",
+        required: false,
     },
     CasCodexHook {
         event: "SessionStart",
@@ -1605,6 +1611,9 @@ mod tests {
     ],
     "PostToolUse": [
       {"matcher":"^Bash$","hooks":[{"type":"command","command":"cas hook PostToolUse","timeout":3}]}
+    ],
+    "UserPromptSubmit": [
+      {"hooks":[{"type":"command","command":"CAS_HOOK_HARNESS=codex cas hook UserPromptSubmit","timeout":3}]}
     ]
   }
 }"#,
@@ -1629,6 +1638,7 @@ mod tests {
             3
         );
         let entries = cas_hook_trust_entries(&hooks_path).unwrap();
+        assert_eq!(entries.len(), 3);
         assert_eq!(
             entries[0].key,
             format!("{}:pre_tool_use:1:0", hooks_path.display())
@@ -1637,6 +1647,7 @@ mod tests {
             entries[1].key,
             format!("{}:post_tool_use:0:0", hooks_path.display())
         );
+        assert_eq!(entries[2].key, format!("{}:user_prompt_submit:0:0", hooks_path.display()));
         for entry in &entries {
             assert!(hook_state_is_trusted(&after_first, entry).unwrap());
         }

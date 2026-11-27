@@ -9,7 +9,7 @@
             "type": "command"
           }
         ],
-        "matcher": "^Bash$"
+        "matcher": "^Bash$|^mcp__cs__"
       }
     ],
     "PreToolUse": [

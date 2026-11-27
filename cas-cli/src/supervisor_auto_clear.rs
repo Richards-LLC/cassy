@@ -59,6 +59,7 @@ enum Phase {
         dir: PathBuf,
         before: BTreeSet<PathBuf>,
     },
+    RestartQueued { queued_at: DateTime<Utc> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -98,6 +99,7 @@ pub(crate) enum Step {
     Deferred(Vec<String>),
     HandoffSaved(String),
     ClearQueued(i64),
+    RestartQueued,
     Resumed(String),
 }
 
@@ -491,7 +493,8 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
                 }
                 return Ok(Step::Nothing);
             }
-            if crate::factory_context_reset::context_reset_command(turn.cli).is_none() {
+            if turn.cli != cas_mux::SupervisorCli::Codex
+                && crate::factory_context_reset::context_reset_command(turn.cli).is_none() {
                 return Ok(Step::Nothing);
             }
             State {
@@ -517,7 +520,7 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
             return Ok(Step::Nothing);
         }
     }
-    if matches!(state.phase, Phase::ClearQueued { .. }) {
+    if matches!(state.phase, Phase::ClearQueued { .. } | Phase::RestartQueued { .. }) {
         return Ok(Step::Nothing);
     }
     let mut blockers = idle_blockers(root, queue, turn.agent, turn.factory_session);
@@ -538,19 +541,24 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
         Phase::Deferred => {
             state.focus_epic_id = crate::ops::fleet::pinned_epic(turn.factory_session);
             let handoff_id = save_handoff(root, turn.agent, &state)?;
+            let (reset_action, summary) = if turn.cli == cas_mux::SupervisorCli::Codex {
+                ("restarts your session", "Context budget: save judgement, then Cassy restarts")
+            } else {
+                ("clears your context", "Context budget: save judgement, then Cassy clears")
+            };
             let notice = format!(
                 "Context budget: your latest call at {} used {} input tokens; the context threshold is {}. Cassy saved your handoff as {handoff_id} \
                  from facts (owned tasks, operator approvals from decision notes, pending asks, workers). In this turn, add only \
                  judgement Cassy can't know (what you were about to do, promises, risks) with `memory action=remember \
                  entry_type=handoff content=\"<your lines>\"`; Cassy merges it under the facts. Start no new work. When this \
-                 turn ends and nothing is in flight, Cassy clears your context. Workers keep running, and the handoff is \
+                 turn ends and nothing is in flight, Cassy {reset_action}. Workers keep running, and the handoff is \
                  injected into your new session.",
                 crate::cli::release_report::eastern_time(state.triggered_at),
                 tokens(state.trigger_tokens),
                 tokens(state.budget),
             );
             let notice_id = queue.enqueue_idempotent(
-                SOURCE, &turn.agent.name, &notice, Some(turn.factory_session), Some("Context budget: save judgement, then Cassy clears"),
+                SOURCE, &turn.agent.name, &notice, Some(turn.factory_session), Some(summary),
                 Some(NotificationPriority::High), &format!("{SOURCE}:notice:{handoff_id}"), Some(&QueueOrigin::Daemon),
             )?;
             let notice_id = match notice_id {
@@ -562,6 +570,12 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
         }
         Phase::AwaitingJudgement { handoff_id, saved_at, .. } => {
             let handoff_id = merge_judgement(root, &handoff_id, saved_at, turn.agent)?;
+            if turn.cli == cas_mux::SupervisorCli::Codex {
+                crate::factory_daemon_health::request_supervisor_restart(root, turn.factory_session, SOURCE)?;
+                state.phase = Phase::RestartQueued { queued_at: Utc::now() };
+                save(root, &state)?;
+                return Ok(Step::RestartQueued);
+            }
             let dir = turn.transcript.parent().context("transcript has no directory")?.to_path_buf();
             let before = crate::factory_context_reset::snapshot_transcripts(std::slice::from_ref(&dir));
             let control_id = queue
@@ -582,7 +596,7 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
                 agent = %turn.agent.name, control_id, trigger_tokens = state.trigger_tokens, "automatic supervisor context clear queued");
             Ok(Step::ClearQueued(control_id))
         }
-        Phase::ClearQueued { .. } => Ok(Step::Nothing),
+        Phase::ClearQueued { .. } | Phase::RestartQueued { .. } => Ok(Step::Nothing),
     }
 }
 
@@ -590,6 +604,12 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
 /// its handoff. Called on every scan; cheap when no clear is queued.
 pub(crate) fn poll(root: &Path, queue: &dyn PromptQueueStore, agent: &Agent, factory_session: &str) -> anyhow::Result<Step> {
     let Some(state) = load(root, &agent.id)? else { return Ok(Step::Nothing) };
+    if let Phase::RestartQueued { queued_at } = state.phase {
+        if Utc::now() - queued_at > Duration::seconds(crate::factory_daemon_health::SUPERVISOR_RESTART_REQUEST_TTL_SECS) {
+            clear_state(root, &agent.id);
+        }
+        return Ok(Step::Nothing);
+    }
     let Phase::ClearQueued { handoff_id, queued_at, dir, before } = &state.phase else {
         return Ok(Step::Nothing);
     };

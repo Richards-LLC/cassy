@@ -470,7 +470,7 @@ that a model started or consumed tokens.
 At each newly recorded supervisor turn, `supervisor_auto_clear` reads the
 latest call's input occupancy, including cache reads/writes once. Its threshold
 is 80% of the harness-reported `model_context_window`, capped by
-`factory.supervisor_wake_input_budget` (default 1,000,000; 0 disables). Claude
+`factory.supervisor_wake_input_budget` (default 300,000; 0 disables). Claude
 transcripts omit the window, so `cas statusline --with-session` records
 `context_window.context_window_size` per supervisor session under
 `supervisor-auto-clear/windows/`. Without a reported window, only that
@@ -490,6 +490,16 @@ injected sections separately. Full histories remain in their stores. It gives th
 supervisor one turn to save judgement as a handoff, merges that under the
 facts, and queues the context-reset control to the supervisor pane. When the
 new transcript records the `/clear`, it queues the handoff to the new session.
+Codex saves the same handoff and restarts only its supervisor pane; SessionStart
+restores that handoff while the factory and workers continue running.
+
+Codex's user hook layer drains pending factory mail through `UserPromptSubmit`.
+Both Codex hook layers also surface mail after Cassy MCP tool calls. Supervisor
+wakes resolve the registered supervisor harness, account and project rollout;
+unbound Codex sessions require recipient ownership evidence, as the mirror does.
+An idle rollout releases the short wake rule; an outstanding tool call still
+holds delivery. Startup envelopes tell Codex to call Cassy MCP tools directly
+and use only discovered callable names inside `functions.exec`.
 
 When the MCP daemon opens a pre-merge candidate dispatch, it launches the
 existing task verifier on the standard harness route. The registered child

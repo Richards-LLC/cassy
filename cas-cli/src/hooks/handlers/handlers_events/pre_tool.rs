@@ -624,6 +624,7 @@ fn lexical_literals<T>(command: &str, direct: fn(&str) -> Vec<T>) -> Vec<T> {
     texts.extend(raw_substitution_bodies(command));
     for line in texts.iter().flat_map(|text| text.lines()) {
         found.extend(direct(line));
+        found.extend(direct(&line.replace(['\'', '"'], " ")));
     }
     found
 }

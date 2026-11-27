@@ -1,4 +1,0 @@
-title: Supervisor exit holds a stopped worker's started task for explicit recovery instead of the ready queue
-tasks: [cas-1364]
-invariants: [HUB-J27-EXIT-WORKER-RECOVERY]
-journeys: [HUB-J27]

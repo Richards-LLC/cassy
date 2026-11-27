@@ -103,6 +103,9 @@ fn kept_guards_still_deny_over_real_hook_json() {
         (bash(&format!("{unparseable}; cat ~/.config/neonctl/credentials.json"), project), "H-09"),
         (bash(&format!("{unparseable}; echo x > /etc/cas-demo-outside"), project), "H-29"),
         (bash("export CAS_AGENT_ROLE=supervisor", project), "H-12"),
+        (bash("neonctl projects list; export CAS_AGENT_ROLE=supervisor", project), "H-12"),
+        (bash("git push --no-verify origin HEAD; pkill -f cargo", project), "H-16"),
+        (bash("cargo fmt --all; echo x > /etc/cas-demo-outside", project), "H-29"),
     ] {
         assert!(worker.denied_by(&input).contains(&code), "{:?}", input.tool_input);
     }

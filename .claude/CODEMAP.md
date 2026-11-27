@@ -39,6 +39,7 @@
 
 - `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`, `cas-cli/src/cli/mod.rs` — executable, library modules and command dispatch.
 - `cas-cli/src/cli/init.rs`, `cas-cli/src/cli/setup.rs`, `cas-cli/src/cli/project_files/` — initialization, provisioning and managed-file sync.
+- `cas-cli/src/cli/first_run.rs` — fresh-machine detection, signing-only macOS state and first-launch routing.
 - `cas-cli/src/accounts.rs`, `cas-cli/src/account_registry/`, `cas-cli/src/account_selection.rs` — account inventory, discovery and recommendations.
 - `cas-cli/src/account_lifecycle.rs`, `cas-cli/src/account_links.rs`, `cas-cli/src/cli/account_picker.rs` — account mutations, links and selection.
 - `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/codex.rs`, `cas-cli/src/agent_model.rs` — harness launches and model observations.

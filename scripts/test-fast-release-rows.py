@@ -260,7 +260,8 @@ class FastRows(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         head, path = self.receipt()
         self.assertTrue(path.exists(), result.stdout)
-        self.assertTrue(path.read_text().startswith(f"fast-rows: PASS {head} "), path.read_text())
+        _, verdict, proven_head, proven_base, *_ = path.read_text().split()
+        self.assertEqual((verdict, proven_head, proven_base), ("PASS", head, f"base={self.base}"))
         self.assertIn(str(path), result.stdout)
 
     def test_a_failed_or_dirty_run_writes_no_pass_receipt_cas_12ab(self):
@@ -277,6 +278,36 @@ class FastRows(unittest.TestCase):
         dirty = self.fast()
         self.assertEqual(dirty.returncode, 0, dirty.stdout + dirty.stderr)
         self.assertFalse(self.receipt()[1].exists(), dirty.stdout)
+
+        self.assertEqual(command(self.repo, "git", "restore", "CHANGELOG.md").returncode, 0)
+        stable = self.fast()
+        self.assertEqual(stable.returncode, 0, stable.stdout + stable.stderr)
+        stable_head, stable_receipt = self.receipt()
+        stable_bytes = stable_receipt.read_bytes()
+        cases = (
+            ("checkout", ["checkout", "--detach", self.base], self.base, self.base),
+            ("base ref", ["branch", "-f", "fixture-base", stable_head], None, stable_head),
+        )
+        for name, mutation, expected_head, expected_base in cases:
+            with self.subTest(drift=name):
+                self.assertEqual(command(self.repo, "git", "checkout", "--detach", stable_head).returncode, 0)
+                self.assertEqual(command(self.repo, "git", "branch", "-f", "fixture-base", self.base).returncode, 0)
+                self.write("cas-cli/Makefile", "test-ci-tiers:\n\tcd .. && python3 scripts/test-example.py\n")
+                self.write("scripts/example.py", "pass\n")
+                self.write("scripts/test-example.py", "import subprocess\n"
+                           f"subprocess.run({['git', *mutation]!r}, check=True)\n")
+                self.commit()
+                start_head, start_receipt = self.receipt()
+                drifted = self.fast_from("fixture-base")
+                final_head, final_receipt = self.receipt()
+                final_base = command(self.repo, "git", "rev-parse", "fixture-base").stdout.strip()
+                self.assertEqual((final_head, final_base), (expected_head or start_head, expected_base),
+                                 drifted.stdout + drifted.stderr)
+                emitted = {path.name: path.read_text() for path in (start_receipt, final_receipt) if path.exists()}
+                self.assertFalse(emitted, f"start={start_head} final={final_head} base={final_base} "
+                                 f"exit={drifted.returncode} receipts={emitted!r}\n{drifted.stdout}{drifted.stderr}")
+                self.assertNotEqual(drifted.returncode, 0, drifted.stdout + drifted.stderr)
+                self.assertEqual(stable_receipt.read_bytes(), stable_bytes)
 
 
     def test_fast_test_env_skips_unchanged_crate_paths_and_fixture_suite(self):

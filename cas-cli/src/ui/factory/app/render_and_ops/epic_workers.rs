@@ -1971,6 +1971,18 @@ fn reset_stale_preassign_holder(
     {
         return Err(format!("task is still held by live worker '{holder}'"));
     }
+    let tasks = open_task_store_cached(cas_dir)
+        .map_err(|e| format!("could not open task store to inspect '{holder}' hold: {e}"))?;
+    if task.status == cas_types::TaskStatus::Blocked
+        && crate::mcp::tools::core::task::block_hold::read(tasks.as_ref(), &task.id)?
+            .is_some_and(|hold| hold.who.starts_with(INTERRUPTED_HOLD_WHO))
+    {
+        return Err(format!(
+            "task holds work interrupted under '{holder}'; recover it with factory \
+             action=recover_branch and task action=transfer adopt_branch=true, or discard it with \
+             task action=reset"
+        ));
+    }
 
     let reason = "Stale pre-assignment force-release";
     let lease_released = agents
@@ -2359,11 +2371,37 @@ pub(crate) fn enqueue_context_resume_brief(
 ///
 /// Best-effort: store failures are logged; returns the number of tasks cleared.
 pub(crate) fn release_worker_task_bindings(cas_dir: &std::path::Path, worker_name: &str) -> usize {
+    settle_worker_task_bindings(cas_dir, worker_name, None).released
+}
+
+pub(crate) const INTERRUPTED_HOLD_WHO: &str = "factory-session-end:";
+
+pub(crate) struct Interruption<'a> {
+    pub session: &'a str,
+    pub reason: &'a str,
+    pub evidence: &'a str,
+}
+
+#[derive(Default)]
+pub(crate) struct SettledBindings {
+    pub held: usize,
+    pub released: usize,
+}
+
+pub(crate) fn settle_interrupted_worker_tasks(
+    cas_dir: &std::path::Path, worker_name: &str, interruption: &Interruption<'_>,
+) -> SettledBindings {
+    settle_worker_task_bindings(cas_dir, worker_name, Some(interruption))
+}
+
+fn settle_worker_task_bindings(
+    cas_dir: &std::path::Path, worker_name: &str, interruption: Option<&Interruption<'_>>,
+) -> SettledBindings {
     // cas-94a0: a worker parked by /standby keeps its tasks, status and assignee
     // for Resume. Only the standby marker's workers skip; every other shutdown
     // and every other release path is unchanged.
     if crate::factory_standby::holds(cas_dir, worker_name) {
-        return 0;
+        return SettledBindings::default();
     }
     let task_store = match open_task_store_cached(cas_dir) {
         Ok(s) => s,
@@ -2372,7 +2410,7 @@ pub(crate) fn release_worker_task_bindings(cas_dir: &std::path::Path, worker_nam
                 worker_name, error = %e,
                 "cas-7a94: failed to open task store for shutdown task release"
             );
-            return 0;
+            return SettledBindings::default();
         }
     };
     let agent_store = match open_agent_store(cas_dir) {
@@ -2390,11 +2428,14 @@ pub(crate) fn release_worker_task_bindings(cas_dir: &std::path::Path, worker_nam
                 &*task_store,
                 worker_name,
                 None,
+                interruption,
             );
         }
     };
 
-    release_worker_task_bindings_tasks_only(cas_dir, &*task_store, worker_name, Some(&*agent_store))
+    release_worker_task_bindings_tasks_only(
+        cas_dir, &*task_store, worker_name, Some(&*agent_store), interruption,
+    )
 }
 
 fn release_worker_task_bindings_tasks_only(
@@ -2402,7 +2443,8 @@ fn release_worker_task_bindings_tasks_only(
     task_store: &dyn cas_store::TaskStore,
     worker_name: &str,
     agent_store: Option<&dyn cas_store::AgentStore>,
-) -> usize {
+    interruption: Option<&Interruption<'_>>,
+) -> SettledBindings {
     let assigned: Vec<_> = match task_store.list(None) {
         Ok(tasks) => tasks
             .into_iter()
@@ -2421,11 +2463,11 @@ fn release_worker_task_bindings_tasks_only(
                 worker_name, error = %e,
                 "cas-7a94: failed to list tasks for shutdown release"
             );
-            return 0;
+            return SettledBindings::default();
         }
     };
 
-    let mut released = 0usize;
+    let mut settled = SettledBindings::default();
     for mut t in assigned {
         if let Err(e) = cas_store::release_qa_claim_for_reviewer(cas_dir, &t.id, worker_name) {
             tracing::error!(task_id = %t.id, worker_name, error = %e,
@@ -2435,20 +2477,51 @@ fn release_worker_task_bindings_tasks_only(
         if let Some(agents) = agent_store {
             let _ = agents.release_lease_for_task(&t.id, "Worker shutdown/cancel cleanup");
         }
-        t.status = cas_types::TaskStatus::Open;
-        t.assignee = None;
-        t.updated_at = chrono::Utc::now();
-        match task_store.update(&t) {
-            Ok(_) => {
+        let now = chrono::Utc::now();
+        let interrupted = interruption.filter(|_| t.status != cas_types::TaskStatus::Open);
+        if let Some(interruption) = interrupted {
+            let note = format!(
+                "[{}] ⏸ Interrupted: factory session {} ended ({}) while {worker_name} held this \
+                 task. Held Blocked under {worker_name}, outside the ready queue. Evidence: {}. \
+                 Recover with factory action=recover_branch and task action=transfer \
+                 adopt_branch=true, or discard with task action=reset.",
+                now.format("%Y-%m-%d %H:%M"), interruption.session, interruption.reason,
+                interruption.evidence,
+            );
+            t.notes = if t.notes.is_empty() { note } else { format!("{}\n\n{note}", t.notes) };
+            t.status = cas_types::TaskStatus::Blocked;
+        } else {
+            t.status = cas_types::TaskStatus::Open;
+            t.assignee = None;
+        }
+        t.updated_at = now;
+        match (task_store.update(&t), interrupted) {
+            (Ok(_), Some(interruption)) => {
+                let hold = cas_types::TaskBlockedHold {
+                    reason: format!(
+                        "Interrupted mid-task: factory session {} ended ({}); evidence in task notes.",
+                        interruption.session, interruption.reason,
+                    ),
+                    who: format!("{INTERRUPTED_HOLD_WHO}{}", interruption.session),
+                    when: now,
+                };
+                if let Err(error) = task_store.patch_execution_state(
+                    &t.id, &serde_json::json!({"blocked_hold": hold, "answered_blocker": null}),
+                ) {
+                    tracing::warn!(task_id = %t.id, %error, "interrupted task hold not recorded; status stays Blocked");
+                }
+                settled.held += 1;
+            }
+            (Ok(_), None) => {
                 clear_departed_block(task_store, &t.id);
-                released += 1;
+                settled.released += 1;
                 tracing::info!(
                     task_id = %t.id,
                     worker_name,
                     "cas-7a94: released task binding on worker shutdown/cancel"
                 );
             }
-            Err(e) => {
+            (Err(e), _) => {
                 tracing::error!(
                     task_id = %t.id, worker_name, error = %e,
                     "cas-7a94: failed to clear assignee on worker shutdown"
@@ -2456,7 +2529,7 @@ fn release_worker_task_bindings_tasks_only(
             }
         }
     }
-    released
+    settled
 }
 
 /// cas-7a94: release a single task by id if it is still bound to `worker_name`

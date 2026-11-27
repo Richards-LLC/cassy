@@ -7,6 +7,57 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.59.0] - 2026-11-27
+
+### Fixed — Factory
+
+- **Interrupted worker tasks stay held for recovery** — Was: a supervisor exit
+  that stopped a worker mid-task released its task Open and unassigned, so the
+  ready queue offered half-finished work to any new worker. Now: the task stays
+  Blocked under the stopped worker with its worktree, branch and checkpoint tip
+  recorded, spawn pre-assignment refuses it, and the successor recovers it
+  explicitly with `recover_branch` and `transfer adopt_branch=true`, or discards
+  it with `task reset`. Unstarted pre-assignments are released as before.
+- **Focused proof asks only for runs the capped runner can make** — Was: park's
+  changed-test gate could demand runs that never pass. It asked a changed spec
+  to be read by another spec, and it sent every test that read a changed locale
+  file to a whole-file run. It also asked for related or package runs of Jest
+  and Playwright config files, Playwright runs of Vue email templates in
+  packages with no tests, and Vitest runs of Playwright fixture servers. Now:
+  park and worker-check resolve each uncertain input to the same single scope.
+  Changed specs keep their own stability proof. A changed JSON file owes a
+  whole-file run only from a test file whose collection-time code uses it in a
+  table, loop or call; reads inside tests, hooks or helpers that only tests
+  call do not count. Config files and packages with no tests owe nothing. A
+  fixture server proves through its own config's suite, run under that config.
+  A module calling `/re/.test(x)` no longer makes its other calls look like an
+  unresolved test API.
+- **Worker-check explains a rejected run** — Was: a run whose report passed but
+  whose process exited nonzero said only "stability failed", and a skipped
+  selected test looked like a failed assertion. Now: the refusal names the exit
+  status, or says the selected test did not run. `it.each(...)` tables written
+  `as const` name their rows, and a table whose rows cannot be named runs its
+  whole spec five times. A Playwright setup project that a related run depends
+  on no longer counts as an unrelated spec.
+
+### Fixed — MCP
+
+- **Full task reads keep the task body** — `task show full=true` returns the complete record even in MCP clients that display only structured results. QA impact or a registry error no longer hides task instructions.
+
+### Fixed — Factory guards
+
+- **Shell guards read commands the way the shell runs them** — Was: the
+  credential, workspace-write and commit guards each parsed shell commands
+  their own way. They refused ordinary worker commands: `bash -lc`, a
+  background `bash -c '…' bash "$A"` typecheck, `cd -`, `cd "$OLDPWD"`, a
+  subshell `cd` before a push, a local counter `n=$((n+1))`,
+  `$(date +%s)` arithmetic, `a=(…)` arrays and removing a worktree
+  `node_modules` symlink. They also missed some real escapes: `pushd`,
+  `env -C`, a `cd` that leaked out of a subshell, credential paths passed as
+  `$1`, and parent variables a child shell never receives. Now: one shell
+  reading supplies every executed statement, with its working directory and
+  variable values, to all three guards.
+
 ## [4.58.0] - 2026-11-26
 
 ### Fixed — Commander

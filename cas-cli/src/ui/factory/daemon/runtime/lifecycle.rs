@@ -5371,7 +5371,13 @@ impl FactoryDaemon {
             let rows: Vec<_> = agents.iter().filter(|agent| agent.name == *name
                 && agent.factory_session.as_deref() == Some(self.session_name.as_str())).collect();
             let state = rows.iter().max_by_key(|agent| agent.last_heartbeat)
-                .map(|agent| crate::mcp::tools::service::factory_ops::worker_shutdown_state(self.app.cas_dir(), agent))
+                .map(|agent| {
+                    let state = crate::mcp::tools::service::factory_ops::worker_shutdown_state(self.app.cas_dir(), agent);
+                    match agent.metadata.get("clone_path").and_then(|path| git_head(std::path::Path::new(path))) {
+                        Some(tip) => format!("{state}; tip={tip}"),
+                        None => state,
+                    }
+                })
                 .unwrap_or_else(|| format!("{name}: tasks=unknown; dirty_files=unknown; unpushed_commits=unknown (registration unavailable)"));
             (name.clone(), state, rows.iter().map(|agent| agent.id.clone()).collect::<Vec<_>>())
         }).collect();
@@ -5405,10 +5411,16 @@ impl FactoryDaemon {
                 "still running; tasks retained".to_string()
             } else if !records.is_empty() && records.iter().all(|record| status(record) == ProcessGroupStatus::Gone) {
                 ended.workers_stopped.push(name.clone());
-                let release = |holder: &str| crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(self.app.cas_dir(), holder);
-                let released = release(&name) + agent_ids.iter().filter(|id| **id != name)
-                    .map(|id| release(id)).sum::<usize>();
-                format!("stopped; recovered_tasks={released}")
+                use crate::ui::factory::app::render_and_ops::epic_workers as bindings;
+                let interruption = bindings::Interruption {
+                    session: &self.session_name, reason: &ended.reason, evidence: &state,
+                };
+                let (mut held, mut released) = (0, 0);
+                for holder in std::iter::once(&name).chain(agent_ids.iter().filter(|id| **id != name)) {
+                    let settled = bindings::settle_interrupted_worker_tasks(self.app.cas_dir(), holder, &interruption);
+                    (held, released) = (held + settled.held, released + settled.released);
+                }
+                format!("stopped; held_for_recovery={held}; released={released}")
             } else {
                 ended.unverified.push(name.clone());
                 "stop unverified; tasks retained for recovery".to_string()
@@ -6275,6 +6287,12 @@ mod stall_nudge_routing_rework_tests {
 }
 
 
+fn git_head(worktree: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git").arg("-C").arg(worktree)
+        .args(["rev-parse", "--verify", "HEAD"]).output().ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 async fn persist_communication_session_summary(cas_dir: std::path::PathBuf, session: String) {
     match tokio::task::spawn_blocking(move || {
         cas_store::communication_slo::write_session_end(&cas_dir, &session, chrono::Utc::now())
@@ -6292,24 +6310,36 @@ mod communication_summary_tests {
         use std::io::Read;
         use std::os::unix::net::UnixStream;
         for owned in [true, false] {
-        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let project = tempfile::tempdir().unwrap();
         let repo = project.path();
+        let outside = tempfile::tempdir().unwrap();
+        let (writer, external, ready) = (outside.path().join("writer.sh"), outside.path().join("rows.log"), outside.path().join("ready"));
+        std::fs::write(&writer, r#"i=$(( $(cat checkpoint.txt 2>/dev/null | wc -l) + 1 ))
+while [ "$i" -le "$1" ]; do
+  echo "row-$i" >> "$2" && echo "row-$i" >> checkpoint.txt && git add checkpoint.txt \
+    && git -c core.hooksPath=/dev/null commit -qm "checkpoint row-$i" || exit 1
+  i=$((i + 1))
+done
+"#).unwrap();
+        assert!(std::process::Command::new("mkfifo").arg(&ready).status().unwrap().success());
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git").args(args).current_dir(repo).output().unwrap();
             assert!(output.status.success(), "git {args:?}: {output:?}");
             String::from_utf8(output.stdout).unwrap().trim().to_string()
         };
-        git(&["init", "-b", "main"]);
+        let worker = "unfinished-worker";
+        let source = format!("factory/{worker}");
+        git(&["init", "-b", source.as_str()]);
         git(&["config", "user.name", "Fixture"]);
         git(&["config", "user.email", "fixture@example.invalid"]);
         std::fs::write(repo.join("work.txt"), "parked\n").unwrap();
         git(&["add", "work.txt"]);
         git(&["commit", "-m", "parked"]);
         git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
-        git(&["remote", "add", "origin", "https://example.invalid/fixture.git"]);
-        std::fs::write(repo.join("work.txt"), "unfinished\n").unwrap();
-        git(&["commit", "-am", "local only"]);
+        let origin = tempfile::tempdir().unwrap();
+        git(&["init", "--bare", origin.path().to_str().unwrap()]);
+        git(&["remote", "add", "origin", origin.path().to_str().unwrap()]);
         let root = crate::store::init_cas_dir(repo).unwrap();
         std::fs::write(repo.join("dirty.txt"), "keep this\n").unwrap();
         // Ignore the store so the only dirty input is the operator's file.
@@ -6328,11 +6358,13 @@ mod communication_summary_tests {
         lead.factory_session = Some(session.clone());
         agents.register(&lead).unwrap();
         crate::supervisor_continuity::record_end(&root, &lead.id, Some("prompt_input_exit")).unwrap();
-        let worker = "unfinished-worker";
+        let batch = format!("sh '{}' 7 '{}'; echo $? > '{}'; exec sleep 300", writer.display(), external.display(), ready.display());
         let pty = cas_mux::Pty::spawn(worker, cas_mux::PtyConfig {
-            command: "/bin/sleep".into(), args: vec!["300".into()], cwd: Some(repo.to_path_buf()),
+            command: "/bin/sh".into(), args: vec!["-c".into(), batch], cwd: Some(repo.to_path_buf()),
             env: vec![], env_remove: vec![], rows: 24, cols: 80,
         }).unwrap();
+        assert_eq!(std::fs::read_to_string(&ready).unwrap().trim(), "0", "7 of 31 writes checkpointed");
+        let checkpoint = git(&["rev-parse", "HEAD"]);
         let worker_pid = pty.process_group_id().unwrap();
         if owned {
             crate::ui::factory::process_groups::track(&root, worker, &session, worker_pid).unwrap();
@@ -6381,19 +6413,65 @@ mod communication_summary_tests {
         let mut output = String::new();
         client.read_to_string(&mut output).unwrap();
         let recovered = tasks.get(&task.id).unwrap();
-        let outcome = if owned { "stopped; recovered_tasks=1" }
+        let outcome = if owned { "stopped; held_for_recovery=1; released=0" }
             else { "stop unverified; tasks retained for recovery" };
         let mut failures = Vec::new();
         if !(output.contains(worker) && output.contains(&task.id)
-            && output.contains("dirty_files=1") && output.contains("unpushed_commits=1")
+            && output.contains("dirty_files=1") && output.contains("unpushed_commits=7")
             && output.contains(outcome)) {
             failures.push(format!("missing terminal teardown evidence: {output:?}"));
         }
-        if owned && (recovered.status != cas_types::TaskStatus::Open || recovered.assignee.is_some()) {
-            failures.push(format!("task stranded: {:?} {:?}", recovered.status, recovered.assignee));
+        if owned && (recovered.status != cas_types::TaskStatus::Blocked || recovered.assignee.as_deref() != Some(worker)) {
+            failures.push(format!("interrupted task not held: {:?} {:?}", recovered.status, recovered.assignee));
         }
         if owned {
             assert!(agents.get_lease(&task.id).unwrap().is_none(), "stopped worker's lease is released");
+            let hold = crate::mcp::tools::core::task::block_hold::read(tasks.as_ref(), &task.id).unwrap().unwrap();
+            assert_eq!(hold.who, format!("factory-session-end:{session}"));
+            assert!(recovered.notes.contains(&checkpoint) && recovered.notes.contains(&repo.display().to_string()));
+            assert!(tasks.list_ready().unwrap().iter().all(|ready| ready.id != task.id));
+            let second = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker_with_review(&root, &task.id, "second-writer");
+            assert!(second.is_err(), "a replacement cannot take interrupted work anonymously");
+            assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some(worker));
+            let mut successor = cas_types::Agent::new("successor-affc".into(), "successor-affc".into());
+            successor.role = cas_types::AgentRole::Supervisor;
+            agents.register(&successor).unwrap();
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+            core.set_agent_id_for_testing(successor.id.clone());
+            #[cfg(feature = "mcp-proxy")]
+            let service = crate::mcp::tools::CasService::new(core, None);
+            #[cfg(not(feature = "mcp-proxy"))]
+            let service = crate::mcp::tools::CasService::new(core);
+            use rmcp::handler::server::wrapper::Parameters;
+            let payload = serde_json::json!({"branch": source, "head": checkpoint, "expected_remote": ""});
+            let recover = serde_json::from_value(serde_json::json!({
+                "action": "recover_branch", "task_id": task.id, "payload": payload.to_string(),
+            })).unwrap();
+            service.factory(Parameters(recover)).await.unwrap();
+            let published = std::process::Command::new("git").arg("-C").arg(origin.path())
+                .arg("rev-parse").arg(format!("refs/heads/factory/successor-affc-{}", task.id)).output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&published.stdout).trim(), checkpoint);
+            let receiver_path = root.join("worktrees/resumed-worker");
+            git(&["worktree", "add", "-b", "factory/resumed-worker", receiver_path.to_str().unwrap(), "refs/remotes/origin/main"]);
+            let mut receiver = cas_types::Agent::new("resumed-worker-id".into(), "resumed-worker".into());
+            receiver.role = cas_types::AgentRole::Worker;
+            receiver.parent_id = Some(successor.id.clone());
+            receiver.metadata.insert("clone_path".into(), receiver_path.display().to_string());
+            agents.register(&receiver).unwrap();
+            let transfer = serde_json::from_value(serde_json::json!({
+                "action": "transfer", "id": task.id, "to_agent": receiver.name, "adopt_branch": true,
+            })).unwrap();
+            let transfer = service.task(Parameters(transfer)).await.unwrap();
+            assert_ne!(transfer.is_error, Some(true), "{transfer:?}");
+            let resumed = tasks.get(&task.id).unwrap();
+            assert_eq!(resumed.assignee.as_deref(), Some("resumed-worker"));
+            assert_eq!(resumed.status, cas_types::TaskStatus::Blocked, "resumption fabricates no completion");
+            assert!(std::process::Command::new("sh").arg(&writer).arg("31").arg(&external)
+                .current_dir(&receiver_path).status().unwrap().success());
+            let expected: Vec<_> = (1..=31).map(|row| format!("row-{row}")).collect();
+            assert_eq!(std::fs::read_to_string(&external).unwrap().lines().collect::<Vec<_>>(), expected,
+                "each external write lands once: 7 before the exit, 24 after adoption");
         } else {
             assert!(agents.get(&agent.id).is_ok(), "unverified stop retains its registered owner");
             assert_eq!(recovered.assignee.as_deref(), Some(worker));
@@ -6404,7 +6482,7 @@ mod communication_summary_tests {
         let durable = serde_json::to_value(&receipt).unwrap();
         if !durable["ended"]["worker_states"].as_array().is_some_and(|rows| rows.iter().any(|row| {
             row.as_str().is_some_and(|line| line.contains(worker) && line.contains(&task.id)
-                && line.contains("dirty_files=1") && line.contains("unpushed_commits=1")
+                && line.contains("dirty_files=1") && line.contains("unpushed_commits=7")
                 && line.contains(outcome))
         })) {
             failures.push(format!("missing durable worker state: {durable}"));

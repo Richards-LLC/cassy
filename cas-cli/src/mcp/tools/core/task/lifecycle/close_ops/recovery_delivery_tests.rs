@@ -2138,6 +2138,7 @@ async fn cas_5dc0_repark_opens_next_qa_round_with_fresh_workers() {
             let response = supervisor.task(Parameters(serde_json::from_value(request).unwrap())).await.unwrap();
             assert_ne!(response.is_error, Some(true), "{response:?}");
         }
+        f.core = CasCore::with_daemon(cas_dir.clone(), None, None);
         f.core.set_agent_id_for_testing(replacement.id.clone());
         std::fs::write(f.worker_path.join("footer.css"), ".footer { gap: 12px; }\n").unwrap();
         git(&f.worker_path, &["add", "footer.css"]);

@@ -279,7 +279,7 @@ async fn automatic_context_reset_preserves_drafts_and_newer_turns() {
         let native = "019f84af-3121-7950-ba14-b01db2daa152";
         let account = root.path().join("account");
         agent.cc_session_id = Some(native.into());
-        agent.metadata.insert("supervisor_cli".into(), cli.to_string());
+        agent.metadata.insert("supervisor_cli".into(), cli.backend().name().into());
         agent.metadata.insert("supervisor_account_dir".into(), account.to_string_lossy().into_owned());
         agents.update(&agent).unwrap();
         let transcript = if cli == cas_mux::SupervisorCli::Codex {

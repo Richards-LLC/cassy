@@ -234,6 +234,77 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     }
     let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
     git(&["revert", "--no-edit", foreign.as_deref().unwrap()]);
+    let import_base = git(&["rev-parse", "HEAD"]);
+    let assembly_id = "cas-cohort-assembly";
+    let target = WorkTarget { repo_selector: "project:reverted".into(), target_branch: "main".into() };
+    let imported_ids = ["cas-cohort-first", "cas-cohort-second", "cas-cohort-final"];
+    let folded_owner = imported_ids[1];
+    let overview_fragment = format!("docs/product-overview.d/{folded_owner}.md");
+    let family_fragment = "docs/qa/bug-families/cohort-import.yaml";
+    for id in imported_ids {
+        git(&["checkout", "-qb", id, &import_base]);
+        let source = format!("{id}.rs");
+        std::fs::write(repo.join(&source), "fn imported() {}\n").unwrap();
+        git(&["add", &source]);
+        if id == folded_owner {
+            std::fs::write(repo.join(&overview_fragment), "## Core Concepts\n\nImported cohort behavior.\n").unwrap();
+            std::fs::write(repo.join(family_fragment), format!("title: Cohort import\ntasks: [{id}]\n")).unwrap();
+            git(&["add", &overview_fragment, family_fragment]);
+        }
+        git(&["commit", "-qm", "reviewed constituent"]);
+        let anchor = git(&["rev-parse", "HEAD"]);
+        let mut task = Task::new(id.into(), id.into());
+        task.origin_project = Some("reverted".into());
+        task.status = TaskStatus::Closed;
+        task.deliverables.work_target = Some(target.clone());
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        task.deliverables.factory_branch_start = Some(FactoryBranchStart {
+            work_target: target.clone(), branch: id.into(), assignee: "worker".into(), base_sha: import_base.clone(),
+        });
+        task.deliverables.premerge_approval = Some(cas_types::PortablePremergeApproval {
+            verdict_id: format!("ver-{id}"), dispatch_id: format!("vdispatch-{id}"), approved_anchor: anchor.clone(),
+            delivery_cycle: task.deliverables.delivery_cycle,
+        });
+        tasks.add(&task).unwrap();
+        anchors.insert(id.into(), anchor);
+    }
+    git(&["checkout", "-qb", "reviewed-cohort", imported_ids[0]]);
+    git(&["merge", "--no-ff", "-qm", "collect reviewed constituents", imported_ids[1]]);
+    let cohort_head = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "-q", "main"]);
+    std::fs::write(repo.join("published-baseline.txt"), "already published\n").unwrap();
+    git(&["add", "published-baseline.txt"]);
+    git(&["commit", "-qm", "retain the published baseline"]);
+    let assembly_base = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "-qb", assembly_id]);
+    git(&["merge", "--no-ff", "-qm", "import reviewed cohort", &cohort_head]);
+    git(&["merge", "--no-ff", "-qm", "import final reviewed constituent", imported_ids[2]]);
+    let assembly_head = git(&["rev-parse", "HEAD"]);
+    let mut task = Task::new(assembly_id.into(), "Reviewed cohort assembly".into());
+    task.origin_project = Some("reverted".into());
+    task.status = TaskStatus::Closed;
+    task.labels.push(crate::mcp::tools::core::task::lifecycle::review_tier::FORCE_VERIFIER_LABEL.into());
+    task.deliverables.work_target = Some(target.clone());
+    task.deliverables.factory_branch_anchor = Some(assembly_head.clone());
+    task.deliverables.factory_branch_start = Some(FactoryBranchStart {
+        work_target: target.clone(), branch: assembly_id.into(), assignee: "worker".into(), base_sha: assembly_base,
+    });
+    task.deliverables.authorized_merge_sources = [cohort_head, anchors[imported_ids[2]].clone()]
+        .into_iter().map(|commit| cas_types::AuthorizedMergeSource {
+            commit, supervisor_id: "supervisor".into(), work_target: target.clone(),
+        }).collect();
+    task.deliverables.premerge_approval = Some(cas_types::PortablePremergeApproval {
+        verdict_id: "ver-cohort-assembly".into(), dispatch_id: "vdispatch-cohort-assembly".into(),
+        approved_anchor: assembly_head.clone(), delivery_cycle: task.deliverables.delivery_cycle,
+    });
+    tasks.add(&task).unwrap();
+    anchors.insert(assembly_id.into(), assembly_head);
+    git(&["checkout", "-q", "main"]);
+    git(&["merge", "--no-ff", "-qm", "land reviewed cohort assembly", assembly_id]);
+    let landing = git(&["rev-parse", "HEAD"]);
+    for id in imported_ids.into_iter().chain([assembly_id]) {
+        tasks.record_merge_admission(id, &landing, cas_types::MergeCiAdmission::Green).unwrap();
+    }
     // One real release compile consumes the retained member's fragments.
     // A deletion in the same release without folded bytes stays a loss.
     git(&["rm", "docs/product-overview.d/cas-unfolded.md", "docs/qa/bug-families/cas-unfolded.yaml"]);
@@ -297,6 +368,16 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
     assert!(inventory.deliveries.iter().any(|delivery| delivery.task_id == "cas-assembly"), "{:?}", inventory.exceptions);
     let preview = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();
+    assert!(!repo.join(&overview_fragment).exists());
+    assert!(!repo.join(family_fragment).exists());
+    for id in imported_ids {
+        assert!(matches!(preview.get(id), Some(CassyMergeClose::AlreadyClosed)), "{id}: {:?}", preview.get(id));
+    }
+    let assembly_exception = inventory.exceptions.iter().find(|exception| exception.task_id == assembly_id).map(|exception| &exception.code);
+    let assembly_delivered = inventory.deliveries.iter().any(|delivery| delivery.task_id == assembly_id);
+    let assembly_preview = preview.get(assembly_id);
+    assert!(assembly_exception.is_none() && assembly_delivered && matches!(assembly_preview, Some(CassyMergeClose::AlreadyClosed)),
+        "inventory: {assembly_exception:?}; delivered: {assembly_delivered}; preview: {assembly_preview:?}");
     let assembly = tasks.get("cas-assembly").unwrap();
     let source = tasks.get("cas-redrafted").unwrap();
     let expect_content_hold = |scope: &ReleaseScope, code| {

@@ -1734,7 +1734,7 @@ fn cas_d49a_merged_delivery_with_exited_job_wakes_once_across_lost_reads_and_res
 /// The actual pre-tool boundary must judge this PR head's check evidence,
 /// including when independent QA is disabled and no required checks exist.
 #[test]
-fn raw_pr_merge_waits_for_pr_head_checks_without_protection_gh2260() {
+fn raw_pr_merge_is_flagged_for_pr_head_checks_without_protection_gh2260() {
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     let dir = tempfile::tempdir().unwrap();
     let root = crate::store::init_cas_dir(dir.path()).unwrap();
@@ -1749,7 +1749,6 @@ fn raw_pr_merge_waits_for_pr_head_checks_without_protection_gh2260() {
     // --json headRefOid,statusCheckRollup on 2026-11-21. Variant rows alter
     // only check outcomes; the response envelope and CheckRun shape are real.
     let captured: serde_json::Value = serde_json::from_str(include_str!("fixtures/gh-pr-view-1920.json")).unwrap();
-    let head = captured["headRefOid"].as_str().unwrap();
     let check_run = |status: &str, conclusion: serde_json::Value| {
         let mut check = captured["statusCheckRollup"][0].clone();
         check["status"] = status.into();
@@ -1778,18 +1777,9 @@ fn raw_pr_merge_waits_for_pr_head_checks_without_protection_gh2260() {
                 ..Default::default()
             };
             let output = crate::hooks::handlers::handle_pre_tool_use(&input, Some(&root)).unwrap();
-            let output = serde_json::to_value(output).unwrap();
-            let specific = &output["hookSpecificOutput"];
-            if let Some(code) = code {
-                assert_eq!(specific["permissionDecision"], "deny", "{role} {check}: {output}");
-                let reason = specific["permissionDecisionReason"].as_str().unwrap();
-                assert!(reason.contains(code), "{reason}");
-                assert!(reason.contains(head), "{reason}");
-                let name = check["name"].as_str().or_else(|| check["context"].as_str()).unwrap();
-                assert!(reason.contains(name), "{reason}");
-            } else {
-                assert_ne!(specific["permissionDecision"], "deny", "{role} {check}: {output}");
-            }
+            let warned = crate::test_support::pretool_warned(&output);
+            assert!(!crate::test_support::pretool_blocked(&output), "{role} {check}: {output:?}");
+            assert_eq!(!warned.is_empty(), code.is_some(), "{role} {check}: {warned:?}");
         }
     }
     drop(env);

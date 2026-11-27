@@ -414,8 +414,9 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     tasks.add(&epic).unwrap();
     let mut input: serde_json::Value = serde_json::from_str(&input).unwrap();
     input["tool_input"]["epic_id"] = serde_json::json!(epic.id);
+    // H-07 is demoted: the call proceeds and its refusal is still one counted fact.
     let output = crate::cli::hook::process_hook_input("PreToolUse", Ok(input.to_string()), false).unwrap();
-    assert!(facts::hook_denial(&output).is_some());
+    assert!(facts::hook_denial(&output).is_none());
     assert_eq!(facts::summarize(&store, before).unwrap().get("H-07"),
         Some(&facts::Counts { refused: 1, overridden: 1, false_positive: 0, shadowed: 0 }));
 

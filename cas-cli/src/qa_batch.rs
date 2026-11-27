@@ -1100,6 +1100,10 @@ pub(crate) fn prepare_release_tag_receipt(
 
 /// History membership cannot prove shipment: a later revert retains ancestry.
 /// The final tree must preserve the delivery's effect, including ordinary edits.
+pub(crate) fn release_tag_ships_delivery(repo: &Path, base: Option<&str>, anchor: &str, tag_sha: &str, task_id: &str) -> bool {
+    release_delivery_effect(repo, base, anchor, tag_sha, task_id).is_ok()
+}
+
 pub(crate) fn release_delivery_effect(
     repo: &Path, base: Option<&str>, anchor: &str, target: &str, task_id: &str,
 ) -> Result<(), ReleaseInventoryCode> {

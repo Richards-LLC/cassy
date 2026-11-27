@@ -3,7 +3,7 @@ use std::fmt::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use cas_store::{CheckStage, QualityEvent, QualityPayload};
+use cas_store::{AgentStore, CheckStage, QualityEvent, QualityPayload};
 use cas_types::AgentRole;
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::Connection;
@@ -232,7 +232,7 @@ pub(super) fn build(root: &Path, db: &Connection, since: Time, until: Time) -> R
         .filter(|e| e.occurred_at >= since)
         .cloned()
         .collect();
-    let agents = crate::store::open_agent_store(root)?.list(None)?;
+    let agents = cas_store::SqliteAgentStore::open(root)?.list(None)?;
     let mut supervisor = Supervisor::default();
     for event in &window {
         if let QualityPayload::Turn {
@@ -585,7 +585,7 @@ fn recoveries(
 }
 
 fn workers(root: &Path, db: &Connection, events: &[QualityEvent], window: Span) -> Result<Workers> {
-    let agents = crate::store::open_agent_store(root)?.list(None)?;
+    let agents = cas_store::SqliteAgentStore::open(root)?.list(None)?;
     let mut stmt = db.prepare("SELECT task_id,agent_id,event_type,timestamp FROM task_lease_history ORDER BY timestamp,id")?;
     let mut leases = BTreeMap::<String, Vec<(String, Span)>>::new();
     let mut active = BTreeMap::<String, (String, Time)>::new();

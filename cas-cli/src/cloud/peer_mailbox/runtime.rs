@@ -186,12 +186,16 @@ impl PeerMailboxRuntime {
                     if crate::mcp::tools::core::workflow::premerge_verification::legacy_peer_approval(message) {
                         return Ok(Some(PeerAckOutcome::Rejected));
                     }
-                    if let Some(outcome) = train_parks::ingest(&self.cas_dir, recipient, message)? { return Ok(Some(outcome)); }
-                    if let Some(outcome) = verification_answers::ingest(&self.cas_dir, recipient, message)? { return Ok(Some(outcome)); }
-                    transcript::serve(&self.cas_dir, &mailbox, recipient, message)
+                    let outcome = if let Some(outcome) = train_parks::ingest(&self.cas_dir, recipient, message)? { Some(outcome) }
+                    else if let Some(outcome) = verification_answers::ingest(&self.cas_dir, recipient, message)? { Some(outcome) }
+                    else { transcript::serve(&self.cas_dir, &mailbox, recipient, message)? };
+                    if matches!(outcome, Some(PeerAckOutcome::Delivered)) {
+                        crate::efficiency_facts::peer_admitted(&self.cas_dir, message, chrono::Utc::now());
+                    }
+                    Ok(outcome)
                 },
                 &move |recipient, message| {
-                    crate::efficiency_facts::peer_admitted(&cas_dir, message, chrono::Utc::now());
+                    if owner.is_none() { crate::efficiency_facts::peer_admitted(&cas_dir, message, chrono::Utc::now()); }
                     match crate::cloud::epic_split::ingest(&cas_dir, recipient, message)? {
                         crate::cloud::epic_split::Ingested::Ignored(why) => {
                             tracing::info!(message = %message.id, %why, "epic split message ignored");

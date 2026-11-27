@@ -1816,8 +1816,6 @@ pub(super) mod tests {
             let historical = cut_scope(&root, repo, &final_sha, &track.version, Some(&train.id), None).unwrap();
             assert_eq!(&historical.reviewed_sha, stale);
             assert!(historical.proof_refs.iter().any(|proof| proof.receipt_id.as_deref() == Some(historical_verdict.as_str())));
-            // GH #2569: a retried cut audits its prepared commit and the queue
-            // publishes a same-tree merge of it; the tag binds the frozen QA.
             let main = git(repo, &["rev-parse", "main"]).unwrap();
             let wrap = |content: &str| git(repo, &["commit-tree", &format!("{content}^{{tree}}"),
                 "-p", &main, "-p", &final_sha, "-m", "queued release"]).unwrap();

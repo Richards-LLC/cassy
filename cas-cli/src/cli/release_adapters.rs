@@ -123,8 +123,6 @@ pub(crate) fn reconcile_once(
 ) -> Result<String> {
     let tree = release_reconcile::final_tree(repo, &scope.final_release_sha).map_err(anyhow::Error::msg)?;
     let key = operation_key(&scope.project_id, &scope.release_id, &tree);
-    // A settled partial resumes only when its review or proof binding changed;
-    // resume still refuses any other change to the release identity.
     let recorded = reconciler.reusable(root, &key, &trigger)?.filter(|receipt| receipt.complete
         || (receipt.scope.reviewed_sha == scope.reviewed_sha && receipt.scope.proof_refs == scope.proof_refs));
     let reused = recorded.is_some();
@@ -242,11 +240,6 @@ fn reviewed_proofs(root: &Path, repo: &Path, project: &str, final_sha: &str, aud
     Ok((reviewed, proofs))
 }
 
-/// The candidate a cut audit reviewed, or None when it does not identify the
-/// tag. The tag ships the release commit directly or as a two-parent merge
-/// with its exact tree; the audit names that commit or its first parent, as
-/// `release track` required. An audit of the release commit itself reviewed
-/// its single parent only when that parent is the train's recorded freeze tip.
 fn audited_candidate(root: &Path, repo: &Path, train_id: &str, release: &str, tag_sha: &str, checked: &str) -> Option<String> {
     use cas_store::TaskStore;
     let parents = |sha: &str| git(repo, &["rev-list", "--parents", "-n", "1", sha]).ok()
@@ -293,7 +286,6 @@ pub(super) fn tag_scope(
         None => reviewed_proofs(root, repo, &project_id, tag_sha, None)?,
         Some(audit) => match audited_candidate(root, repo, train_id, release, tag_sha, &audit.checked_sha) {
             Some(reviewed) => reviewed_proofs(root, repo, &project_id, tag_sha, Some(&reviewed))?,
-            // An audit that does not identify this tag proves nothing at it.
             None => (tag_sha.to_string(), Vec::new()),
         },
     };
@@ -868,8 +860,6 @@ mod tests {
         }
         assert_eq!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().len(), 5);
 
-        // GH #2569: a settled partial resumes once when its review or proof
-        // binding changes; an unchanged or complete operation stays a no-op.
         let tree = release_reconcile::final_tree(repo, &sha).unwrap();
         let mut partial = reconciler.receipt(operation_key("release-fixture", "v9.99.3", &tree), &scope("v9.99.3"), publish.clone());
         partial.complete = false;

@@ -1,1 +1,3 @@
+## Core Concepts
+
 Factory workers own one task. Parking, closing or cancelling that task retires the session; supervisors spawn a fresh worker for further work. Existing task queue replacement requests refuse reuse. Claude and Codex workers reaching 200,000 latest-call input tokens checkpoint to their task's artifact directory and restart through the existing recycle lifecycle, preserving the worktree and task binding. Recycling waits for a saved handoff and clean checkout; native token accounting includes cached input and does not use lifetime totals or guessed model windows.

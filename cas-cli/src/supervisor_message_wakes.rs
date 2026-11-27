@@ -219,15 +219,6 @@ pub(crate) fn record(
     Ok(())
 }
 
-pub(crate) fn record_started(cas: &Path, lead: i64, recipient: &str, at: DateTime<Utc>) -> anyhow::Result<()> {
-    let db = db(cas)?;
-    let conn = db.lock().map_err(|_| anyhow::anyhow!("wake ledger lock poisoned"))?;
-    conn.execute("UPDATE supervisor_message_wakes SET started_at=?1 WHERE lead_id=?2 AND recipient=?3
-        AND started_at IS NULL AND julianday(injected_at)<=julianday(?1)",
-        params![at.to_rfc3339(), lead, recipient])?;
-    Ok(())
-}
-
 fn notify_held_sender(
     cas: &Path, queue: &dyn PromptQueueStore, row: &QueuedPrompt,
     supervisor: &str, session: &str, agents: &[cas_types::Agent],

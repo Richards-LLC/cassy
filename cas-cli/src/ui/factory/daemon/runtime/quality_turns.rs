@@ -48,9 +48,7 @@ struct Cursor {
     /// (its turns belong to the one task it is working).
     identity: crate::agent_model::AgentModel,
     worker_name: Option<String>,
-    outbox: VecDeque<(NewQualityEvent, Vec<String>)>,
-    legacy_actors: Vec<String>,
-    native_session: Option<String>,
+    outbox: VecDeque<NewQualityEvent>,
     retry_at: Option<Instant>,
     /// cas-5f67: input tokens and end time of turns newly written this pass.
     recorded: Vec<(Option<u64>, DateTime<Utc>)>,
@@ -169,7 +167,7 @@ fn wake(
     session: &str,
     queue: &dyn PromptQueueStore,
     agents: &[Agent],
-) -> (WakeChannel, bool, Option<String>, Option<i64>) {
+) -> (WakeChannel, bool, Option<String>) {
     use crate::hooks::handlers::handlers_middle::factory_inbox::{envelope_ids, wake_named_ids};
     let ids = envelope_ids(prompt)
         .into_iter()
@@ -197,7 +195,7 @@ fn wake(
             WakeChannel::Daemon => Some("delivery_watchdog"),
             _ => None,
         };
-        return (channel, false, notice.map(str::to_string), None);
+        return (channel, false, notice.map(str::to_string));
     };
     let channel = match &row.origin {
         Some(QueueOrigin::PairedDevice { .. }) => WakeChannel::Operator,
@@ -254,7 +252,7 @@ fn wake(
         });
     let notice = notice.filter(|kind| !kind.is_empty() && kind.len() <= 96
         && kind.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':' | b'/')));
-    (channel, may_answer, notice, Some(row.id))
+    (channel, may_answer, notice)
 }
 
 /// A candidate isn't an action until its result succeeds. Reads, waits, polls,
@@ -463,11 +461,7 @@ impl Pending {
         if self.wake.is_some() || launch_context(prompt) {
             return;
         }
-        let (channel, may_answer, notice_kind, message_id) = wake(root, prompt, origin, agent, session, queue, agents);
-        if agent.role == AgentRole::Supervisor && let (Some(id), Some(at)) = (message_id, self.started)
-            && let Err(error) = crate::supervisor_message_wakes::record_started(root, id, &agent.name, at) {
-            tracing::warn!(%error, "could not record supervisor wake start");
-        }
+        let (channel, may_answer, notice_kind) = wake(root, prompt, origin, agent, session, queue, agents);
         self.wake = Some(channel);
         self.notice_kind = notice_kind;
         self.may_answer = may_answer;
@@ -504,8 +498,6 @@ impl Cursor {
             },
             worker_name: None,
             outbox: VecDeque::new(),
-            legacy_actors: Vec::new(),
-            native_session: None,
             retry_at: None,
             recorded: Vec::new(),
             #[cfg(test)]
@@ -545,7 +537,7 @@ impl Cursor {
         let mut event = NewQualityEvent::new(
             format!(
                 "turn|{}|{}|{}",
-                self.source.cli.backend().name(), self.native_session.as_deref().unwrap_or(&self.source.harness_session), turn.id
+                self.source.agent_id, self.source.harness_session, turn.id
             ),
             QualityPayload::Turn { supersedes: None, notice_kind: turn.notice_kind,
                 woken_by: turn.wake.unwrap_or(WakeChannel::Unknown),
@@ -566,8 +558,7 @@ impl Cursor {
         if self.since.is_none() && let Some(worker) = &self.worker_name {
             event.task_id = active_task(root, &[worker, &self.source.agent_id]);
         }
-        let aliases = self.legacy_actors.iter().map(|actor| format!("turn|{actor}|{}|{}", self.source.harness_session, turn.id)).collect();
-        self.outbox.push_back((event, aliases));
+        self.outbox.push_back(event);
         self.flush(root);
     }
 
@@ -575,8 +566,8 @@ impl Cursor {
         if self.retry_at.is_some_and(|next| Instant::now() < next) {
             return;
         }
-        while let Some((event, aliases)) = self.outbox.front() {
-            match crate::quality_ledger::emit_turn_checked(root, event, aliases) {
+        while let Some(event) = self.outbox.front() {
+            match crate::quality_ledger::emit_turn_checked(root, event) {
                 Ok((inserted, new_wake)) => {
                     self.inserted += usize::from(inserted);
                     // A replayed turn is already in the ledger; only a new row is a wake.
@@ -611,9 +602,6 @@ impl Cursor {
         }
         let at = timestamp(value);
         let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
-        if kind == "session_meta" && self.source.cli == cas_mux::SupervisorCli::Codex {
-            self.native_session = value.pointer("/payload/id").and_then(Value::as_str).map(str::to_owned);
-        }
         if self.source.cli == cas_mux::SupervisorCli::Claude {
             let content = value.pointer("/message/content").unwrap_or(&Value::Null);
             if kind == "user" {
@@ -906,8 +894,6 @@ impl Cursor {
         agents: &[Agent],
     ) -> std::io::Result<()> {
         self.identity = crate::agent_model::AgentModel::from_agent(agent);
-        self.legacy_actors = agents.iter().filter(|a| a.cc_session_id.as_deref().unwrap_or(&a.id) == self.source.harness_session)
-            .map(|a| a.id.clone()).collect();
         self.worker_name = (agent.role == AgentRole::Worker).then(|| agent.name.clone());
         self.flush(root);
         // Backpressure bounds memory on a temporarily unavailable local store.
@@ -986,10 +972,6 @@ fn auto_clear(root: &Path, session: &str, queue: &dyn PromptQueueStore, agent: &
     }
 }
 
-fn source_key(source: &SupervisorSource) -> String {
-    format!("{}|{}|{}", source.cli.backend().name(), source.account_dir.as_deref().unwrap_or(""), source.harness_session)
-}
-
 impl Scanner {
     #[cfg(test)]
     pub(super) fn bytes_read(&self) -> u64 {
@@ -1004,19 +986,16 @@ impl Scanner {
         agents: &[Agent],
     ) {
         let scope = WorkEventScope::from_agents(session, agents);
-        let mut sources = scope
+        let sources = scope
             .supervisors
             .into_iter()
             .chain(scope.workers)
             .collect::<Vec<_>>();
-        sources.sort_by_key(|source| agents.iter().find(|a| a.id == source.agent_id).map(|a| a.registered_at));
-        let sources: std::collections::BTreeMap<_, _> = sources.into_iter()
-            .map(|source| (source_key(&source), source)).collect();
         self.cursors
-            .retain(|id, _| sources.contains_key(id));
+            .retain(|id, _| sources.iter().any(|source| source.agent_id == *id));
         self.misses
-            .retain(|id, _| sources.contains_key(id));
-        for (key, source) in sources {
+            .retain(|id, _| sources.iter().any(|source| source.agent_id == *id));
+        for source in sources {
             if !matches!(
                 source.cli,
                 cas_mux::SupervisorCli::Claude
@@ -1030,15 +1009,15 @@ impl Scanner {
             };
             if self
                 .cursors
-                .get(&key)
-                .is_some_and(|c| !c.path.is_file())
+                .get(&source.agent_id)
+                .is_some_and(|c| c.source != source || !c.path.is_file())
             {
-                self.cursors.remove(&key);
+                self.cursors.remove(&source.agent_id);
             }
-            if !self.cursors.contains_key(&key) {
+            if !self.cursors.contains_key(&source.agent_id) {
                 if self
                     .misses
-                    .get(&key)
+                    .get(&source.agent_id)
                     .is_some_and(|(prior, until)| prior == &source && Instant::now() < *until)
                 {
                     continue;
@@ -1103,17 +1082,16 @@ impl Scanner {
                 };
                 let Some(path) = path else {
                     self.misses.insert(
-                        key.clone(),
+                        source.agent_id.clone(),
                         (source, Instant::now() + Duration::from_secs(30)),
                     );
                     continue;
                 };
-                self.misses.remove(&key);
+                self.misses.remove(&source.agent_id);
                 self.cursors
-                    .insert(key.clone(), Cursor::new(source.clone(), path));
+                    .insert(source.agent_id.clone(), Cursor::new(source.clone(), path));
             }
-            if let Some(cursor) = self.cursors.get_mut(&key) {
-                cursor.source = source;
+            if let Some(cursor) = self.cursors.get_mut(&source.agent_id) {
                 cursor.since = self.since;
                 #[cfg(test)]
                 {

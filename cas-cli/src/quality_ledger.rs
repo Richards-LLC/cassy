@@ -90,17 +90,9 @@ pub(crate) fn emit_checked(cas_root: &Path, event: &NewQualityEvent) -> cas_stor
 }
 
 /// Append notice detail for an old turn without counting it as another wake.
-pub(crate) fn emit_turn_checked(root: &Path, original: &NewQualityEvent, aliases: &[String]) -> cas_store::Result<(bool, bool)> {
+pub(crate) fn emit_turn_checked(root: &Path, original: &NewQualityEvent) -> cas_store::Result<(bool, bool)> {
     let mut event = original.clone();
     event.scope = project_scope(root);
-    for alias in aliases {
-        let mut legacy = event.clone();
-        legacy.natural_key = alias.clone();
-        if cas_store::quality_event_by_id(root, &legacy.id())?.is_some() {
-            event.natural_key = alias.clone();
-            break;
-        }
-    }
     if cas_store::record_quality_event(root, &event)? { return Ok((true, true)) }
     if matches!(&event.payload, QualityPayload::Turn { notice_kind: Some(_), .. })
         && let Some(old) = cas_store::quality_event_by_id(root, &event.id())?

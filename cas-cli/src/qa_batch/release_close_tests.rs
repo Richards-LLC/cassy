@@ -504,6 +504,22 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-foreign-cut", "cas-wrong-review"] {
         assert!(prepare_release_tag_receipt(&root, &[id.into()], &tag).is_err());
     }
+    git(&["checkout", "-q", "--detach", &scope.final_release_sha]);
+    for id in imported_ids {
+        let path = repo.join(format!("{id}.rs"));
+        let retained = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(path, format!("fn subsequent_repair() {{}}\n{retained}")).unwrap();
+    }
+    git(&["commit", "-qam", "subsequent repair edits imported paths"]);
+    let mut evolved_scope = scope.clone();
+    evolved_scope.release_tag = None;
+    evolved_scope.final_release_sha = git(&["rev-parse", "HEAD"]);
+    let evolved = resolve_release_inventory(&root, &repo, &evolved_scope).unwrap();
+    let evolved_preview = crate::release_reconcile::preview_release(&root, &repo, &evolved).unwrap();
+    let evolved_exception = evolved.exceptions.iter().find(|exception| exception.task_id == assembly_id).map(|exception| &exception.code);
+    assert!(evolved_exception.is_none() && matches!(evolved_preview.get(assembly_id), Some(CassyMergeClose::AlreadyClosed)),
+        "edited imported paths: inventory: {evolved_exception:?}; preview: {:?}", evolved_preview.get(assembly_id));
+    git(&["checkout", "-q", "main"]);
     std::fs::write(&ledger, format!("{body}\nUnrecorded amendment.\n")).unwrap();
     assert!(prepare_release_tag_receipt(&root, &["cas-superseded".into()], &tag).is_err());
     assert_eq!(serde_json::to_value(&preview).unwrap(), serde_json::to_value(&result.members).unwrap());

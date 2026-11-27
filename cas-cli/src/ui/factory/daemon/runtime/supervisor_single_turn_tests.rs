@@ -1284,9 +1284,9 @@ async fn cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle()
                 // Native observation selects live Active/Stale registrations.
                 supervisor.status = cas_types::AgentStatus::Active;
                 let account = root.path().canonicalize().unwrap().join("codex-account");
-                supervisor.metadata.insert("worker_cli".into(), "codex".into());
-                supervisor.metadata.insert("worker_account_dir".into(), account.display().to_string());
-                supervisor.metadata.insert("clone_path".into(), root.path().display().to_string());
+                supervisor.cc_session_id = Some("019f84af-3121-7950-ba14-b01db2daa152".into());
+                supervisor.metadata.insert("supervisor_cli".into(), "codex".into());
+                supervisor.metadata.insert("supervisor_account_dir".into(), account.display().to_string());
                 agents.register(&supervisor).unwrap();
                 let path = account.join("sessions/2026/11/02/rollout-aa152.jsonl");
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1310,7 +1310,7 @@ async fn cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle()
                 std::fs::write(&path, transcript).unwrap();
                 assert_eq!(crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
                     &path, cas_mux::SupervisorCli::Codex), busy);
-                assert_eq!(crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(&cas, &supervisor), Some(path));
+                assert_eq!(super::supervisor_commands::supervisor_transcript(&cas, &daemon.session_name, &name, cas_mux::SupervisorCli::Codex), Some(path));
                 daemon.app.refresh_data().unwrap();
                 // Silence alone must not turn an unresolved native tool into idle.
                 let body = if oversized { BODY.replace("review the lane.", &"x".repeat(6000)) } else { BODY.into() };

@@ -1022,8 +1022,6 @@ struct CodexHandlerSpec {
     timeout: u64,
 }
 
-/// The Cassy handlers for `layer`. Both layers carry the tool guards; only the
-/// user layer adds SessionStart/Stop and the MCP policy matcher (cas-d0fe).
 fn codex_handler_specs(layer: CodexHookLayer) -> Vec<CodexHandlerSpec> {
     let mut specs = vec![
         CodexHandlerSpec {
@@ -1040,6 +1038,12 @@ fn codex_handler_specs(layer: CodexHookLayer) -> Vec<CodexHandlerSpec> {
         },
     ];
     if layer == CodexHookLayer::User {
+        specs.push(CodexHandlerSpec {
+            event: "UserPromptSubmit",
+            command: "CAS_HOOK_HARNESS=codex cas hook UserPromptSubmit",
+            matcher: None,
+            timeout: 3,
+        });
         specs.push(CodexHandlerSpec {
             event: "SessionStart",
             command: "CAS_HOOK_HARNESS=codex cas hook SessionStart",
@@ -1143,6 +1147,7 @@ fn codex_hook_matcher(event: &str, layer: CodexHookLayer) -> String {
             crate::config::hooks::SLACK_POLICY_MATCHER
         ),
         ("PreToolUse", CodexHookLayer::Project) => "^(Bash|apply_patch)$".to_string(),
+        ("PostToolUse", _) => "^Bash$|^mcp__cs__".to_string(),
         _ => "^Bash$".to_string(),
     }
 }

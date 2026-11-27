@@ -120,9 +120,10 @@ fn merge_lock(root: &Path) -> crate::worktree::target_lock::DeliveryTargetLock {
 #[test]
 fn codex_window_pressure_saves_handoff_then_requests_supervisor_restart() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    for (window, cap, threshold) in [(200_000, 300_000, 160_000), (475_000, 300_000, 300_000)] {
+    for (window, cap, threshold) in [(200_000, Some(300_000), 160_000), (475_000, None, 300_000)] {
         let mut lane = Lane::new();
-        std::fs::write(lane.root.join("config.toml"), format!("[factory]\ncommander_mirror_enabled=false\nsupervisor_wake_input_budget={cap}\n")).unwrap();
+        let cap = cap.map(|cap| format!("supervisor_wake_input_budget={cap}\n")).unwrap_or_default();
+        std::fs::write(lane.root.join("config.toml"), format!("[factory]\ncommander_mirror_enabled=false\n{cap}")).unwrap();
         let native = "019f84af-3121-7950-ba14-b01db2daa152";
         lane.agents[0].cc_session_id = Some(native.into());
         lane.agents[0].metadata.insert("supervisor_cli".into(), "codex".into());

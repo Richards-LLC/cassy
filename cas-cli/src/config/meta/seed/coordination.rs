@@ -304,7 +304,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
 
     registry.register(ConfigMeta {
         key: "factory.supervisor_wake_input_budget", section: "factory", name: "Supervisor Latest-call Input Cap",
-        description: "Latest-call input cap for idle-boundary supervisor clearing, also capped at 80% of the harness-reported model window when available. 0 disables.", value_type: ConfigType::Int, default: "1000000",
+        description: "Latest-call input cap for idle-boundary supervisor clearing, also capped at 80% of the harness-reported model window when available. 0 disables.", value_type: ConfigType::Int, default: "300000",
         constraint: Constraint::Range(0, 100_000_000), advanced: false, requires_feature: None,
         keywords: &["factory", "supervisor", "context", "handoff", "clear", "cost"],
         use_cases: &["Clear supervisor context under measured prompt pressure without counting repeated cache reads"],

@@ -826,10 +826,18 @@ fn read_wake_inputs(
             );
             continue;
         };
-        let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(agent);
-        let path = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
-            cas_dir, agent,
-        )
+        let is_supervisor = agent.role == cas_types::AgentRole::Supervisor;
+        let cli = if is_supervisor {
+            agent.metadata.get("supervisor_cli").and_then(|value| value.parse().ok()).unwrap_or(cas_mux::SupervisorCli::Claude)
+        } else {
+            crate::mcp::tools::service::factory_ops::worker_cli_from_agent(agent)
+        };
+        let path = if is_supervisor {
+            agent.factory_session.as_deref().and_then(|session|
+                super::supervisor_commands::supervisor_transcript(cas_dir, session, name, cli))
+        } else {
+            crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(cas_dir, agent)
+        }
         .filter(|path| path.exists());
         let latest = path
             .as_ref()

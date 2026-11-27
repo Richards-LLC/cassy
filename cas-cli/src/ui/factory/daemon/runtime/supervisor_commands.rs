@@ -426,6 +426,12 @@ pub(super) fn supervisor_transcript(cas_dir: &std::path::Path, session: &str, su
         (agent.name == supervisor || agent.id == supervisor)
             && agent.role == cas_types::AgentRole::Supervisor
             && agent.factory_session.as_deref() == Some(session))?;
+    if cli == cas_mux::SupervisorCli::Codex
+        && agent.cc_session_id.as_deref().is_some_and(|id| id.starts_with("codex-"))
+    {
+        let queue = crate::store::open_prompt_queue_store(cas_dir).ok()?;
+        return super::commander_mirror::unbound_codex_supervisor_rollout(cas_dir.parent()?, queue.as_ref(), session, &agent);
+    }
     if cli == cas_mux::SupervisorCli::Claude
         && let Some(account) = agent.metadata.get("supervisor_account_dir")
     {

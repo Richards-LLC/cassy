@@ -59,6 +59,7 @@ enum Phase {
         dir: PathBuf,
         before: BTreeSet<PathBuf>,
     },
+    RestartQueued { queued_at: DateTime<Utc> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -98,6 +99,7 @@ pub(crate) enum Step {
     Deferred(Vec<String>),
     HandoffSaved(String),
     ClearQueued(i64),
+    RestartQueued,
     Resumed(String),
 }
 
@@ -496,7 +498,8 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
                 }
                 return Ok(Step::Nothing);
             }
-            if crate::factory_context_reset::context_reset_command(turn.cli).is_none() {
+            if turn.cli != cas_mux::SupervisorCli::Codex
+                && crate::factory_context_reset::context_reset_command(turn.cli).is_none() {
                 return Ok(Step::Nothing);
             }
             State {
@@ -522,7 +525,7 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
             return Ok(Step::Nothing);
         }
     }
-    if matches!(state.phase, Phase::ClearQueued { .. }) {
+    if matches!(state.phase, Phase::ClearQueued { .. } | Phase::RestartQueued { .. }) {
         return Ok(Step::Nothing);
     }
     let mut blockers = idle_blockers(root, queue, turn.agent, turn.factory_session);
@@ -567,6 +570,12 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
         }
         Phase::AwaitingJudgement { handoff_id, saved_at, .. } => {
             let handoff_id = merge_judgement(root, &handoff_id, saved_at, turn.agent)?;
+            if turn.cli == cas_mux::SupervisorCli::Codex {
+                crate::factory_daemon_health::request_supervisor_restart(root, turn.factory_session, SOURCE)?;
+                state.phase = Phase::RestartQueued { queued_at: Utc::now() };
+                save(root, &state)?;
+                return Ok(Step::RestartQueued);
+            }
             let dir = turn.transcript.parent().context("transcript has no directory")?.to_path_buf();
             let before = crate::factory_context_reset::snapshot_transcripts(std::slice::from_ref(&dir));
             let control_id = queue
@@ -587,7 +596,7 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
                 agent = %turn.agent.name, control_id, trigger_tokens = state.trigger_tokens, "automatic supervisor context clear queued");
             Ok(Step::ClearQueued(control_id))
         }
-        Phase::ClearQueued { .. } => Ok(Step::Nothing),
+        Phase::ClearQueued { .. } | Phase::RestartQueued { .. } => Ok(Step::Nothing),
     }
 }
 
@@ -595,6 +604,12 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
 /// its handoff. Called on every scan; cheap when no clear is queued.
 pub(crate) fn poll(root: &Path, queue: &dyn PromptQueueStore, agent: &Agent, factory_session: &str) -> anyhow::Result<Step> {
     let Some(state) = load(root, &agent.id)? else { return Ok(Step::Nothing) };
+    if let Phase::RestartQueued { queued_at } = state.phase {
+        if Utc::now() - queued_at > Duration::seconds(crate::factory_daemon_health::SUPERVISOR_RESTART_REQUEST_TTL_SECS) {
+            clear_state(root, &agent.id);
+        }
+        return Ok(Step::Nothing);
+    }
     let Phase::ClearQueued { handoff_id, queued_at, dir, before } = &state.phase else {
         return Ok(Step::Nothing);
     };

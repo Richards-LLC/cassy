@@ -1,3 +1,5 @@
+## Core Concepts
+
 Factory worker and automatic verifier launches omit optional context they do not
 need for their assignment. Codex disables plugin, app and native memory context;
 automatic Codex verifiers also omit the native skill catalog. Claude skips its

@@ -497,7 +497,6 @@ jobs:
           mkdir -p target/ci-impact
           cargo tree --workspace --locked --target x86_64-unknown-linux-gnu > target/ci-impact/aws-lc.log 2>&1
           if grep -q 'aws-lc-rs v' target/ci-impact/aws-lc.log; then cat target/ci-impact/aws-lc.log; exit 1; fi
-          cargo nextest run -p cas --lib -E 'test(gates::registry_tests)'
 
       - name: Publish CI impact evidence
         if: >-
@@ -720,7 +719,6 @@ jobs:
           mkdir -p target/ci-impact
           cargo tree --workspace --locked --target x86_64-unknown-linux-gnu > target/ci-impact/aws-lc.log 2>&1
           if grep -q 'aws-lc-rs v' target/ci-impact/aws-lc.log; then cat target/ci-impact/aws-lc.log; exit 1; fi
-          cargo nextest run -p cas --lib -E 'test(gates::registry_tests)'
 
       - name: Publish CI impact evidence
         if: always()

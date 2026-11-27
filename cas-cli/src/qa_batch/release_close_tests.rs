@@ -404,13 +404,20 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     stale_owner.deliverables.premerge_approval.as_mut().unwrap().delivery_cycle += 1;
     tasks.update(&stale_owner).unwrap();
     assert_eq!(prove_cohort(&cohort, &scope.final_release_sha), Err(ReleaseInventoryCode::UnprovenContent));
+    let owner_tree = format!("{}^{{tree}}", anchors[folded_owner]);
+    let unrelated_anchor = git(&["commit-tree", &owner_tree, "-p", &import_base, "-m", "unrelated reviewed fragment source"]);
+    let mut unrelated_owner = owner.clone();
+    unrelated_owner.deliverables.factory_branch_anchor = Some(unrelated_anchor.clone());
+    unrelated_owner.deliverables.premerge_approval.as_mut().unwrap().approved_anchor = unrelated_anchor;
+    tasks.update(&unrelated_owner).unwrap();
+    assert_eq!(prove_cohort(&cohort, &scope.final_release_sha), Err(ReleaseInventoryCode::UnprovenContent));
     tasks.update(&owner).unwrap();
 
     let first_edge = git(&["rev-parse", &format!("{cohort_anchor}^1")]);
     let last_source = cohort.deliverables.authorized_merge_sources[1].commit.as_str();
     let imported_parent = cohort.deliverables.authorized_merge_sources[0].commit.as_str();
     let empty_source = git(&["commit-tree", &format!("{import_base}^{{tree}}"), "-p", imported_parent, "-m", "remove the first import"]);
-    for (tree, side) in [(format!("{published}^{{tree}}"), last_source), (format!("{cohort_start}^{{tree}}"), empty_source.as_str())] {
+    for (tree, side) in [(format!("{}^{{tree}}", scope.final_release_sha), last_source), (format!("{cohort_start}^{{tree}}"), empty_source.as_str())] {
         let head = git(&["commit-tree", &tree, "-p", &first_edge, "-p", side, "-m", "test assembly edge"]);
         let mut candidate = cohort.clone();
         candidate.deliverables.factory_branch_anchor = Some(head.clone());

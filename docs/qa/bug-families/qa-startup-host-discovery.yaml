@@ -1,0 +1,6 @@
+title: QA startup host discovery containment
+statement: Validated QA startup leaves the inherited host registry and maintenance metadata unchanged; malformed context and shared stores outside the sandbox refuse startup. Ordinary local registration is preserved.
+found: Actual serve --sandbox MCP initialize succeeded while a temporary inherited registry gained a row and host sweep metadata was created (GH 2580).
+tasks: [cas-6893]
+fixed_by: [cas-6893]
+journeys: [HUB-J26]

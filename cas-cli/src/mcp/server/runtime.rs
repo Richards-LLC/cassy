@@ -150,7 +150,8 @@ pub(super) async fn prepare_service(cas_root: std::path::PathBuf) -> anyhow::Res
     use crate::mcp::daemon::{EmbeddedDaemonConfig, spawn_daemon};
     use crate::mcp::tools::CasService;
 
-    let cloud_sync_allowed = qa_sandbox().is_none()
+    let sandbox = qa_sandbox(&cas_root)?;
+    let cloud_sync_allowed = sandbox.is_none()
         && match crate::store::detect::guard_implicit_worktree_write(&cas_root, "start cloud sync") {
             Ok(()) => true,
             Err(error) => {
@@ -187,36 +188,28 @@ pub(super) async fn prepare_service(cas_root: std::path::PathBuf) -> anyhow::Res
     crate::qa_post_release::spawn_runner(cas_root.clone());
     crate::fast_lane_walk::spawn_runner(cas_root.clone());
 
-    // Register this repo in the host-scoped known_repos registry. Fires
-    // every time `cas serve` starts in a directory with `.cas/`, catching
-    // repos that pre-date the `cas init` registration hook. Non-fatal:
-    // failure here must not block MCP serve startup.
-    if let Some(repo_root) = cas_root.parent() {
-        crate::store::known_repos::register_repo(repo_root);
-    }
-
-    // Opportunistic cross-repo sweep — debounced via
-    // `~/.cas/last_global_sweep`. Runs on a detached blocking task so MCP
-    // startup is NEVER delayed. Any panic is caught and logged; any error
-    // is warn-logged. This is Unit 3's keystone wiring (EPIC cas-7c88).
-    let sweep_cas_config = crate::config::Config::load(&cas_root).unwrap_or_default();
-    tokio::task::spawn_blocking(move || {
-        let wt_cfg = sweep_cas_config.worktrees().clone();
-        match crate::worktree::sweep::opportunistic::run_if_due(&wt_cfg) {
-            Ok(Some(summary)) => {
-                eprintln!(
-                    "[Cassy] opportunistic sweep: visited {} repo(s), reclaimed {}, salvaged {}",
-                    summary.repos_visited, summary.reclaimed, summary.salvaged,
-                );
-            }
-            Ok(None) => {
-                // Skipped by debounce — no user-visible output.
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "opportunistic sweep failed");
-            }
+    if sandbox.is_none() {
+        if let Some(repo_root) = cas_root.parent() {
+            crate::store::known_repos::register_repo(repo_root);
         }
-    });
+
+        let sweep_cas_config = crate::config::Config::load(&cas_root).unwrap_or_default();
+        tokio::task::spawn_blocking(move || {
+            let wt_cfg = sweep_cas_config.worktrees().clone();
+            match crate::worktree::sweep::opportunistic::run_if_due(&wt_cfg) {
+                Ok(Some(summary)) => {
+                    eprintln!(
+                        "[Cassy] opportunistic sweep: visited {} repo(s), reclaimed {}, salvaged {}",
+                        summary.repos_visited, summary.reclaimed, summary.salvaged,
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "opportunistic sweep failed");
+                }
+            }
+        });
+    }
 
     // Run startup cloud pull in a background task with a short timeout
     // so a slow/unreachable cloud endpoint never blocks MCP server startup.
@@ -845,22 +838,24 @@ fn install_serve_panic_hook(cas_root: &std::path::Path) {
 /// Logs the chosen resolution strategy at DEBUG level for diagnosability.
 pub(crate) fn resolve_mcp_serve_root() -> anyhow::Result<std::path::PathBuf> {
     let root = resolve_unsandboxed_root()?;
-    enforce_qa_sandbox(&root, qa_sandbox().as_deref())?;
+    qa_sandbox(&root)?;
     Ok(root)
 }
 
 /// `cas serve --sandbox <dir>` pins this for the server and its backends (cas-3271).
 pub(crate) const QA_SANDBOX_ENV: &str = "CAS_QA_SANDBOX";
 
-pub(crate) fn qa_sandbox() -> Option<std::path::PathBuf> {
-    std::env::var_os(QA_SANDBOX_ENV).filter(|dir| !dir.is_empty()).map(Into::into)
+pub(crate) fn qa_sandbox(root: &std::path::Path) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let sandbox = std::env::var_os(QA_SANDBOX_ENV).map(std::path::PathBuf::from);
+    enforce_qa_sandbox(root, sandbox.as_deref())?;
+    sandbox.map(|path| path.canonicalize().map_err(Into::into)).transpose()
 }
 
 /// A QA sandbox serves only a store under its scratch directory, so an inherited
 /// live `CAS_ROOT` is refused before anything is opened, registered or synced.
 pub(crate) fn enforce_qa_sandbox(root: &std::path::Path, sandbox: Option<&std::path::Path>) -> anyhow::Result<()> {
     let Some(sandbox) = sandbox else { return Ok(()) };
-    let inside = sandbox.canonicalize().ok().zip(root.canonicalize().ok())
+    let inside = sandbox.canonicalize().ok().filter(|path| path.is_dir()).zip(root.canonicalize().ok())
         .is_some_and(|(sandbox, root)| root.starts_with(sandbox));
     if inside {
         return Ok(());
@@ -2282,15 +2277,41 @@ url = "https://context7.invalid/mcp"
                 (super::QA_SANDBOX_ENV, Some(&sandbox)),
             ]);
             assert!(resolve_mcp_serve_root().is_err());
-            assert!(super::qa_sandbox().is_some());
+            assert!(super::qa_sandbox(&live.join(".cas")).is_err());
         }
         let own = scratch.join(".cas").to_string_lossy().into_owned();
+        let missing = scratch.join("missing").to_string_lossy().into_owned();
+        let file = scratch.join("file");
+        std::fs::write(&file, b"not a sandbox directory").unwrap();
+        let file = file.to_string_lossy().into_owned();
+        for (marker, allowed) in [(&sandbox, true), (&String::new(), false), (&missing, false), (&file, false)] {
+            let _env = TestEnvGuard::with_optional_vars(&[
+                ("CLAUDE_PROJECT_DIR", None),
+                ("CAS_ROOT", Some(&own)),
+                (super::QA_SANDBOX_ENV, Some(marker)),
+            ]);
+            assert_eq!(resolve_mcp_serve_root().is_ok(), allowed);
+        }
+        #[cfg(unix)]
+        {
+            let escaped = scratch.join("escaped");
+            std::os::unix::fs::symlink(live.join(".cas"), &escaped).unwrap();
+            assert!(super::enforce_qa_sandbox(&escaped, Some(&scratch)).is_err());
+        }
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(cwd).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&live, &["init", "--quiet"]);
+        git(&live, &["-c", "user.name=QA", "-c", "user.email=qa@example.invalid", "commit", "--allow-empty", "-m", "fixture"]);
+        let worktree = scratch.join("linked");
+        git(&live, &["worktree", "add", "--detach", worktree.to_str().unwrap()]);
         let _env = TestEnvGuard::with_optional_vars(&[
-            ("CLAUDE_PROJECT_DIR", None),
-            ("CAS_ROOT", Some(&own)),
+            ("CLAUDE_PROJECT_DIR", Some(worktree.to_str().unwrap())),
+            ("CAS_ROOT", None),
             (super::QA_SANDBOX_ENV, Some(&sandbox)),
         ]);
-        assert_eq!(resolve_mcp_serve_root().unwrap(), scratch.join(".cas"));
+        assert!(resolve_mcp_serve_root().is_err());
     }
 
     /// When CLAUDE_PROJECT_DIR is not set, the function must still work via the

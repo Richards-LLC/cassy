@@ -93,22 +93,20 @@ fn watchdog_abort_message(budget: Duration) -> String {
     )
 }
 
-/// Record a successfully initialized repository in the host registry.
-///
-/// Keep this host-scoped side effect at the CLI boundary. `init_cas_dir` is
-/// also a public fixture primitive used by integration tests; making that
-/// low-level helper write `~/.cas/cas.db` polluted developer registries and
-/// created cross-test lock contention because integration-test dependencies
-/// are compiled without `cfg(test)`.
-fn register_initialized_repo(cwd: &Path) {
+fn register_initialized_repo(cwd: &Path, sandbox: Option<&Path>) -> anyhow::Result<()> {
+    crate::mcp::enforce_qa_sandbox(&cwd.join(".cas"), sandbox)?;
+    if sandbox.is_some() {
+        return Ok(());
+    }
     if let Err(error) = crate::store::known_repos::ensure_host_schema() {
         warn!(
             error = %error,
             "failed to install host known_repos schema (non-fatal)",
         );
-        return;
+        return Ok(());
     }
     crate::store::known_repos::register_repo(cwd);
+    Ok(())
 }
 
 /// Spawn a watchdog thread that aborts the process if init runs longer than
@@ -427,6 +425,10 @@ impl WizardConfig {
 // gate-audit[allow_non_project]: selector Chooses global setup outside a project; no factory request or permission is waived.
 pub fn execute(args: &InitArgs, cli: &Cli) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
+    let sandbox = crate::mcp::qa_sandbox(&cwd)?;
+    if cwd.join(".cas").exists() {
+        crate::mcp::enforce_qa_sandbox(&cwd.join(".cas"), sandbox.as_deref())?;
+    }
 
     // Ben #8b: refuse to litter $HOME (or /) with project scaffolding without
     // saying so first. Interactive runs get a confirmation; non-interactive
@@ -467,13 +469,13 @@ pub fn execute(args: &InitArgs, cli: &Cli) -> anyhow::Result<()> {
 
     // JSON mode: non-interactive, use defaults
     let result = if cli.json {
-        execute_json(&cwd, args)
+        execute_json(&cwd, args, sandbox.as_deref())
     } else if args.yes {
         // Yes mode: non-interactive, use defaults with text output
-        execute_defaults(&cwd, args)
+        execute_defaults(&cwd, args, sandbox.as_deref())
     } else {
         // Interactive wizard
-        run_wizard(&cwd, args)
+        run_wizard(&cwd, args, sandbox.as_deref())
     };
 
     match &result {
@@ -499,7 +501,7 @@ pub fn execute(args: &InitArgs, cli: &Cli) -> anyhow::Result<()> {
 // ============================================================================
 
 // gate-audit[force]: selector Confirms replacing an existing local initialization; security policy is unchanged.
-fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
+fn execute_json(cwd: &Path, args: &InitArgs, sandbox: Option<&Path>) -> anyhow::Result<()> {
     let cas_dir_path = cwd.join(".cas");
 
     // cas-563f: only a .cas with its store counts as initialized. A .cas
@@ -515,7 +517,7 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     let keep_config = keeps_existing_config(&cas_dir_path);
 
     let cas_dir = init_cas_dir(cwd)?;
-    register_initialized_repo(cwd);
+    register_initialized_repo(cwd, sandbox)?;
     let config = WizardConfig::with_detected_agents(cwd);
     let config_data = config.to_config();
     // Provisioning can fail after the store is created. Persist the full new
@@ -613,7 +615,7 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
 // ============================================================================
 
 // gate-audit[force]: selector Confirms replacing an existing local initialization; security policy is unchanged.
-fn execute_defaults(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
+fn execute_defaults(cwd: &Path, args: &InitArgs, sandbox: Option<&Path>) -> anyhow::Result<()> {
     let cas_dir_path = cwd.join(".cas");
 
     // cas-563f: a .cas without its store is not initialized yet (see execute_json).
@@ -637,7 +639,7 @@ fn execute_defaults(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
 
     let keep_config = keeps_existing_config(&cas_dir_path);
     let cas_dir = init_cas_dir(cwd)?;
-    register_initialized_repo(cwd);
+    register_initialized_repo(cwd, sandbox)?;
 
     // Apply with animation
     let config = WizardConfig::with_detected_agents(cwd);
@@ -676,7 +678,7 @@ fn integration_flags_from(args: &InitArgs) -> super::integrate::integrations::In
 // ============================================================================
 
 // gate-audit[force]: selector Confirms replacing an existing local initialization; security policy is unchanged.
-fn run_wizard(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
+fn run_wizard(cwd: &Path, args: &InitArgs, sandbox: Option<&Path>) -> anyhow::Result<()> {
     let cas_dir_path = cwd.join(".cas");
 
     // Welcome
@@ -696,7 +698,7 @@ fn run_wizard(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
             // cas-563f: keeping the configuration still creates a missing store.
             if !cas_store_present(&cas_dir_path) {
                 init_cas_dir(cwd)?;
-                register_initialized_repo(cwd);
+                register_initialized_repo(cwd, sandbox)?;
                 println!("\n  Created the Cassy store and kept the existing configuration.");
                 return Ok(());
             }
@@ -712,7 +714,7 @@ fn run_wizard(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
 
     // Initialize .cas directory
     let cas_dir = init_cas_dir(cwd)?;
-    register_initialized_repo(cwd);
+    register_initialized_repo(cwd, sandbox)?;
     let wizard_config = WizardConfig::with_detected_agents(cwd);
 
     // Confirmation with file summary

@@ -872,6 +872,8 @@ fn long_sandbox_serve_discovers_hook_session_for_reminders_and_handoff() {
 
 #[test]
 fn test_sandbox_init_and_serve_never_touch_inherited_host_known_repos() {
+    let protected_home = std::env::var_os("CAS_TEST_PROTECTED_HOME")
+        .or_else(|| std::env::var_os("HOME")).unwrap();
     let inherited = tempfile::tempdir().expect("create inherited host sentinel");
     let host_home = inherited.path().join("home");
     let host_xdg = inherited.path().join("xdg-config");
@@ -984,6 +986,61 @@ fn test_sandbox_init_and_serve_never_touch_inherited_host_known_repos() {
         )
         .unwrap();
     assert_eq!(host_row, ("HOST-BEFORE".into(), "HOST-BEFORE".into(), 41));
+
+
+    let mut serve = sandbox.command();
+    assert_command_is_sandboxed(&serve, &sandbox);
+    let child = serve
+        .env("CAS_TEST_PROTECTED_HOME", &protected_home)
+        .env("HOME", &host_home)
+        .env("XDG_CONFIG_HOME", &host_xdg)
+        .arg("serve").arg("--sandbox").arg(sandbox.path())
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().unwrap();
+    let mut client = McpTestClient::from_child(child, false, None);
+    let initialized = client.initialize();
+    assert!(initialized.error.is_none(), "{initialized:?}");
+    client.child.kill().unwrap();
+    client.child.wait().unwrap();
+    assert!(std::fs::read(&host_db).unwrap() == host_db_before, "QA startup changed inherited registry bytes");
+    assert!(!host_cas.join("last_global_sweep").exists());
+    assert!(!host_cas.join("logs/global-sweep.log").exists());
+    assert_eq!(std::fs::read(&host_config_sentinel).unwrap(), host_config_before);
+
+    for qa in [false, true] {
+        let mut daemon = sandbox.command();
+        daemon.env("CAS_TEST_PROTECTED_HOME", &protected_home);
+        daemon.args(["factory", "daemon", "--session", "qa-host", "--workers", "1",
+            "--worker-spec-json", "{", "--cwd"]).arg(sandbox.path());
+        if qa {
+            daemon.env("HOME", &host_home).env("CAS_QA_SANDBOX", sandbox.path());
+        }
+        let output = daemon.output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+    }
+    let touches_after_daemon: i64 = rusqlite::Connection::open(&sandbox_host_db).unwrap()
+        .query_row("SELECT touch_count FROM known_repos", [], |row| row.get(0)).unwrap();
+    assert!(touches_after_daemon > touches_after_serve);
+    assert!(std::fs::read(&host_db).unwrap() == host_db_before);
+    assert!(!host_cas.join("last_global_sweep").exists());
+    assert!(!host_cas.join("logs/global-sweep.log").exists());
+
+    let project = sandbox.path().join("qa-init");
+    std::fs::create_dir(&project).unwrap();
+    let init = sandbox.command()
+        .env("CAS_TEST_PROTECTED_HOME", &protected_home)
+        .current_dir(&project)
+        .env("HOME", &host_home)
+        .env("XDG_CONFIG_HOME", &host_xdg)
+        .env("CAS_ROOT", project.join(".cas"))
+        .env("CAS_QA_SANDBOX", sandbox.path())
+        .env("CODEX_HOME", sandbox.home_dir().join(".codex"))
+        .args(["init", "--yes", "--no-integrations"]).output().unwrap();
+    assert!(init.status.success(), "{}", String::from_utf8_lossy(&init.stderr));
+    assert!(project.join(".cas/cas.db").is_file());
+    assert!(std::fs::read(&host_db).unwrap() == host_db_before, "QA startup changed inherited registry bytes");
+    assert!(!host_cas.join("last_global_sweep").exists());
+    assert!(!host_cas.join("logs/global-sweep.log").exists());
 }
 
 #[test]

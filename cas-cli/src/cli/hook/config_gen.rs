@@ -1278,7 +1278,7 @@ mod codex_provision_tests {
     }
 
     #[test]
-    fn codex_hooks_deliver_five_pending_messages_then_mid_turn_mail() {
+    fn codex_hooks_drain_ten_then_two_pending_messages_and_mid_turn_mail() {
         use cas_core::hooks::types::{HookInput, HookSpecificOutput};
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let project = TempDir::new().unwrap();
@@ -1292,7 +1292,7 @@ mod codex_provision_tests {
         provision_codex_user_config(&config).unwrap();
         let hooks: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(config.join("hooks.json")).unwrap()).unwrap();
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
-        let bodies: Vec<_> = (0..5).map(|i| format!("payload-{i}")).collect();
+        let bodies: Vec<_> = (0..12).map(|i| format!("payload-{i:02}")).collect();
         let ids: Vec<_> = bodies.iter().map(|body| queue.enqueue_with_session("worker", "supervisor", body, "codex-mail").unwrap()).collect();
         assert_eq!(hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"], "CAS_HOOK_HARNESS=codex cas hook UserPromptSubmit");
         let mut input = HookInput {
@@ -1302,8 +1302,14 @@ mod codex_provision_tests {
         };
         let output = crate::hooks::handle_hook("UserPromptSubmit", input.clone()).unwrap();
         let Some(HookSpecificOutput::UserPromptSubmit { additional_context }) = output.hook_specific_output else { panic!("missing turn context") };
-        for (id, body) in ids.iter().zip(&bodies) {
-            assert_eq!(additional_context.matches(body).count(), 1);
+        for (index, (id, body)) in ids.iter().zip(&bodies).enumerate() {
+            assert_eq!(additional_context.matches(body).count(), usize::from(index < 10));
+            assert_eq!(queue.message_delivery_report(*id).unwrap().unwrap().delivered_at.is_some(), index < 10);
+        }
+        let output = crate::hooks::handle_hook("UserPromptSubmit", input.clone()).unwrap();
+        let Some(HookSpecificOutput::UserPromptSubmit { additional_context }) = output.hook_specific_output else { panic!("missing next turn context") };
+        for (index, (id, body)) in ids.iter().zip(&bodies).enumerate() {
+            assert_eq!(additional_context.matches(body).count(), usize::from(index >= 10));
             assert!(queue.message_delivery_report(*id).unwrap().unwrap().delivered_at.is_some());
         }
         let tool = "mcp__cs__coordination";

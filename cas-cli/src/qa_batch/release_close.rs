@@ -84,7 +84,7 @@ impl ReleaseClose {
             return Ok(false);
         }
         let report_gate = report_proof::read_report_verdict(&conn, true, task, task)?;
-        if !matches!(report_gate, report_proof::ReportGate::Exempt) && !report_gate.approves(&dispatch.id, &verdict.id) {
+        if !report_gate.approves(&dispatch.id, &verdict.id) {
             return Ok(false);
         }
         let existed_at_review = |artifact: &cas_store::PublishedArtifact| {

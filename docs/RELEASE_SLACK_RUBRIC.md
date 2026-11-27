@@ -303,14 +303,11 @@ returned ID. Each generated `## POSTED` row includes `message_id=…`,
 `part_ids=[…]` and the returned permalink. The same ordered-list requirement
 applies to diary replies recorded manually.
 
-`release-report.receipt` must additionally retain `PDF_MESSAGE_ID` and
-`PDF_MESSAGE_PERMALINK`, separate from `PDF_FILE_ID` and `PDF_FILE_PERMALINK`.
-The message permalink must open the upload message in its Slack thread and
-retain the exact URL returned by the upload response, including thread context.
-The report is incomplete without its upload message identity. The receipts
-stage refreshes `## POSTED` from the saved receipts, adding the report uploads'
-message IDs, message permalinks and file IDs after delivery. Report uploads
-are separate from the four announcement bodies.
+`release-report.receipt` retains each upload's message ID and permalink
+separately from its file ID and permalink. Keep each returned message URL
+including thread context, or record `unavailable` if Violet supplies none.
+When refreshing `## POSTED` from the saved receipts, include the returned report
+upload identities separately from the four announcement bodies.
 
 Preserve incomplete receipts and reconcile missing IDs through a bounded
 Violet read; do not repeat publication to repair evidence. These rules make

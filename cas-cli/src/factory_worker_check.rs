@@ -126,22 +126,6 @@ struct CheckReceipt {
     test: Option<TestReceipt>,
 }
 
-#[derive(Serialize, Deserialize)]
-enum RedFirstFailure {
-    Rust { package: String, harness: Option<String>, names: BTreeSet<String> },
-    JavaScript { runner: String, tests: BTreeSet<stability::Identity> },
-    Compile { packages: BTreeSet<String> },
-}
-
-#[derive(Serialize, Deserialize)]
-struct RedFirstReceipt {
-    head: String,
-    repo: PathBuf,
-    task: String,
-    failure: RedFirstFailure,
-    evidence: String,
-}
-
 impl CheckReceipt {
     fn check_note(&self) -> String {
         format!("check: PASS {} packages={} no_default_features={}",
@@ -308,29 +292,6 @@ fn passing_summary_count(log: &str) -> Result<u64> {
     Ok(count)
 }
 
-fn rust_red_first_failure(test: Option<&TargetedTest>, status: Option<i32>, log: &Path) -> Option<RedFirstFailure> {
-    let log = std::fs::read_to_string(log).ok()?;
-    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").ok()?;
-    let log = ansi.replace_all(&log, "");
-    if test.is_none() && status == Some(101) {
-        let packages = regex::Regex::new(r"(?m)^error: could not compile `([^`]+)`").ok()?
-            .captures_iter(&log).map(|row| row[1].to_owned()).collect::<BTreeSet<_>>();
-        return (!packages.is_empty()).then_some(RedFirstFailure::Compile { packages });
-    }
-    let test = test.filter(|_| status == Some(100))?;
-    let summary = regex::Regex::new(r"(?m)^─+\r?\n([ \t]*Summary +)\[[^\]\r\n]*\] +[1-9][0-9]* tests? run: [^\r\n]+\r?$").ok()?;
-    let mut summaries = summary.captures_iter(&log);
-    let status_width = summaries.next()?[1].len();
-    if summaries.next().is_some() {
-        return None;
-    }
-    let (package, _) = package_selector(&test.package)?;
-    let binary = test.harness.as_ref().map_or_else(|| package.to_string(), |harness| format!("{package}::{harness}"));
-    let names = regex::Regex::new(r"(?m)^([ \t]*(?:FAIL|TIMEOUT|SIG[A-Z]+|ABORT)[ \t]+)\[[^\]\r\n]*\][ \t]+(?:\([ \t]*[0-9]+/[ \t]*[0-9]+\)[ \t]+)?(\S+)[ \t]+(\S+)[ \t]*\r?$").ok()?
-        .captures_iter(&log).filter(|row| row[1].len() == status_width && row[2] == binary && stability::rust::filter_matches(&test.filter, &row[3]))
-        .map(|row| row[3].to_string()).collect::<BTreeSet<_>>();
-    (!names.is_empty()).then(|| RedFirstFailure::Rust { package: test.package.clone(), harness: test.harness.clone(), names })
-}
 
 /// cas-289b: a selected-test log's nextest PASS and Summary lines.
 fn passing_run_lines(log: &str) -> String {
@@ -1221,83 +1182,6 @@ fn receipt_path(cas_root: &Path, repo: &Path, head: &str) -> PathBuf {
         .join(format!("{head}.json"))
 }
 
-impl RedFirstReceipt {
-    fn path(&self, cas_root: &Path) -> PathBuf {
-        let key = hex::encode(Sha256::digest(serde_json::to_vec(&(&self.task, &self.failure)).expect("red failure encodes")));
-        receipt_path(cas_root, &self.repo, &self.head)
-            .with_file_name(format!("{}-red-{key}.json", self.head))
-    }
-}
-
-fn red_first_task(cas_root: &Path, repo: &Path) -> Option<cas_types::Task> {
-    let id = crate::factory_capacity_wait::bound_task(cas_root, repo)?;
-    let task = crate::store::open_task_store(cas_root).ok()?.get(&id).ok()?;
-    (task.execution_note.as_deref() == Some("test-first")).then_some(task)
-}
-
-fn record_red_first_failure(cas_root: &Path, repo: &Path, head: &str, task: &str, failure: RedFirstFailure, evidence: String) -> Result<bool> {
-    if clean_head(repo).ok().as_deref() != Some(head) { return Ok(false) }
-    let record = RedFirstReceipt { head: head.into(), repo: repo.into(), task: task.into(), failure, evidence };
-    let path = record.path(cas_root);
-    let directory = path.parent().context("receipt directory")?;
-    std::fs::create_dir_all(directory)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
-    serde_json::to_writer(temporary.as_file_mut(), &record)?;
-    temporary.persist(&path)?;
-    println!("red-first: FAIL {head} receipt={}", path.display());
-    Ok(true)
-}
-
-impl PassingTests<'_> {
-pub(crate) fn has_red_first_evidence(&self, task: &str, start_base: Option<&str>,
-    ranges: &[(String, String)], delivered: &[stability::Identity]) -> bool {
-    let Ok(repo) = self.repo.canonicalize() else { return false };
-    let mut checkpoints = BTreeSet::new();
-    let parameterized = std::cell::OnceCell::new();
-    for (checkout, entry) in worktree_receipt_entries(self.cas_root, &repo, self.head).filter(|(_, entry)| {
-        entry.file_name().to_str().is_some_and(|name| name.contains("-red-") && name.ends_with(".json"))
-            && entry.file_type().is_ok_and(|kind| kind.is_file())
-    }) {
-        let Some(record) = std::fs::read(entry.path()).ok()
-            .and_then(|bytes| serde_json::from_slice::<RedFirstReceipt>(&bytes).ok()) else { continue };
-        if record.repo != checkout || record.task != task || record.head == self.head || !valid_git_oid(&record.head)
-            || record.evidence.is_empty() || entry.path() != record.path(self.cas_root) { continue; }
-        let at_base = start_base == Some(record.head.as_str()) && receipt_head_is_ancestor(&repo, &record.head, self.head);
-        let matched = self.records().iter().any(|(_, package, test)| {
-            let Some(proof) = test.stability.as_ref().filter(|proof| stability::valid(proof)) else { return false; };
-            if let RedFirstFailure::Rust { package: failed_package, harness, .. } = &record.failure
-                && (proof.runner != "nextest" || &test.harness != harness
-                    || !package.as_deref().is_some_and(|package| same_workspace_package(&repo, package, failed_package)))
-            {
-                return false;
-            }
-            proof.tests.iter().filter(|identity| delivered.contains(identity)).any(|identity| match &record.failure {
-                RedFirstFailure::Rust { package: failed_package, harness, names } => {
-                    if names.contains(&identity.name) { return true; }
-                    names.iter().any(|name| name.strip_prefix(&identity.name)
-                        .is_some_and(|suffix| suffix.starts_with("::")))
-                        && package_selector(failed_package).is_some_and(|(package, _)| {
-                            parameterized.get_or_init(|| stability::rust::parameterized_tests(&repo, self.head, delivered)
-                                .unwrap_or_default()).iter().any(|test| {
-                                &test.identity == identity && test.package == package && &test.harness == harness
-                            })
-                        })
-                }
-                RedFirstFailure::JavaScript { runner, tests } => &proof.runner == runner && tests.iter().any(|failed| identity.selects(failed)),
-                RedFirstFailure::Compile { packages } => at_base && package.as_deref().is_some_and(|package|
-                    packages.iter().any(|failed| same_workspace_package(&repo, package, failed))),
-            })
-        });
-        if matched && at_base { return true; }
-        if matched { checkpoints.insert(record.head); }
-    }
-    !checkpoints.is_empty() && ranges.iter().any(|(base, tip)| {
-        git_output(&repo, &["rev-list", "--first-parent", &format!("{base}..{tip}")])
-            .is_some_and(|commits| commits.lines().any(|commit| checkpoints.contains(commit)))
-    })
-}
-}
-
 fn check_receipt_path(cas_root: &Path, repo: &Path, head: &str, no_default_features: bool) -> PathBuf {
     let path = receipt_path(cas_root, repo, head);
     if no_default_features { path.with_file_name(format!("{head}-no-default-features.json")) } else { path }
@@ -2162,25 +2046,6 @@ pub(crate) fn record_rust_pass_for_tests(
     .expect("write receipt");
 }
 
-#[cfg(test)]
-pub(crate) fn record_rust_failure_for_tests(
-    cas_root: &Path,
-    repo: &Path,
-    head: &str,
-    task: &str,
-    package: &str,
-    name: &str,
-) {
-    let failure = RedFirstFailure::Rust {
-        package: package.into(),
-        harness: None,
-        names: BTreeSet::from([name.into()]),
-    };
-    assert!(record_red_first_failure(
-        cas_root, &repo.canonicalize().unwrap(), head, task, failure, "fixture failure".into(),
-    ).unwrap());
-}
-
 // Shared with parked-cache eviction: a cache cannot be evicted while its
 // capped builder owns the lane, even between process inspection and spawn.
 pub(crate) struct LaneLock {
@@ -2947,11 +2812,7 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
     #[cfg(unix)]
     discard_shared_fingerprints(&target_dir)?;
     let count_file = slots.join(format!("count-{lane_key}"));
-    let red_task = if !crate_run && widened_proof.is_none() && (test.is_some() || args.iter().any(|arg| arg == "--tests")) {
-        red_first_task(&cas_root, &repo).filter(|task| test.is_some() || task.deliverables.factory_branch_start
-            .as_ref().is_some_and(|start| start.base_sha == head))
-    } else { None };
-    let selected_log = if test.is_some() || red_task.is_some() {
+    let selected_log = if test.is_some() {
         // Each attempt keeps its own untouched Cargo output. Keep it beside
         // redirected raw guard evidence, or with receipts for foreground runs.
         let directory = receipt.parent().context("receipt directory")?.join("logs");
@@ -3076,9 +2937,6 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
         command.env("XDG_CONFIG_HOME", directory);
         println!("Worker test environment: provider credentials removed; private XDG_CONFIG_HOME");
     }
-    if let Some(test) = &test && !owned_tests.is_empty() {
-        command = stability::rust::wrap(command, test, &owned_tests, &count_file);
-    }
     let scope_directory = tempfile::tempdir_in(&slots)?;
     let high = crate::factory_build_memory::memory_high(
         config.worker_memory_high_gib,
@@ -3125,13 +2983,7 @@ fn execute_selection_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Pa
             if test.is_some() {
                 stability::rust::restore_passing(&cas_root, &repo, &head, &owned_tests, prior_stability, log.path())?;
             }
-            let recorded = if let Some(task) = red_task
-                && let Some(failure) = rust_red_first_failure(test.as_ref(), status.code(), log.path())
-            {
-                record_red_first_failure(&cas_root, &repo, &head, &task.id, failure,
-                    format!("{}; log={}", worker_check_command(args), log.path().display()))?
-            } else { false };
-            if test.is_some() || recorded {
+            if test.is_some() {
                 log.keep()?;
             }
         }

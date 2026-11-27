@@ -11,7 +11,7 @@ Tests assert behavior or stable machine identifiers such as error codes and rule
 
 Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, `memory`, `search`, `verification`). Call them with your harness's prefix: `mcp__cas__` in Claude Code, `mcp__cs__` in Codex, `cas__` in Grok, `cas_` in OpenCode.
 
-The launch contract carries start, one task at a time, push, close and the 80% checkpoint; this skill adds what it does not.
+The launch contract carries the lifecycle. Green lane CI on the exact tip plus named tests is the proof; missing local receipts and upkeep warn at park.
 
 ## Lifecycle
 

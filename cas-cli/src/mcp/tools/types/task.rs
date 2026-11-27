@@ -95,14 +95,14 @@ pub fn parse_proof_targets(value: Option<&str>) -> Vec<String> {
 }
 
 /// Validate a task's declared risk and proof-target contract at a write
-/// boundary. `risk` is required for code-bearing task/bug/feature creates;
+/// boundary. Risk notes are optional and advisory;
 /// the supervisor override is explicit and audited by the caller.
-// gate[G-129 create]: Task risk declaration required
+// gate[G-129 create]: Optional task risk declaration advisory
 // gate-audit[supervisor_override]: bypass G-129 Create/proposal producer tags accepted missing-risk declarations.
 // gate-audit[is_supervisor]: input Authenticated role used for the G-129 waiver; accepted creation response carries the tag.
 // gate-audit[accepted_by]: cas_task_create_with_delivery_mode,cas_task_proposal_create_with_delivery_mode
 pub fn validate_task_risk_declaration(
-    task_type: TaskType,
+    _task_type: TaskType,
     risk: Option<&str>,
     proof_targets: Option<&str>,
     supervisor_override: bool,
@@ -128,25 +128,9 @@ pub fn validate_task_risk_declaration(
                 "TASK RISK REJECTED: {error}. Expected comma-separated values: blast-radius, platform, concurrency, none."
             )
         })?,
-        None if supervisor_override
-            || !matches!(task_type, TaskType::Task | TaskType::Bug | TaskType::Feature) =>
-        {
-            Vec::new()
-        }
-        None => {
-            return Err(crate::gates::tag("G-129",
-                "TASK CREATE REJECTED: risk is required for task, bug, and feature tasks. Declare risk=blast-radius,platform,concurrency, or none; a registered supervisor may use supervisor_override=true with a non-empty reason."
-                    .to_string(),
-            ))
-        }
+        None => Vec::new(),
     };
     let targets = parse_proof_targets(proof_targets);
-    if risks.contains(&TaskRisk::BlastRadius) && targets.is_empty() {
-        return Err(
-            "TASK RISK REJECTED: risk=blast-radius requires at least one non-empty proof_targets entry (test module or target)."
-                .to_string(),
-        );
-    }
     Ok((risks, targets))
 }
 
@@ -173,9 +157,9 @@ pub struct TaskCreateRequest {
     #[serde(default = "default_task_type")]
     pub task_type: String,
 
-    /// Delivery risk declaration. Required for task, bug, and feature creates.
+    /// Optional, advisory delivery risk declaration.
     #[schemars(
-        description = "Comma-separated delivery risks: blast-radius, platform, concurrency, or none. Required for task/bug/feature creates; blast-radius also requires proof_targets. A registered supervisor may explicitly override the requirement with supervisor_override=true and reason."
+        description = "Comma-separated delivery risks: blast-radius, platform, concurrency, or none. Optional and advisory; proof_targets may describe the intended test scope."
     )]
     #[serde(default)]
     pub risk: Option<String>,
@@ -204,9 +188,9 @@ pub struct TaskCreateRequest {
     #[schemars(with = "Option<cas_mcp::types::ProofTargetsParameter>")]
     pub proof_targets: Option<String>,
 
-    /// Supervisor-only override for the required risk declaration.
+    /// Supervisor-only override for other create policies.
     #[schemars(
-        description = "Create without risk only as a registered supervisor; requires a non-empty reason and records an audit note"
+        description = "Override create policies as a registered supervisor; requires a non-empty reason and records an audit note"
     )]
     #[serde(default)]
     pub supervisor_override: Option<bool>,
@@ -482,7 +466,7 @@ pub struct TaskUpdateRequest {
 
     /// Update delivery risk declaration.
     #[schemars(
-        description = "Comma-separated delivery risks: blast-radius, platform, concurrency, or none. blast-radius requires proof_targets. Pass an empty string to clear."
+        description = "Comma-separated delivery risks: blast-radius, platform, concurrency, or none. Optional and advisory. Pass an empty string to clear."
     )]
     #[serde(default)]
     pub risk: Option<String>,

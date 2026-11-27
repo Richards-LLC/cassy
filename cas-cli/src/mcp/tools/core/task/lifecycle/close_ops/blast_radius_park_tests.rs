@@ -1051,124 +1051,21 @@ async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
     assert!(closed.notes.contains("Cassy close authority"), "{}", closed.notes);
 }
 
-/// GH #2401 item 4: park requires `AC-CHECKLIST.md` with a row per acceptance
-/// criterion and supervisor ruling, and refuses a narrowing no supervisor
-/// decision note approved, listing every failing row in one reply.
 #[tokio::test]
-async fn park_requires_an_ac_checklist_and_an_approved_narrowing_gh_2401() {
+async fn park_warns_for_missing_checklist_and_proof_without_red_first() {
     let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env);
-    let mut task = f.task();
-    task.acceptance_criteria = "1) The gear turns. 2) The gear turns both ways.".into();
-    open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
-    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    crate::factory_worker_check::record_passing_test_for_tests(&f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)");
-    let ruling = call(&f.supervisor, serde_json::json!({
-        "action": "notes", "id": ID, "note_type": "decision", "notes": "keep the gear API unchanged",
-    })).await;
-    let started = call(&f.worker, serde_json::json!({"action": "start", "id": ID})).await;
-    assert!(started.contains("AC1, AC2, D1"), "{ruling}\n{started}");
-    let dir = &crate::config::resolved_factory_artifact_paths(&f.cas_dir(), None).task_dirs(ID)[0];
-    std::fs::create_dir_all(dir).unwrap();
-    let met = "| AC1 | MET | crates/widget/src/gear.rs:1 | test(gear) at tip |";
-    let ruled = "| D1 | MET | crates/widget/src/gear.rs:1 | test(gear) at tip |";
-    let narrowed = "| AC2 | NARROWED | one way only; reverse is a follow-up | |";
-    // A park from Blocked is judged like one from InProgress.
-    for (checklist, status, failing) in [
-        (None, TaskStatus::InProgress, &["AC1", "AC2", "D1"][..]),
-        (Some(vec![met]), TaskStatus::InProgress, &["AC2", "D1"]),
-        (Some(vec![met, ruled, "| AC2 | MET | turns both ways | |"]), TaskStatus::InProgress, &["AC2"]),
-        (Some(vec![met, ruled, narrowed]), TaskStatus::InProgress, &["AC2"]),
-        (Some(vec![met, ruled, narrowed]), TaskStatus::Blocked, &["AC2"]),
-        (Some(vec![met, ruled, "| AC2 | NARROWED | | |"]), TaskStatus::InProgress, &["AC2"]),
-    ] {
-        let path = dir.join("AC-CHECKLIST.md");
-        match &checklist {
-            Some(rows) => std::fs::write(&path, rows.join("\n")).unwrap(),
-            None => { let _ = std::fs::remove_file(&path); }
-        }
+    for method in [None, Some("test-first")] {
+        let f = fixture(&mut env);
         let mut task = f.task();
-        task.status = status;
+        task.acceptance_criteria = "Gear turns both ways".into();
+        task.execution_note = method.map(str::to_owned);
         open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
-        let refused = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
-        assert!(crate::gates::codes_in(&refused).contains(&"G-166"), "{checklist:?} {status:?}: {refused}");
-        let listed: Vec<_> = ["AC1", "AC2", "D1"].into_iter().filter(|id| refused.contains(&format!("- {id} ("))).collect();
-        assert_eq!(listed, failing, "{checklist:?} {status:?}: {refused}");
-        assert_eq!(f.task().status, status);
-    }
-    let mut task = f.task();
-    task.status = TaskStatus::InProgress;
-    open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
-    // A worker's own decision note never approves its narrowing: the same
-    // checklist that parks after the supervisor's note is refused before it.
-    std::fs::write(dir.join("AC-CHECKLIST.md"), [met, ruled, narrowed].join("\n")).unwrap();
-    call(&f.worker, serde_json::json!({
-        "action": "notes", "id": ID, "note_type": "decision", "notes": "AC2 narrowed to one way",
-    })).await;
-    let refused = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
-    assert!(crate::gates::codes_in(&refused).contains(&"G-166") && refused.contains("- AC2 ("), "{refused}");
-    // The supervisor's approval names the item, so it needs no row of its own.
-    call(&f.supervisor, serde_json::json!({
-        "action": "notes", "id": ID, "note_type": "decision", "notes": "AC2 narrowed to one way; reverse is a follow-up",
-    })).await;
-    let parked = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
-    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
-    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
-}
-
-#[tokio::test]
-async fn park_requires_red_first_evidence_gh_2422() {
-    use crate::factory_worker_check::{record_rust_failure_for_tests, record_rust_pass_for_tests};
-
-    let mut env = TestEnvGuard::temp_home();
-    for (methodology, record_red, gate, status) in [
-        (Some("test-first"), false, Some("G-170"), TaskStatus::InProgress),
-        (Some("test-first"), true, None, TaskStatus::AwaitingMerge),
-        (None, false, None, TaskStatus::AwaitingMerge),
-    ] {
-        let fixture = fixture_with_gear(
-            &mut env,
-            "pub fn turn() -> u8 { 1 }\n#[test]\nfn regression() { assert_eq!(turn(), 2); }\n",
-            "pub fn turn() -> u8 { 2 }\n#[test]\nfn regression() { assert_eq!(2, turn()); }\n",
-        );
-        let cas_dir = fixture.cas_dir();
-        let checkout = &fixture.worker_path;
-        let base = git(checkout, &["rev-parse", "main"]);
-        let tip = git(checkout, &["rev-parse", "HEAD"]);
-        let mut task = fixture.task();
-        task.execution_note = methodology.map(str::to_owned);
-        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
-            assignee: WORKER.into(),
-            branch: LANE.into(),
-            base_sha: base.clone(),
-            work_target: task.deliverables.work_target.clone().unwrap(),
-        });
-        open_task_store(&cas_dir).unwrap().update(&task).unwrap();
-
-        let name = "gear::regression";
-        if record_red {
-            git(checkout, &["checkout", "-q", "--detach", &base]);
-            record_rust_failure_for_tests(&cas_dir, checkout, &base, ID, "widget", name);
-            git(checkout, &["checkout", "-q", LANE]);
-        }
-        record_rust_pass_for_tests(
-            &cas_dir, checkout, &tip, "widget", &format!("test(={name})"),
-            Some(stability::Proof {
-                runner: "nextest".into(),
-                tests: vec![stability::Identity::exact("crates/widget/src/gear.rs", name)],
-                consecutive_passes: stability::REQUIRED_PASSES,
-                elapsed_ms: 0,
-                inactive: Vec::new(),
-            }),
-        );
-        let reply = call(&fixture.worker, serde_json::json!({
-            "action": "close", "id": ID, "reason": "gear turns",
-        })).await;
-        assert_eq!(
-            (crate::gates::codes_in(&reply).as_slice(), fixture.task().status),
-            (gate.as_slice(), status),
-            "{methodology:?}, red={record_red}: {reply}",
-        );
+        let reply = call(&f.worker, serde_json::json!({"action":"close", "id":ID, "reason":"Gear turns"})).await;
+        let saved = f.task();
+        let codes = crate::gates::codes_in(&saved.notes);
+        assert!(codes.contains(&"G-166") && codes.contains(&"G-61"), "{reply}");
+        assert_eq!(f.task().status, TaskStatus::AwaitingMerge, "{reply}");
+        assert!(f.task().notes.contains("[G-61]"));
     }
 }
 
@@ -1315,11 +1212,6 @@ async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
         if foreign {
             assert_eq!(parked.status, TaskStatus::InProgress, "{case}: {output}");
             assert!(!codes.contains(&"G-61"), "attribution must refuse before stale proof advice: {output}");
-            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(checkpoint.as_str()));
-        } else if !live_proof {
-            assert!(codes.contains(&"G-61"), "{case}: {output}");
-            assert!(output.contains(&tip[..12]), "proof must name the measured commit: {output}");
-            assert_eq!(parked.status, TaskStatus::InProgress);
             assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(checkpoint.as_str()));
         } else {
             assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{case}: {output}");

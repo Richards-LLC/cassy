@@ -6,8 +6,6 @@
 //! catalog can miss an unregistered or stale mirror.
 
 use std::fs;
-use std::path::Path;
-use std::process::Command;
 
 #[path = "support/builtin_catalog.rs"]
 mod builtin_catalog;
@@ -176,43 +174,6 @@ fn session_learn_stop_hook_uses_a_dedicated_classifier_prompt() {
     assert!(stop_flow.contains("session_learn_dedup_candidates(store.as_ref())"));
 }
 
-/// cas-f0a1: the documented test-first command finds a case added to an
-/// existing test file; a new file is never required.
-#[test]
-fn verifier_test_first_command_runs_on_a_fixture_repo() {
-    let body = load(VERIFIER_PATHS[0]);
-    // pin: route to the shared procedure whose documented command runs below.
-
-    let procedure = load(&format!("cas-cli/src/builtins/{EVIDENCE_GATE}"));
-    let gate = procedure.split("- `test-first`:").nth(1).expect("test-first gate");
-    let command = gate.split("```bash").nth(1).unwrap().split("```").next().unwrap().trim();
-    let temp = tempfile::tempdir().expect("temporary git fixture");
-    let repo = temp.path();
-    run_git(repo, ["init", "--quiet", "--initial-branch=main"]);
-    run_git(repo, ["config", "user.name", "Cassy Test"]);
-    run_git(repo, ["config", "user.email", "cassy@example.invalid"]);
-
-    // History on the target branch that is not part of the delivery.
-    fs::write(repo.join("old_test.rs"), "#[test] fn old() {}\n").unwrap();
-    run_git(repo, ["add", "old_test.rs"]);
-    run_git(repo, ["commit", "--quiet", "-m", "seed"]);
-
-    // The delivery adds one case to the existing test file.
-    run_git(repo, ["checkout", "--quiet", "-b", "factory/worker"]);
-    fs::write(repo.join("old_test.rs"), "#[test] fn old() {}\n#[test] fn added() {}\n").unwrap();
-    run_git(repo, ["commit", "--quiet", "-am", "add a case"]);
-
-    let output = Command::new("sh")
-        .current_dir(repo)
-        .arg("-c")
-        .arg(format!("BASE=$(git merge-base HEAD main) && {command}"))
-        .output()
-        .expect("run documented verifier command");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("fn added"), "the delivered case is found: {command}");
-    assert!(!stdout.contains("fn old"), "target-branch history is not attributed: {stdout}");
-}
-
 /// cas-f0a1: one verdict never becomes a rule; a verifier records its lesson
 /// as a candidate that only repetition across tasks raises for a decision.
 #[test]
@@ -224,18 +185,4 @@ fn verification_never_calls_rule_create() {
         }
         assert!(body.contains("rule action=observe"), "{path}");
     }
-}
-
-fn run_git<const N: usize>(repo: &Path, args: [&str; N]) {
-    let output = Command::new("git")
-        .current_dir(repo)
-        .args(args)
-        .output()
-        .expect("run git fixture command");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
 }

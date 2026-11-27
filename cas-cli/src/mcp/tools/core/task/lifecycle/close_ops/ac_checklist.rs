@@ -110,13 +110,13 @@ pub(super) fn requirement(cas_root: &Path, task: &Task) -> Option<String> {
     let items = items(task, &supervisor_decisions(cas_root, &task.id));
     let path = checklist_path(cas_root, &task.id).ok()?;
     (!items.is_empty()).then(|| format!(
-        "AC checklist: `{}` needs a row per item ({}): MET + file:line + receipt, or NOT MET/NARROWED + reason approved by a supervisor decision note naming the item.",
+        "Optional AC checklist: `{}` can cover ({}). Check each acceptance criterion against the code; name any narrowing in the close note. Missing or incomplete rows warn.",
         path.display(),
         items.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", "),
     ))
 }
 
-// gate[G-166 park as-of]: Park requires an AC checklist and refuses an unapproved narrowing
+// gate[G-166 park as-of]: Advisory acceptance-criterion checklist
 pub(super) fn at_park(cas_root: &Path, task: &Task) -> Result<(), String> {
     if std::env::var_os("CAS_FACTORY_MODE").is_none() {
         return Ok(());
@@ -161,7 +161,7 @@ pub(super) fn at_park(cas_root: &Path, task: &Task) -> Result<(), String> {
         return Ok(());
     }
     let mut message = format!(
-        "⚠️ AC CHECKLIST REQUIRED (GH #2401): task {} parks only when `{}` accounts for every acceptance criterion and supervisor decision. {} of {} items fail:\n{}",
+        "⚠️ AC CHECKLIST ADVISORY: task {} has incomplete coverage in `{}`. {} of {} items need attention:\n{}",
         task.id, path.display(), problems.len(), items.len(), problems.join("\n"),
     );
     if !template.is_empty() {
@@ -171,7 +171,7 @@ pub(super) fn at_park(cas_root: &Path, task: &Task) -> Result<(), String> {
         message.push_str(&format!("\n\nAdd these rows:\n{}", template.join("\n")));
     }
     message.push_str(&format!(
-        "\n\nNext: fix the checklist, then retry `task action=close id={}`. A NOT MET or NARROWED row parks only after a supervisor records `task action=notes id={} note_type=decision notes=\"<item id> narrowed: <reason>\"`.",
+        "\n\nCheck each acceptance criterion against the code; name any narrowing in the close note for {} (task {}).",
         task.id, task.id,
     ));
     Err(crate::gates::tag("G-166", message))

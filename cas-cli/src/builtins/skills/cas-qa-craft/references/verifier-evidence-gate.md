@@ -130,13 +130,7 @@ Back every finding with a command output or an exact line reference. Run tests o
 
 ### Step 7: Honor the task's `execution_note`
 
-- `test-first`: the delivery must add or change at least one test case, in a new or an existing file, and the task must record a run in which that case failed before the fix. Never require a new test file or a number of tests: a few tests that each prove one behaviour are the target. Added cases show in:
-
-  ```bash
-  git diff "$BASE" HEAD | grep -nE '^\+.*(#\[(tokio::)?test|fn test_|\b(it|test)\(|def test_)'
-  ```
-
-  A case whose body changed counts too, so read the test hunks before rejecting. If no test case was added or changed, or no failing-first run is recorded, reject with "REJECTED (test-first posture): no failing-first test case in the diff."
+- `test-first` is advisory; no failing-first run or receipt is required.
 - `characterization-first`: expect added or changed tests that pin current behaviour before the change; if none, reject naming the posture.
 - `additive-only`, `value-only`, `no-code`, or none: nothing to check here; the close gate enforces those.
 

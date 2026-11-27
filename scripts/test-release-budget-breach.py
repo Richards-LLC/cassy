@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure release-stage budgets and file breaches through standalone helpers."""
+"""Measure release-stage budgets without filing tasks."""
 from __future__ import annotations
 
 import json
@@ -14,27 +14,6 @@ import time
 import unittest
 
 SCRIPTS = Path(__file__).resolve().parent
-
-FAKE_CAS = textwrap.dedent('''\
-    #!/usr/bin/env python3
-    import json, os, sys
-    assert sys.argv[1:] == ["serve"], sys.argv
-    for line in sys.stdin:
-        message = json.loads(line)
-        if message.get("method") == "initialize":
-            print(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {}}), flush=True)
-        elif message.get("method") == "tools/call":
-            with open(os.environ["FAKE_CAS_LOG"], "a") as log:
-                log.write(json.dumps(message["params"]) + "\\n")
-            text = "Created task: cas-f00d - " + message["params"]["arguments"]["title"] + " (P0)"
-            # A server-to-client request must be answered, not mistaken for a
-            # reply, and the reply that shares its write must still be read.
-            request = json.dumps({"jsonrpc": "2.0", "id": "srv-1", "method": "roots/list"})
-            reply = json.dumps({"jsonrpc": "2.0", "id": message["id"],
-                                "result": {"content": [{"type": "text", "text": text}]}})
-            sys.stdout.write(request + "\\n" + reply + "\\n")
-            sys.stdout.flush()
-''')
 
 # The 2026-10-14 cut: gate 3029 s and publish 1526 s.
 STAGE_EVENTS = """\
@@ -55,7 +34,7 @@ class BudgetBreach(unittest.TestCase):
         self.run_dir = self.tmp / "run"
         self.run_dir.mkdir()
         self.cas = self.tmp / "cas"
-        self.cas.write_text(FAKE_CAS)
+        self.cas.write_text("#!/usr/bin/env bash\nprintf called >> \"$FAKE_CAS_LOG\"\nexit 3\n")
         self.cas.chmod(0o755)
         self.log = self.tmp / "cas-calls.jsonl"
         self.gh = self.tmp / "gh"
@@ -96,38 +75,17 @@ class BudgetBreach(unittest.TestCase):
     def calls(self) -> list[dict]:
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
-    def test_over_budget_release_files_one_p0_in_the_budget_epic(self):
-        result = self.file_breach(STAGE_EVENTS)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        receipt = (self.run_dir / "release-latency.receipt").read_text()
-        self.assertIn("BUDGET_BREACHES=gate:3029/900,publish:1526/1200\n", receipt)
-        [call] = self.calls()
-        arguments = call["arguments"]
-        epic = json.loads((SCRIPTS / "release-stage-budgets.json").read_text())["epic"]
-        self.assertEqual((call["name"], arguments["action"], arguments["priority"], arguments["epic"]),
-                         ("task", "create", 0, epic))
-        self.assertIn(str(self.run_dir / "release-latency.receipt"), arguments["description"])
-        # pin: resumed runs consume the newline-delimited task ID marker written from the MCP reply.
-        self.assertEqual((self.run_dir / "budget-breach.task").read_text(), "cas-f00d\n")
-        # A resumed helper never files the same breach twice.
-        self.assertEqual(self.file_breach(STAGE_EVENTS).returncode, 0)
-        self.assertEqual(len(self.calls()), 1)
-
-    def test_release_within_budget_files_nothing(self):
-        fast = "1791997729\tgate\tstart\n1791998329\tgate\tdone\n"
-        result = self.file_breach(fast)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        # pin: the receipt protocol uses BUDGET_BREACHES=none to suppress task creation.
-        self.assertIn("BUDGET_BREACHES=none\n", (self.run_dir / "release-latency.receipt").read_text())
-        self.assertEqual(self.calls(), [])
-        self.assertFalse((self.run_dir / "budget-breach.task").exists())
-
-    def test_a_failed_filing_keeps_the_stage_resumable(self):
-        self.cas.write_text("#!/usr/bin/env bash\nexit 3\n")
-        result = self.file_breach(STAGE_EVENTS)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((self.run_dir / "budget-breach.task").exists())
-
+    def test_budget_misses_remain_measured_without_filing_or_markers(self):
+        for events in (STAGE_EVENTS, "1791997729\tgate\tstart\n1791998329\tgate\tdone\n"):
+            with self.subTest(events=events):
+                result = self.file_breach(events)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                values = dict(line.split("=", 1) for line in
+                              (self.run_dir / "release-latency.receipt").read_text().splitlines())
+                expected = "gate:3029/900,publish:1526/1200" if events == STAGE_EVENTS else "none"
+                self.assertEqual(values["BUDGET_BREACHES"], expected)
+                self.assertEqual(self.calls(), [])
+                self.assertFalse((self.run_dir / "budget-breach.task").exists())
 
 
 class CommitToMain(unittest.TestCase):

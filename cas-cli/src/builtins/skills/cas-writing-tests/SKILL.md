@@ -16,7 +16,7 @@ For browser/e2e/journey authoring, use [cas-playwright-tests](../cas-playwright-
 
 ## Test hygiene
 
-1. Prove a new or changed test red by reverting the fix or deleting the guarded line. Sabotage must break the promised outcome through its real consumer; an unrelated timeout proves nothing. Keep the red command/result, restore the code and record green.
+1. Use a failing case when it helps diagnose a bug. Never revert a fix or commit a red baseline to satisfy a receipt; named passing tests and green CI prove the delivery.
 2. Assert independent outcomes, not wording/prose, exact output text, source text or mirrored implementation/style. Exact caller payloads and machine protocol bytes remain data-integrity checks; fixed safety bytes need a named consumer. Browser accessibility has one narrow computed-style exception in the browser skill.
 3. Make fakes evaluate the same predicates as the dependency. Keep uniqueness, transactions, locking and Git ancestry on real disposable databases/repos; validate the disposable target before setup or cleanup. A canned success/count can hide races.
 4. For asynchronous work, use no fixed sleeps, no instant assertions that a port, process or file is already present or gone, and no wall-clock deadlines tighter than the event. Wait on the event or completion with a generous ceiling; control clocks only for time-dependent logic, before the code reads time.
@@ -29,7 +29,7 @@ For browser/e2e/journey authoring, use [cas-playwright-tests](../cas-playwright-
 
 Work one vertical slice: public promise → real failing case → minimum fix → green. An edited case in an existing file satisfies test-first; a new file is optional. Refactor after green without changing its promise. Hand the scoped proof and diff to review.
 
-Factory workers follow [worker discipline](../cas-worker/references/discipline.md): commit the red case, run its named filter, then commit the fix and run it green.
+Factory workers follow [worker discipline](../cas-worker/references/discipline.md). Test-first is a choice, with no failing-first receipt or execution-note enforcement.
 
 ## Stack seams
 
@@ -37,4 +37,4 @@ Use [tests.md](references/tests.md) for independent expectations, real Rust stor
 
 Adapted from mattpocock/skills `tdd`, MIT © 2026 Matt Pocock; retain [LICENSE](LICENSE).
 
-Done when the title's promise has an independent assertion, the meaningful sabotage run is red, restored code is green, and every changed module has its scoped proof or named integration owner.
+Done when the title's promise has an independent assertion and named passing tests; green CI on the exact tip is the proof.

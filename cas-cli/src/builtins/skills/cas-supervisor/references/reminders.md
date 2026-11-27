@@ -9,7 +9,7 @@ Reminders cover quiet work and frozen-suite job checks, not acknowledgement, liv
 | Worker reports `MERGE REQUIRED` | Merge now; Cassy runs the verifier on any pre-merge dispatch it opens | No; cancel any phase reminder after |
 | Parked merge refused only for pending CI | Let Cassy's armed exact-SHA retry finish | No; act only on its notice |
 | Ordinary CI on a pushed or integrated SHA | Record the SHA and end the turn | One `ci_completed` or `branch_contained_in` reminder, never a delay |
-| Frozen train suite | Inspect jobs between short reminders until terminal; act on failures | One short backstop, no long blind reminder or blocking watch |
+| Frozen train suite | Background the wait and act on the completion notice | No short timers; the daemon watchdog is the backstop |
 | Long release, publication or detached job | Record its receipt and end the turn | One event reminder, or the harness background-task notice |
 | Context-pressure handoff | Commit, push, task note, explicit handoff | One time checkpoint only if no next owner can acknowledge in time |
 | Blocked worker recovery | Read state and send one recovery instruction | Only when an external dependency could otherwise go quiet |

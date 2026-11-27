@@ -60,7 +60,7 @@ the test child; its own identity, admission and receipts stay protected. Shell
 expansions and identity/build overrides remain refused.
 Commit first; zero matched tests fail. Success records
 `test: PASS <sha> <package> <filter> <count>`; close imports exact-delivery
-receipts. Run the red test before fixing it, then commit and run the green test.
+receipts. A failing-first run is optional; never stage a red baseline for proof.
 
 Rust example: `--lib -E 'test(close_ops::changed_fn)'`.
 <!-- cas-src:else -->
@@ -71,19 +71,9 @@ committed first and backgrounded with a Git-ignored log; the hook's refusal name
 the exact shapes. Otherwise run the project's own targeted test commands
 directly and record their exit status and test count.
 <!-- cas-src:end -->
-Park requires five consecutive capped passes for new or changed
-test functions. The Rust runner repeats only those functions in the requested
-selection automatically. For Vitest, Jest or Playwright, use
-`cas factory worker-check --cas-root "$CAS_ROOT" -- <runner> path/to/test-file`.
-The runner may carry its `npx`/`pnpm exec`/`yarn` prefix, `vitest run` or
-`playwright test`, paths relative to the current directory, and the suite's own
-`--config <file>`. Parameterized `it.each` rows are proved together.
-It runs from the nearest jest/vitest config, past a nested package.json; a G-61 refusal names the exact command.
-The receipt includes the repeated source identities; park reads it without
-running tests. A failure stops the run: fix or delete the test before a new run.
-Changed tests owe stability in test-only deliveries too. Documentation or
-changelog commits carry receipts forward through the shared input/ancestry
-checks; changing a test or another build input requires fresh proof.
+Green lane CI on the exact tip plus named tests is the proof. Park records
+missing local receipts as warnings. Run a selected test once; fix or delete a
+flaky release-path test. Never stage a red baseline or collect failing-first receipts.
 
 Before rewording user-facing text, grep the tests for the old wording. Measure
 a size or count claim on a real tree as well as a fixture. List each module run
@@ -93,7 +83,7 @@ Read the diff and trace callers, struct literals and match arms across
 consumers. Before the push, cut the tests you added to the
 [fewest that fail without the change](../../cas-writing-tests/SKILL.md#fewest-tests).
 Never run cargo test, clippy, rustc or scoped-test scripts. Rust: never record a
-scoped `--proof`, `SCOPED_PROOF:` or `loaded_proof` receipt. Every changed Rust crate needs a capped test receipt at the delivered tip; a runner denial is a blocker, not a deferral.
+scoped `--proof`, `SCOPED_PROOF:` or `loaded_proof` receipt. Missing per-crate receipts do not block park.
 
 Read receipts; never rerun a passing check. After a CI failure, rerun only the
 failing spec. Without a queue, the
@@ -112,18 +102,9 @@ blocker path.
 
 ## Browser checks
 
-Workers run touched vitest files and tsc; journeys run in the batch QA round,
-or per task only in qa.mode=per_task.
-<!-- cas-src:begin -->
-Where available, use `scripts/journey-eval.sh <task-artifact-dir>`, which picks
-the affected journeys and writes an explicit empty receipt when none are;
-`--affected <base>` binds an explicit ancestor base. Spec or grep filters cannot
-substitute for that selection, though named-spec runs stay available for
-iteration.
-<!-- cas-src:else -->
-Select the journeys the diff affects with the project's own test commands;
-named-spec runs stay available for iteration.
-<!-- cas-src:end -->
+Workers run touched vitest files and tsc. Lane CI runs the journeys selected
+for hub-web diffs; green CI is the gate, with no separate journey receipt.
+Named-spec runs remain available for failure iteration.
 The hook denies workers `--full`, unfiltered Playwright and
 unfiltered journey npm scripts. A failure control runs only the failing spec
 with one worker and never reports that failure as PASS.

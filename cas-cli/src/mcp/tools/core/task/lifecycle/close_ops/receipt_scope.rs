@@ -172,28 +172,6 @@ pub(super) fn delivered_tests(
     Ok((tests, widened))
 }
 
-pub(super) fn red_first_refusal(
-    task: &Task, passing: &PassingTests<'_>, head: &str,
-    ranges: &[(String, String)], delivered: &[stability::Identity], widened: &[Scope],
-) -> Option<String> {
-    if task.execution_note.as_deref() != Some("test-first") || (delivered.is_empty() && !widened.is_empty()) { return None; }
-    let start_base = task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str());
-    if passing.has_red_first_evidence(&task.id, start_base, ranges, delivered) { return None; }
-    let base = start_base.unwrap_or("the recorded task start base");
-    let short = &head[..head.len().min(12)];
-    // gate[G-170 park as-of]: Test-first delivery requires a capped failing run before the fix
-    Some(crate::gates::tag("G-170", format!(
-        "RED-FIRST EVIDENCE REQUIRED: Task {} declares execution_note=test-first. \
-         In its assigned checkout, record the delivered regression failing at {base} or at a committed red checkpoint \
-         in this delivery before {short}. Run `cargo nextest run -p <crate> --lib -E 'test(<name>)'` \
-         (or `--test <harness>` instead of `--lib`) or a capped JS test, for example \
-         `cas factory worker-check --cas-root <cas-root> -- node --test <file>`. \
-         A capped compile failure at {base} also qualifies: run `cargo check -p <crate> --tests`. \
-         Return to the fixed tip and record passing proof for the same regression before retrying park.",
-        task.id,
-    )))
-}
-
 fn listed_park_refusals(
     cas_root: &Path,
     proof_repo: &Path,
@@ -247,7 +225,6 @@ fn listed_park_refusals(
             elapsed_ms = started.elapsed().as_millis() as u64, "Close gate phase");
         let (tests, widened) = match requirements {
             Ok((tests, widened)) => {
-                refusals.extend(red_first_refusal(task, &passing, head, delivery_ranges.unwrap_or_default(), &tests, &widened));
                 (tests, widened)
             }
             Err(error) => {

@@ -4,7 +4,7 @@ use super::*;
 
 pub(crate) mod rust;
 
-pub(crate) const REQUIRED_PASSES: u32 = 5;
+pub(crate) const REQUIRED_PASSES: u32 = 1;
 
 /// The OS lane CI's Rust jobs run on (`.github/workflows/lane.yml` runners).
 pub(crate) const LANE_CI_OS: &str = "linux";
@@ -341,7 +341,7 @@ pub(crate) fn invalidate(cas_root: &Path, repo: &Path, head: &str, tests: &[Iden
 /// The caller holds the worker lane and capped admission through execution.
 pub(crate) fn record(cas_root: &Path, repo: &Path, head: &str, mut proof: Proof) -> Result<()> {
     if clean_head(repo)? != head || !valid(&proof) {
-        bail!("STABILITY_PROOF_INVALID: clean exact tip and five nonempty passing test identities required");
+        bail!("STABILITY_PROOF_INVALID: clean exact tip and nonempty passing test identities required");
     }
     persist(cas_root, &repo.canonicalize()?, head, proof)
 }

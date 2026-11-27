@@ -18,7 +18,7 @@ when present.
 <!-- cas-src:else -->
 A configured pre-push hook gives early feedback; CI owns that proof.
 <!-- cas-src:end -->
-Park reads exact-tip test receipts and never runs checks.
+Green lane CI on the exact tip plus named tests is the proof; missing local receipts warn. Park never runs checks.
 
 ## Rule-driven sites
 
@@ -39,7 +39,7 @@ Run these on your delivery diff only, never the whole repository. The principles
 
 - **Comments:** run [cas-no-comments](../../cas-no-comments/SKILL.md). Its output is deletions or a reshape flag; you never add a comment.
 - **Subtract before you add:** remove any branch no caller reaches and any struct that duplicates an existing one; a smaller diff that fully works wins.
-- **Same-surface proof:** a bug fix shows red on the incident's real entry point with the tool the incident used, then green on the same surface.
+- **Same-surface proof:** a bug fix exercises the incident's real entry point; a failing-first run is optional.
 
 ## Clean-tree receipt
 
@@ -87,10 +87,8 @@ one.
 Never edit `.claude/CODEMAP.md` or `docs/PRODUCT_OVERVIEW.md`; release prep
 regenerates them. Add a bug case as its own `docs/qa/bug-families/<slug>.yaml`
 and, where `docs/product-overview.d/` exists, product changes as
-`docs/product-overview.d/<task-id>.md`. Park refuses a product delivery
-without its overview fragment (G-167) and a bug fix on a live journey's owned
-files without a bug family naming the task (G-168); escape each with a decision
-note `no overview: <reason>` or `no bug family: <reason>`.
+`docs/product-overview.d/<task-id>.md`. Missing overview fragments (G-167) or bug families (G-168) warn.
+Release prep generates shared docs and reports missing upkeep.
 
 ## Changelog at park
 
@@ -105,6 +103,9 @@ example `### Fixed — Commander` with `- **Title** — description`), as its ow
 `changelog.d/<task-id>.md` where that directory exists, leaving `CHANGELOG.md`
 alone. Test-only, docs-only or internal QA deliveries record a decision note
 `no changelog: <reason>`.
+
+The one independent review looks at screenshots of changed screens (phone/desktop,
+light/dark). Missing screenshots warn.
 
 ## Conditional evidence
 

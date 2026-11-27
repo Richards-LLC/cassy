@@ -12,7 +12,7 @@
 //! test below refuses to let a first-run hint ship if its named command is not
 //! a real subcommand.
 
-use std::path::Path;
+use std::{io::ErrorKind, path::Path};
 
 /// The single command a brand-new machine is told to run.
 ///
@@ -21,14 +21,29 @@ use std::path::Path;
 /// a dead end.
 pub const FRONT_DOOR_COMMAND: &str = "setup";
 
-/// A machine nobody has set up yet: no host-level `~/.cas/` and no project to
-/// stand in for it.
+/// A machine nobody has set up yet: no project and either no host-level
+/// `~/.cas/` or only the directory the macOS installer creates for signing.
 ///
-/// Deliberately conservative. If either exists, this is a configured machine
-/// having a bad day — a broken project, a missing dependency — and the detailed
-/// preflight output is what that person needs.
+/// Other host state remains on the configured path so a broken setup still
+/// gets the factory preflight rather than onboarding advice.
 pub fn machine_is_unconfigured(host_cas_dir: &Path, project_cas_root: Option<&Path>) -> bool {
-    project_cas_root.is_none() && !host_cas_dir.exists()
+    if project_cas_root.is_some() {
+        return false;
+    }
+    match host_cas_dir.symlink_metadata() {
+        Err(error) => return error.kind() == ErrorKind::NotFound,
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return false,
+    }
+    let Ok(mut entries) = host_cas_dir.read_dir() else {
+        return false;
+    };
+    let Some(Ok(entry)) = entries.next() else {
+        return false;
+    };
+    entry.file_name() == "macos-signing"
+        && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        && entries.next().is_none()
 }
 
 /// The one line. Not a banner, not a checklist: someone who just installed a

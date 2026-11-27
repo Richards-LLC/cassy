@@ -195,8 +195,8 @@ fn production_cut_proposal_requires_pass_for_the_frozen_candidate() {
     let receive = |head: &str, build: &str, cited: Option<&str>| {
         let ledger = repo.join("LEDGER.md");
         let (count, row) = match cited {
-            Some(capture) => ("PASS=1; NOT EXERCISED=0", format!("| M01 | /ranking/ [expanded] | Ranking visible | visible: Ranking | PASS | real-build | {capture} | - |")),
-            None => ("PASS=0; NOT EXERCISED=1", "| M01 | /ranking/ [expanded] | Ranking visible | not run | NOT EXERCISED: browser unavailable | real-build | - | - |".into()),
+            Some(capture) => ("PASS=1; NOT EXERCISED=0", format!("| M01 | /ranking/ [expanded] | Ranking visible (index.html:1) | visible: Ranking | PASS | real-build | {capture} | - |")),
+            None => ("PASS=0; NOT EXERCISED=1", "| M01 | /ranking/ [expanded] | Ranking visible (index.html:1) | not run | NOT EXERCISED: browser unavailable | real-build | - | - |".into()),
         };
         std::fs::write(&ledger, format!("schema: 2\nbuild: {build}\ncovers: cas-a\ncells=1; FAIL=0; {count}\nlabels: real-build=1\n{}\n{row}\n", crate::qa_ledger::HEADER)).unwrap();
         let context = crate::artifacts::PublishContext {

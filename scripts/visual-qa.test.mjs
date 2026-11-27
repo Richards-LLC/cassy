@@ -42,9 +42,11 @@ test('strict build evidence binds loaded entry bytes and refuses ambiguous or re
     for (const [producer, inspect] of [['repository', runVisualQa], ['builtin', runBuiltinVisualQa]]) {
       for (const row of [
         { name: 'classic with blocked external declaration', scripts: classic + foreignScript, status: 'PASS' },
+        { name: 'explicit classic MIME type', scripts: '<script type="text/javascript" src="/main.js"></script>', status: 'PASS' },
         { name: 'module with classic companion', scripts: module + '<script src="/other.js"></script>', status: 'PASS' },
         { name: 'inline module forbids classic fallback', scripts: '<script type="module">void 0;</script>' + classic },
         { name: 'missing declaration', scripts: '<script>void 0;</script>' },
+        { name: 'data block cannot replace a loaded classic declaration', scripts: '<script src="/main.js" onload="this.remove()"></script><script type="application/json" src="/main.js"></script>' },
         { name: 'unloaded declaration', scripts: '<script src="/missing.js"></script>' },
         { name: 'multiple classic declarations', scripts: classic + '<script src="/other.js"></script>' },
         { name: 'duplicate classic declaration', scripts: classic + classic },

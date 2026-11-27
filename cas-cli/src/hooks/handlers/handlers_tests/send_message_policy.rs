@@ -1,4 +1,4 @@
-//! Factory hooks deny native `SendMessage` and direct agents to CAS coordination.
+//! Factory hooks warn on native `SendMessage` to a non-child and point agents to CAS coordination.
 
 use crate::hooks::handlers::handle_pre_tool_use;
 use cas_core::hooks::types::HookInput;
@@ -25,20 +25,10 @@ fn permission_decision(out: &cas_core::hooks::types::HookOutput) -> Option<Strin
         .map(str::to_string)
 }
 
-fn deny_reason(out: &cas_core::hooks::types::HookOutput) -> Option<String> {
-    let specific = out.hook_specific_output.as_ref()?;
-    let value = serde_json::to_value(specific).ok()?;
-    let decision = value.get("permissionDecision")?.as_str()?;
-    if decision != "deny" {
-        return None;
-    }
-    value
-        .get("permissionDecisionReason")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
+fn fired(out: &cas_core::hooks::types::HookOutput) -> bool {
+    assert!(!super::blocked(out), "a demoted guard never blocks");
+    super::warned(out).contains(&"H-21")
 }
-
-
 
 #[test]
 fn send_message_outside_factory_falls_through() {
@@ -98,10 +88,7 @@ fn factory_worker_native_messages_follow_child_ownership() {
         let mut input = send_message_input(Some(args));
         input.agent_role = Some("worker".into());
         let output = handle_pre_tool_use(&input, Some(root.path())).unwrap();
-        assert_eq!(deny_reason(&output).is_none(), allowed, "{:?}", input.tool_input);
-        if !allowed {
-            assert!(crate::gates::codes_in(&deny_reason(&output).unwrap()).contains(&"H-21"));
-        }
+        assert_eq!(!fired(&output), allowed, "{:?}", input.tool_input);
     }
     start.agent_id = Some("a-owned".into());
     start.hook_event_name = "SubagentStop".into();
@@ -109,9 +96,9 @@ fn factory_worker_native_messages_follow_child_ownership() {
     let mut input = send_message_input(Some(serde_json::json!({"to":"a-owned"})));
     input.agent_role = Some("worker".into());
     // Completion preserves ownership: SendMessage resumes the same native child.
-    assert!(deny_reason(&handle_pre_tool_use(&input, Some(root.path())).unwrap()).is_none());
+    assert!(!fired(&handle_pre_tool_use(&input, Some(root.path())).unwrap()));
     input.tool_input = Some(serde_json::json!({"to":"a-foreign"}));
-    assert!(deny_reason(&handle_pre_tool_use(&input, Some(root.path())).unwrap()).is_some());
+    assert!(fired(&handle_pre_tool_use(&input, Some(root.path())).unwrap()));
     assert!(agents.get("a-owned").is_err());
     assert_eq!(agents.get("test-session").unwrap().role, AgentRole::Worker);
 }

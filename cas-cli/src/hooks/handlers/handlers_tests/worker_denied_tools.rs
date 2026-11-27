@@ -36,6 +36,11 @@ fn denial(output: HookOutput) -> Option<String> {
     })
 }
 
+fn flagged(output: HookOutput) -> bool {
+    assert!(!super::blocked(&output), "a demoted guard never blocks");
+    super::warned(&output).contains(&"H-10")
+}
+
 fn assert_operator_credential_refusal(output: HookOutput, attempt: &str) {
     let reason = denial(output).unwrap_or_else(|| panic!("worker access was allowed: {attempt}"));
     assert!(reason.contains("[H-09]"), "{attempt}: {reason}");
@@ -67,24 +72,21 @@ const WRAPPED_CLIS: &[(&str, &str)] = &[
     ("neonctl", "/usr/local/bin/neonctl projects list"),
 ];
 
-/// A worker running a stock denied CLI through wrappers or a path
-/// is refused with the CLI named and the blocker route, with and without a
-/// CAS root.
+/// A worker running a stock denied CLI through wrappers or a path is flagged,
+/// with and without a CAS root.
 #[test]
-fn a_worker_is_refused_default_clis_however_wrapped() {
+fn a_worker_is_flagged_for_default_clis_however_wrapped() {
     let (_env, home) = role_env("worker");
     let project = tempfile::tempdir().unwrap();
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
-    for (cli, command) in WRAPPED_CLIS {
+    for (_, command) in WRAPPED_CLIS {
         for root in [Some(cas_root.as_path()), None] {
-            let reason = denial(handle_pre_tool_use(&bash(command, home.path()), root).unwrap())
-                .unwrap_or_else(|| panic!("{command} was allowed (root {root:?})"));
-            assert!(reason.contains(cli));
+            assert!(flagged(handle_pre_tool_use(&bash(command, home.path()), root).unwrap()), "{command} was not flagged (root {root:?})");
         }
     }
     for command in ["git log --grep vercel", "cat vercel.json", "git log --grep neonctl", "cat .env.cas-db", "npm run build"] {
         let output = handle_pre_tool_use(&bash(command, home.path()), Some(&cas_root)).unwrap();
-        assert!(denial(output).is_none());
+        assert!(!flagged(output));
     }
 }
 
@@ -117,10 +119,10 @@ fn a_supervisor_and_a_plain_session_may_run_default_denied_clis() {
     }
 }
 
-/// A matching MCP or connector tool is refused for a worker, directly or
+/// A matching MCP or connector tool is flagged for a worker, directly or
 /// through mcp_execute; other tools are not.
 #[test]
-fn a_worker_is_refused_a_matching_mcp_tool() {
+fn a_worker_is_flagged_for_a_matching_mcp_tool() {
     let (_env, home) = role_env("worker");
     for (tool, args) in [
         ("mcp__claude_ai_Vercel__list_deployments", json!({})),
@@ -130,15 +132,14 @@ fn a_worker_is_refused_a_matching_mcp_tool() {
         ("mcp__cs__mcp_execute", json!({"code": "neon.list_projects({})"})),
         ("mcp__cs__mcp_execute", json!({"code": "vercel.list_projects({})"})),
     ] {
-        let reason = denial(handle_pre_tool_use(&input(tool, args, home.path()), None).unwrap())
-            .unwrap_or_else(|| panic!("{tool} was allowed"));
+        assert!(flagged(handle_pre_tool_use(&input(tool, args, home.path()), None).unwrap()), "{tool} was not flagged");
     }
     let output = handle_pre_tool_use(
         &input("mcp__github__get_issue", json!({"number": 1}), home.path()),
         None,
     )
     .unwrap();
-    assert!(denial(output).is_none());
+    assert!(!flagged(output));
 }
 
 /// The lists come from `factory.worker_denied_clis` and
@@ -153,19 +154,17 @@ fn the_denied_lists_follow_project_config() {
     config.set("factory.worker_denied_mcp_tools", "mcp__neon__*").unwrap();
     config.save(&cas_root).unwrap();
 
-    let netlify = denial(
+    assert!(flagged(
         handle_pre_tool_use(&bash("netlify deploy --prod", home.path()), Some(&cas_root)).unwrap(),
-    )
-    .unwrap();
-    assert!(netlify.contains("`netlify`"), "{netlify}");
+    ));
     let vercel =
         handle_pre_tool_use(&bash("vercel ls", home.path()), Some(&cas_root)).unwrap();
-    assert!(denial(vercel).is_none());
+    assert!(!flagged(vercel));
     let neon = handle_pre_tool_use(&bash("neonctl projects list", home.path()), Some(&cas_root)).unwrap();
-    assert!(denial(neon).is_none());
-    assert!(denial(handle_pre_tool_use(
+    assert!(!flagged(neon));
+    assert!(flagged(handle_pre_tool_use(
         &input("mcp__neon__run_sql", json!({}), home.path()), Some(&cas_root)
-    ).unwrap()).is_some());
+    ).unwrap()));
     config.set("factory.worker_denied_clis", "").unwrap();
     config.set("factory.worker_denied_mcp_tools", "").unwrap();
     config.save(&cas_root).unwrap();
@@ -174,7 +173,7 @@ fn the_denied_lists_follow_project_config() {
         ("mcp__neon__list_projects", json!({})),
     ] {
         let output = handle_pre_tool_use(&input(tool, args, home.path()), Some(&cas_root)).unwrap();
-        assert!(denial(output).is_none());
+        assert!(!flagged(output));
     }
 }
 

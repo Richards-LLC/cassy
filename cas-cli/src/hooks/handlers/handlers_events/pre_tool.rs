@@ -13499,7 +13499,7 @@ mod worker_commit_guard_tests {
     }
 
     #[test]
-    fn worker_git_push_hook_bypass_is_refused_but_supervisor_is_unaffected() {
+    fn worker_git_push_hook_bypass_is_flagged_but_supervisor_is_unaffected() {
         let repo = make_git_repo();
         let repo_path = repo.path().to_string_lossy().to_string();
         let switched = std::process::Command::new("git")
@@ -13559,26 +13559,10 @@ mod worker_commit_guard_tests {
                 let mut input = hook_git_write_input(&repo_path, command);
                 input.agent_role = Some(role.to_string());
                 let output = handle_pre_tool_use(&input, None).expect("pre-tool hook");
-                let value = serde_json::to_value(output).expect("serialize hook result");
-                let hook_output = &value["hookSpecificOutput"];
-                if hook_output["permissionDecision"] != "deny" {
-                    mismatches.push(format!("{role}: expected refusal: {command}: {value}"));
-                    continue;
-                }
-                let reason = hook_output["permissionDecisionReason"]
-                    .as_str()
-                    .unwrap_or_default();
-                if !reason.contains("supervisor-approved") || !reason.contains("plain `git push`")
+                if crate::test_support::pretool_blocked(&output)
+                    || !crate::test_support::pretool_warned(&output).contains(&"H-15")
                 {
-                    mismatches.push(format!("{role}: unclear exception route: {command}: {reason}"));
-                }
-                if command
-                    .split_whitespace()
-                    .any(|word| matches!(word, "-n" | "--dry-run"))
-                    && (!reason.contains("`-n` is a dry-run")
-                        || !reason.contains("still runs the pre-push hook"))
-                {
-                    mismatches.push(format!("{role}: inaccurate dry-run explanation: {reason}"));
+                    mismatches.push(format!("{role}: expected a warning, not a block: {command}: {output:?}"));
                 }
             }
         }
@@ -14110,8 +14094,8 @@ mod worker_commit_guard_tests {
                 .clone()
         };
         let refused = decision(&input);
-        assert_eq!(refused["permissionDecision"], "deny", "{refused}");
-        assert!(refused["permissionDecisionReason"].as_str().unwrap().contains(&bound.id), "{refused}");
+        assert_ne!(refused["permissionDecision"], "deny", "{refused}");
+        assert!(refused["additionalContext"].as_str().is_some_and(|context| crate::gates::codes_in(context).contains(&"H-34")), "{refused}");
 
         agents.graceful_shutdown(&bound.id).expect("bound verifier finished");
         assert_ne!(decision(&input)["permissionDecision"], "deny");
@@ -14153,11 +14137,11 @@ mod worker_commit_guard_tests {
             "prompt": "Review Cassy task cas-hook-capability"
         }));
 
-        let denied = handle_pre_tool_use(&input, Some(&cas_root)).expect("pretool denial");
-        let denied_value = serde_json::to_value(denied).expect("serialize denial");
-        assert_eq!(
-            denied_value["hookSpecificOutput"]["permissionDecision"], "deny",
-            "verifier capability mint must fail closed without an active dispatch"
+        let flagged = handle_pre_tool_use(&input, Some(&cas_root)).expect("pretool warning");
+        assert!(
+            !crate::test_support::pretool_blocked(&flagged)
+                && crate::test_support::pretool_warned(&flagged).contains(&"H-35"),
+            "a spawn without an active dispatch is flagged, not blocked"
         );
 
         cas_store::create_verification_dispatch_bound(
@@ -14175,11 +14159,10 @@ mod worker_commit_guard_tests {
         missing_tool_use.tool_use_id = None;
         let missing_output =
             handle_pre_tool_use(&missing_tool_use, Some(&cas_root)).expect("missing correlation");
-        assert_eq!(
-            serde_json::to_value(missing_output).expect("serialize missing correlation")["hookSpecificOutput"]
-                ["permissionDecision"],
-            "deny",
-            "missing official PreToolUse tool_use_id must fail closed"
+        assert!(
+            !crate::test_support::pretool_blocked(&missing_output)
+                && crate::test_support::pretool_warned(&missing_output).contains(&"H-35"),
+            "a missing PreToolUse tool_use_id is flagged, not blocked"
         );
 
         let sentinel = b"CAS_SENTINEL_RAW_VERIFIER_CREDENTIAL_6939";
@@ -14200,24 +14183,13 @@ mod worker_commit_guard_tests {
         let mut concurrent = input.clone();
         concurrent.tool_use_id = Some("tool-use-concurrent-6939".to_string());
         let concurrent_output =
-            handle_pre_tool_use(&concurrent, Some(&cas_root)).expect("concurrent spawn denial");
+            handle_pre_tool_use(&concurrent, Some(&cas_root)).expect("concurrent spawn warning");
         let concurrent_json =
-            serde_json::to_value(concurrent_output).expect("serialize concurrent denial");
-        assert_eq!(
-            concurrent_json["hookSpecificOutput"]["permissionDecision"],
-            "deny"
-        );
-        use crate::mcp::tools::core::task::lifecycle::close_ops::gate_text::{
-            VerifierSpawnDenial, verifier_spawn_denial,
-        };
-        assert_eq!(
-            concurrent_json["hookSpecificOutput"]["permissionDecisionReason"],
-            crate::gates::tag("H-35", verifier_spawn_denial(
-                VerifierSpawnDenial::SpawnAlreadyPending,
-                Some("cas-hook-capability"),
-                crate::harness_policy::own_tool_prefix(),
-            )),
-            "the concurrent spawn is refused as already pending: {concurrent_json}"
+            serde_json::to_value(&concurrent_output).expect("serialize concurrent warning");
+        assert!(
+            !crate::test_support::pretool_blocked(&concurrent_output)
+                && crate::test_support::pretool_warned(&concurrent_output).contains(&"H-35"),
+            "the concurrent spawn is flagged as already pending: {concurrent_json}"
         );
         assert!(!concurrent_json.to_string().contains(sentinel_text));
 

@@ -1,6 +1,7 @@
 mod agent_worktree_block;
 mod basic;
 mod browser_tier_guard;
+mod demoted_guards;
 mod factory_auto_approve;
 mod factory_inbox_surfacing;
 mod formatter_scope_guard;
@@ -39,3 +40,5 @@ fn set_supervisor_cli_env(env: &mut TestEnvGuard, cli: Option<&str>) {
         None => env.remove("CAS_FACTORY_SUPERVISOR_CLI"),
     }
 }
+
+use crate::test_support::{pretool_blocked as blocked, pretool_warned as warned};

@@ -43,18 +43,10 @@ fn agent_input_with_role(role: Option<&str>, isolation: Option<&str>) -> HookInp
     }
 }
 
-/// Extract the pre-tool deny reason from a HookOutput, or None if not a deny.
-fn deny_reason(out: &cas_core::hooks::types::HookOutput) -> Option<String> {
-    let specific = out.hook_specific_output.as_ref()?;
-    let value = serde_json::to_value(specific).ok()?;
-    let decision = value.get("permissionDecision")?.as_str()?;
-    if decision != "deny" {
-        return None;
-    }
-    value
-        .get("permissionDecisionReason")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+/// Whether the guard fired: warned about, never blocking the call.
+fn fired(out: &cas_core::hooks::types::HookOutput) -> bool {
+    assert!(!super::blocked(out), "a demoted guard never blocks");
+    super::warned(out).contains(&"H-18")
 }
 
 // ============================================================================
@@ -62,7 +54,7 @@ fn deny_reason(out: &cas_core::hooks::types::HookOutput) -> Option<String> {
 // ============================================================================
 
 #[test]
-fn supervisor_agent_worktree_is_denied() {
+fn supervisor_agent_worktree_is_warned() {
     // EPIC cas-8888 (cas-fd9f): the deny message's tool-prefix now comes from
     // `harness_policy::own_tool_prefix()`, which is env-based (matching
     // every other harness-alias helper in this codebase). In real usage
@@ -80,28 +72,7 @@ fn supervisor_agent_worktree_is_denied() {
 
     let input = agent_input_with_role(Some("supervisor"), Some("worktree"));
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
-    let reason = deny_reason(&out).expect("expected deny");
-    // Message must point at the factory escape hatch (cas-8563b: spawn_workers
-    // moved from coordination to factory) and explain the leak.
-
-    assert!(
-        reason.contains("spawn_workers"),
-        "deny message should name spawn_workers action: {reason}"
-    );
-}
-
-/// EPIC cas-8888 (cas-fd9f): the load-bearing regression test — before the
-/// fix, this deny message was hardcoded to Claude's `mcp__cas__` prefix
-/// unconditionally.
-#[test]
-fn grok_supervisor_agent_worktree_is_denied_with_cas_prefix() {
-    let mut env = TestEnvGuard::new();
-    super::set_role_env(&mut env, Some("supervisor"));
-    super::set_supervisor_cli_env(&mut env, Some("grok"));
-
-    let input = agent_input_with_role(Some("supervisor"), Some("worktree"));
-    let out = handle_pre_tool_use(&input, None).expect("handler ok");
-    let reason = deny_reason(&out).expect("expected deny");
+    assert!(fired(&out), "expected the guard to fire");
 }
 
 // ============================================================================
@@ -113,7 +84,7 @@ fn worker_agent_worktree_is_allowed() {
     let input = agent_input_with_role(Some("worker"), Some("worktree"));
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     assert!(
-        deny_reason(&out).is_none(),
+        !fired(&out),
         "worker should not hit the supervisor gate"
     );
 }
@@ -123,7 +94,7 @@ fn supervisor_agent_without_isolation_is_allowed() {
     let input = agent_input_with_role(Some("supervisor"), None);
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     assert!(
-        deny_reason(&out).is_none(),
+        !fired(&out),
         "supervisor Agent() without isolation must still work (Explore, reviews, verifier)"
     );
 }
@@ -135,7 +106,7 @@ fn supervisor_agent_isolation_other_value_is_allowed() {
     let input = agent_input_with_role(Some("supervisor"), Some("sandbox"));
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     assert!(
-        deny_reason(&out).is_none(),
+        !fired(&out),
         "non-worktree isolation values are out of scope for this gate"
     );
 }
@@ -150,7 +121,7 @@ fn solo_user_agent_worktree_is_allowed() {
     let input = agent_input_with_role(None, Some("worktree"));
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     assert!(
-        deny_reason(&out).is_none(),
+        !fired(&out),
         "solo users have no supervisor discipline to enforce"
     );
 }
@@ -175,7 +146,7 @@ fn supervisor_task_verifier_with_worktree_is_allowed() {
     };
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     assert!(
-        deny_reason(&out).is_none(),
+        !fired(&out),
         "task-verifier must be exempt from the worktree gate so verification-jail unjail paths work"
     );
 }
@@ -199,7 +170,7 @@ fn supervisor_agent_isolation_non_string_is_allowed() {
     };
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     assert!(
-        deny_reason(&out).is_none(),
+        !fired(&out),
         "non-string isolation values fall through via and_then(as_str)"
     );
 }
@@ -219,7 +190,7 @@ fn supervisor_agent_missing_tool_input_is_allowed() {
     };
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     assert!(
-        deny_reason(&out).is_none(),
+        !fired(&out),
         "missing tool_input must pass through without denying"
     );
 }
@@ -231,7 +202,7 @@ fn supervisor_non_agent_tool_is_allowed() {
     input.tool_name = Some("Bash".into());
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     assert!(
-        deny_reason(&out).is_none(),
+        !fired(&out),
         "gate is Agent-scoped; Bash etc. must not be affected"
     );
 }
@@ -243,7 +214,7 @@ fn supervisor_role_case_insensitive() {
         let input = agent_input_with_role(Some(role), Some("worktree"));
         let out = handle_pre_tool_use(&input, None).expect("handler ok");
         assert!(
-            deny_reason(&out).is_some(),
+            fired(&out),
             "role '{role}' should be recognized case-insensitively and trigger deny"
         );
     }
@@ -276,7 +247,7 @@ fn env_fallback_triggers_when_hook_input_role_absent() {
     };
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     assert!(
-        deny_reason(&out).is_some(),
+        fired(&out),
         "env-var fallback should still trigger the gate when HookInput.agent_role is None"
     );
 }

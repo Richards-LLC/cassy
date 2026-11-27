@@ -14,17 +14,12 @@ fn request(command: &str, role: &str) -> HookInput {
 }
 fn denial(command: &str, role: &str) -> Option<String> {
     let out = handle_pre_tool_use(&request(command, role), None).unwrap();
-    let value = serde_json::to_value(out.hook_specific_output?).unwrap();
-    (value["permissionDecision"] == "deny").then(|| {
-        value["permissionDecisionReason"]
-            .as_str()
-            .unwrap()
-            .to_string()
-    })
+    assert!(!super::blocked(&out), "a demoted guard never blocks: {command}");
+    super::warned(&out).contains(&"H-08").then(|| "[H-08]".to_string())
 }
 
 #[test]
-fn cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied() {
+fn cas_c082_worker_and_qa_unfiltered_browser_runs_are_flagged() {
     for role in ["worker", "qa"] {
         for command in [
             "scripts/journey-eval.sh /artifacts/cas-fixture --full",

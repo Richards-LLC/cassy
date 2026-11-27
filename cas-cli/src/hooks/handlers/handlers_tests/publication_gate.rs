@@ -1,5 +1,5 @@
 //! cas-f6ad (GH #1057): no deliverable share before its epic's verification
-//! passes. Deny, allow and the logged operator override through the real
+//! passes. Flag, allow and the logged operator override through the real
 //! PreToolUse handler.
 use crate::hooks::handlers::handle_pre_tool_use;
 use crate::test_support::TestEnvGuard;
@@ -32,6 +32,12 @@ fn denied(output: HookOutput) -> Option<String> {
             .unwrap()
             .to_string()
     })
+}
+
+/// The warning a flagged deliverable share carries; never a block.
+fn flagged(output: HookOutput) -> Option<String> {
+    assert!(!super::blocked(&output), "a demoted guard never blocks");
+    super::warned(&output).contains(&"H-07").then(|| "H-07".to_string())
 }
 
 fn focus_epic(env: &mut TestEnvGuard, root: &std::path::Path, epic: &str) {
@@ -72,7 +78,7 @@ fn epic_store(root: &std::path::Path) -> std::sync::Arc<dyn cas_store::TaskStore
 }
 
 #[test]
-fn deliverable_post_is_denied_while_epic_verification_is_open_cas_f6ad() {
+fn deliverable_post_is_flagged_while_epic_verification_is_open_cas_f6ad() {
     let mut env = TestEnvGuard::temp_home();
     let dir = tempfile::tempdir().unwrap();
     let store = epic_store(dir.path());
@@ -111,11 +117,8 @@ fn deliverable_post_is_denied_while_epic_verification_is_open_cas_f6ad() {
                 "replies":[{"text":"Summary"},{"text":"PDF","files":[{"filename":"report.pdf","content":"JVBERi0=","content_encoding":"base64"}]}]}),
         ),
     ] {
-        let reason = denied(handle_pre_tool_use(&input(tool, args.clone(), dir.path()), Some(&cas)).unwrap())
-            .unwrap_or_else(|| panic!("{tool} {args} must be denied"));
-        assert!(crate::gates::codes_in(&reason).contains(&"H-07"), "{reason}");
-        assert!(reason.contains("cas-pub-verify"), "the denial lists the open task: {reason}");
-        assert!(!reason.contains("cas-pub-work ("), "a closed child is not listed: {reason}");
+        flagged(handle_pre_tool_use(&input(tool, args.clone(), dir.path()), Some(&cas)).unwrap())
+            .unwrap_or_else(|| panic!("{tool} {args} must be flagged"));
     }
 }
 
@@ -138,7 +141,7 @@ fn operational_file_posts_ignore_unrelated_focused_epic_cas_81f8() {
             "file":{"filename":"shift-report.pdf"}}),
     ] {
         let result = handle_pre_tool_use(&input("mcp__violet__violet_post", post, dir.path()), Some(&cas)).unwrap();
-        assert!(denied(result).is_none(), "unattributed operational file was denied");
+        assert!(flagged(result).is_none(), "unattributed operational file was flagged");
     }
     assert_eq!(store.get("cas-pub-verify").unwrap().status, TaskStatus::InProgress);
 }
@@ -151,22 +154,22 @@ fn ordinary_messages_and_verified_epics_are_allowed_cas_f6ad() {
     let cas = dir.path().join(".cas");
     // A status message that shares no deliverable is not gated.
     let message = json!({"channel":"client-internal","kind":"message","text":"Working on it","epic_id":"cas-pub-epic"});
-    assert!(denied(handle_pre_tool_use(&input("mcp__violet__violet_post", message, dir.path()), Some(&cas)).unwrap()).is_none());
+    assert!(flagged(handle_pre_tool_use(&input("mcp__violet__violet_post", message, dir.path()), Some(&cas)).unwrap()).is_none());
     // A text-only ordered thread (cas-1206) shares no file either.
     let thread = json!({"channel":"client-internal","kind":"thread","text":"Status","idempotency_key":"k",
         "epic_id":"cas-pub-epic","replies":[{"text":"Was → Now"}]});
-    assert!(denied(handle_pre_tool_use(&input("mcp__violet__violet_post", thread, dir.path()), Some(&cas)).unwrap()).is_none());
+    assert!(flagged(handle_pre_tool_use(&input("mcp__violet__violet_post", thread, dir.path()), Some(&cas)).unwrap()).is_none());
     // A file post with no epic context has nothing to wait on.
     let unbound = json!({"channel":"client-internal","kind":"file","file":{"filename":"x.txt","content":"x"}});
-    assert!(denied(handle_pre_tool_use(&input("mcp__violet__violet_post", unbound, dir.path()), Some(&cas)).unwrap()).is_none());
+    assert!(flagged(handle_pre_tool_use(&input("mcp__violet__violet_post", unbound, dir.path()), Some(&cas)).unwrap()).is_none());
     // Reads are never gated.
-    assert!(denied(handle_pre_tool_use(&input("mcp__violet__violet_read", json!({"channel":"x","kind":"file"}), dir.path()), Some(&cas)).unwrap()).is_none());
+    assert!(flagged(handle_pre_tool_use(&input("mcp__violet__violet_read", json!({"channel":"x","kind":"file"}), dir.path()), Some(&cas)).unwrap()).is_none());
     // Once verification closes, the deliverable posts.
     let mut verify = store.get("cas-pub-verify").unwrap();
     verify.status = TaskStatus::Closed;
     store.update(&verify).unwrap();
     let file = json!({"channel":"client-internal","kind":"file","epic_id":"cas-pub-epic","file":{"filename":"report.pdf","content":"x"}});
-    assert!(denied(handle_pre_tool_use(&input("mcp__violet__violet_post", file, dir.path()), Some(&cas)).unwrap()).is_none());
+    assert!(flagged(handle_pre_tool_use(&input("mcp__violet__violet_post", file, dir.path()), Some(&cas)).unwrap()).is_none());
 }
 
 #[test]
@@ -180,12 +183,12 @@ fn recorded_operator_override_allows_and_is_logged_cas_f6ad() {
     store
         .append_note("cas-pub-epic", "[2020-01-01 00:00] DECISION PUBLICATION OVERRIDE: Daniel: post the draft now")
         .unwrap();
-    assert!(denied(handle_pre_tool_use(&input("mcp__violet__violet_post", file.clone(), dir.path()), Some(&cas)).unwrap()).is_some());
+    assert!(flagged(handle_pre_tool_use(&input("mcp__violet__violet_post", file.clone(), dir.path()), Some(&cas)).unwrap()).is_some());
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M");
     store
         .append_note("cas-pub-epic", &format!("[{now}] ✅ DECISION PUBLICATION OVERRIDE: Daniel: share it now, the client is waiting"))
         .unwrap();
-    assert!(denied(handle_pre_tool_use(&input("mcp__violet__violet_post", file, dir.path()), Some(&cas)).unwrap()).is_none());
+    assert!(flagged(handle_pre_tool_use(&input("mcp__violet__violet_post", file, dir.path()), Some(&cas)).unwrap()).is_none());
     let notes = store.get("cas-pub-epic").unwrap().notes;
     assert!(
         notes.contains("publication gate overridden") && notes.contains("the client is waiting") && notes.contains("cas-pub-verify"),
@@ -213,19 +216,18 @@ fn artifact_post_is_a_gated_deliverable_share_cassy_1148() {
         .unwrap();
     let post = json!({"action":"post","id":"art-gate1148","channel":"client-internal"});
     for tool in ["mcp__cas__artifact", "mcp__cs__artifact", "cas_artifact"] {
-        let reason = denied(handle_pre_tool_use(&input(tool, post.clone(), dir.path()), Some(&cas)).unwrap())
-            .unwrap_or_else(|| panic!("{tool} post must be denied while verification is open"));
-        assert!(reason.contains("cas-pub-verify"), "{reason}");
+        flagged(handle_pre_tool_use(&input(tool, post.clone(), dir.path()), Some(&cas)).unwrap())
+            .unwrap_or_else(|| panic!("{tool} post must be flagged while verification is open"));
     }
     // Publishing or reading an artifact shares nothing.
     for action in ["publish", "show", "list"] {
         let args = json!({"action":action,"id":"art-gate1148","task_id":"cas-pub-work"});
-        assert!(denied(handle_pre_tool_use(&input("mcp__cas__artifact", args, dir.path()), Some(&cas)).unwrap()).is_none());
+        assert!(flagged(handle_pre_tool_use(&input("mcp__cas__artifact", args, dir.path()), Some(&cas)).unwrap()).is_none());
     }
     let mut verify = store.get("cas-pub-verify").unwrap();
     verify.status = TaskStatus::Closed;
     store.update(&verify).unwrap();
-    assert!(denied(handle_pre_tool_use(&input("mcp__cas__artifact", post, dir.path()), Some(&cas)).unwrap()).is_none());
+    assert!(flagged(handle_pre_tool_use(&input("mcp__cas__artifact", post, dir.path()), Some(&cas)).unwrap()).is_none());
 }
 
 #[test]

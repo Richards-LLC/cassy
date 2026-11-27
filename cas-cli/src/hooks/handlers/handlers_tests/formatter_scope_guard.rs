@@ -14,18 +14,12 @@ fn input(command: &str, role: &str) -> HookInput {
 }
 
 fn deny_reason(out: &HookOutput) -> Option<String> {
-    let value = serde_json::to_value(out.hook_specific_output.as_ref()?).ok()?;
-    if value.get("permissionDecision")?.as_str()? != "deny" {
-        return None;
-    }
-    value
-        .get("permissionDecisionReason")
-        .and_then(|reason| reason.as_str())
-        .map(str::to_string)
+    assert!(!super::blocked(out), "a demoted guard never blocks");
+    super::warned(out).contains(&"H-05").then(|| "[H-05]".to_string())
 }
 
 #[test]
-fn worker_mutating_cargo_fmt_is_denied() {
+fn worker_mutating_cargo_fmt_is_flagged() {
     for command in [
         "cargo fmt",
         "cargo fmt --all && git diff --check",
@@ -39,7 +33,7 @@ fn worker_mutating_cargo_fmt_is_denied() {
 }
 
 #[test]
-fn worker_recursive_rustfmt_is_denied() {
+fn worker_recursive_rustfmt_is_flagged() {
     for command in [
         "rustfmt --edition 2024 crates/cas-store/src/lib.rs",
         "/usr/bin/rustfmt --edition 2024 cas-cli/src/cli/mod.rs",
@@ -48,7 +42,7 @@ fn worker_recursive_rustfmt_is_denied() {
         let out = handle_pre_tool_use(&input(command, "worker"), None).expect("handler ok");
         assert!(
             deny_reason(&out).is_some(),
-            "recursive formatter must be denied: {command:?}"
+            "recursive formatter must be flagged: {command:?}"
         );
     }
 }

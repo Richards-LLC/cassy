@@ -1,4 +1,4 @@
-//! cas-803f: a supervisor's long foreground Bash call is refused (H-49) so
+//! cas-803f: a supervisor's long foreground Bash call is flagged (H-49) so
 //! operator and Commander messages can always reach it. Commands replay the
 //! Nov 20 incidents; assertions read the gate code, never the wording.
 use crate::hooks::handlers::handle_pre_tool_use;
@@ -21,9 +21,8 @@ fn refusal_codes_as(tool_input: serde_json::Value, agent_id: Option<&str>) -> Op
         ..HookInput::default()
     };
     let output = handle_pre_tool_use(&input, None).unwrap();
-    let specific = serde_json::to_value(output.hook_specific_output?).unwrap();
-    (specific["permissionDecision"] == "deny")
-        .then(|| crate::gates::codes_in(specific["permissionDecisionReason"].as_str().unwrap()))
+    assert!(!super::blocked(&output), "a demoted guard never blocks");
+    Some(super::warned(&output)).filter(|codes| !codes.is_empty())
 }
 
 const LONG: &[&str] = &[
@@ -40,7 +39,7 @@ const LONG: &[&str] = &[
 ];
 
 #[test]
-fn cas_803f_supervisor_long_foreground_bash_is_refused() {
+fn cas_803f_supervisor_long_foreground_bash_is_flagged() {
     let mut env = TestEnvGuard::temp_home();
     env.remove("CAS_FACTORY_SESSION");
     // cas-4acdf: an Agent Teams supervisor carries its own agent_id on every hook.

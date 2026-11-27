@@ -175,6 +175,25 @@ pub(crate) mod test_support {
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
+    /// The guard codes a pre-tool answer warned about while the call proceeded.
+    pub(crate) fn pretool_warned(output: &cas_core::hooks::types::HookOutput) -> Vec<&'static str> {
+        serde_json::to_value(output)
+            .unwrap()
+            .pointer("/hookSpecificOutput/additionalContext")
+            .and_then(|context| context.as_str())
+            .map(crate::gates::codes_in)
+            .unwrap_or_default()
+    }
+
+    /// Whether a pre-tool answer blocks the call.
+    pub(crate) fn pretool_blocked(output: &cas_core::hooks::types::HookOutput) -> bool {
+        serde_json::to_value(output)
+            .unwrap()
+            .pointer("/hookSpecificOutput/permissionDecision")
+            .and_then(|decision| decision.as_str())
+            == Some("deny")
+    }
+
     /// Pin real styled bytes independently of crossterm's memoized NO_COLOR.
     /// Declare after `TestEnvGuard` and keep both alive through rendering, so
     /// color-policy changes are serialized and restored before the env lock.

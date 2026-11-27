@@ -1117,6 +1117,7 @@ mod tests {
         env.set("CAS_ROOT", &root);
         let agents = crate::store::open_agent_store(&root).unwrap();
         let tasks = crate::store::open_task_store(&root).unwrap();
+        crate::store::open_prompt_queue_store(&root).unwrap();
         let mut task = Task::new("cas-work".into(), "In flight".into());
         task.created_at = Utc::now() - Duration::hours(1);
         tasks.add(&task).unwrap();
@@ -1386,6 +1387,11 @@ mod tests {
         let report = super::super::window::build(&root, window.0, window.1, 10).unwrap();
         let report = serde_json::to_value(report).unwrap();
         let s = &report["efficiency"]["time_sinks"];
+        assert!(
+            s["phase_waterfall"]["tasks"].is_array(),
+            "{}",
+            s["phase_waterfall"]
+        );
         let w = &s["worker_minutes"]["by_worker"][&worker.id];
         let near = |value: &Value, expected: f64| {
             assert!(

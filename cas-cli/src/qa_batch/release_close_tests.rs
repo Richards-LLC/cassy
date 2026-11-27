@@ -564,6 +564,8 @@ fn unregistered_reconcile_queues_parent_review_cas_d47d() {
     git(&["config", "user.name", "Fixture"]);
     git(&["config", "user.email", "fixture@example.test"]);
     git(&["remote", "add", "origin", "https://github.com/example/parent-fixture.git"]);
+    git(&["commit", "--allow-empty", "-m", "release base"]);
+    let base = git(&["rev-parse", "HEAD"]);
     std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
     git(&["add", ".gitignore"]);
     git(&["commit", "-m", "published release"]);
@@ -581,28 +583,81 @@ fn unregistered_reconcile_queues_parent_review_cas_d47d() {
     tasks.add(&parent).unwrap();
     let mut child = Task::new("cas-shipped".into(), "Closed shipped member".into());
     child.origin_project = parent.origin_project.clone();
+    child.assignee = Some("fixture-worker".into());
     child.status = TaskStatus::Closed;
     child.deliverables.factory_branch_anchor = Some(published.clone());
     child.deliverables.green_merge_commit = Some(published.clone());
     child.deliverables.factory_branch_start = Some(FactoryBranchStart {
         work_target: WorkTarget { repo_selector: "project:parent-fixture".into(), target_branch: "main".into() },
-        branch: "factory/worker".into(), assignee: "worker".into(), base_sha: published.clone(),
+        branch: "factory/worker".into(), assignee: "fixture-worker".into(), base_sha: base,
     });
     tasks.add(&child).unwrap();
     tasks.add_dependency(&cas_types::Dependency::new(
         child.id.clone(), parent.id.clone(), cas_types::DependencyType::ParentChild,
     )).unwrap();
+    let mut qa = Task::new("cas-release-qa".into(), "Artifact-only release QA".into());
+    qa.origin_project = parent.origin_project.clone();
+    qa.execution_note = Some("no-code".into());
+    qa.assignee = Some("fixture-qa-worker".into());
+    let artifacts = cas_store::SqliteArtifactStore::open(&root).unwrap();
+    let context = crate::artifacts::PublishContext {
+        store: &artifacts,
+        roots: crate::artifacts::paths::PublishRoots::new(&root, &repo.join("artifacts"), &qa.id),
+        task_id: qa.id.clone(),
+        cloud: None,
+    };
+    let report_path = repo.join("report.md");
+    std::fs::write(&report_path, format!("# Release QA\nReviewed source: {published}\n")).unwrap();
+    let report = crate::artifacts::publish(&context, &report_path).unwrap().artifact;
+    qa.external_ref = Some(format!("artifact:{}/{}", qa.id, report.id));
+    tasks.add(&qa).unwrap();
+    tasks.add_dependency(&cas_types::Dependency::new(
+        qa.id.clone(), parent.id.clone(), cas_types::DependencyType::ParentChild,
+    )).unwrap();
+    let ledger_path = repo.join("LEDGER.md");
+    let covered = [child.id.clone()];
+    std::fs::write(&ledger_path, crate::qa_ledger::scaffold_with_coverage(&qa, &[], &published, &covered)).unwrap();
+    let ledger = crate::artifacts::publish(&context, &ledger_path).unwrap().artifact;
+    let receipt = prepare_receipt(
+        &root, &reviewer, "fixture-qa-worker", &covered, &published,
+        &ledger.id, &ledger_path, cas_store::QA_BATCH_RECEIPT_SCHEMA,
+    ).unwrap();
+    cas_store::record_qa_batch_receipt(&root, &receipt).unwrap();
+    let dispatch = cas_store::create_verification_dispatch(
+        &root, &qa.id, "fixture-qa-worker", &reviewer.id,
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    ).unwrap();
+    let mut approval = cas_types::Verification::new("ver-qa-fixture".into(), qa.id.clone());
+    approval.agent_id = Some(reviewer.id.clone());
+    approval.issuer_agent_id = Some(reviewer.id.clone());
+    approval.dispatch_id = Some(dispatch.id.clone());
+    approval.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+    approval.status = cas_types::VerificationStatus::Approved;
+    let mut connection = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+    let transaction = connection.transaction().unwrap();
+    cas_store::add_verification_with_conn(&transaction, &approval).unwrap();
+    cas_store::resolve_verification_dispatch_with_conn(&transaction, &dispatch.id, &reviewer.id, None, true)
+        .unwrap().unwrap();
+    transaction.commit().unwrap();
+    qa.status = TaskStatus::Closed;
+    qa.closed_at = Some(chrono::Utc::now());
+    tasks.update(&qa).unwrap();
     let scope = ReleaseScope {
         project_id: "parent-fixture".into(), repository: "example/parent-fixture".into(),
         release_id: format!("v{}", env!("CARGO_PKG_VERSION")),
         reviewed_sha: published.clone(), final_release_sha: published,
         promotion_pr: None, release_tag: None, constituent_epic_ids: vec![parent.id.clone()],
-        included_task_ids: vec![child.id.clone()], no_code_members: BTreeMap::new(), proof_refs: vec![],
+        included_task_ids: vec![child.id.clone()], no_code_members: BTreeMap::new(),
+        proof_refs: vec![ReleaseProofRef {
+            kind: ReleaseProofKind::Qa, artifact_id: ledger.id, sha256: ledger.sha256,
+            size_bytes: ledger.size_bytes, reviewed_sha: receipt.staging_sha, receipt_id: Some(receipt.id),
+        }],
     };
     let core = crate::mcp::CasCore::for_cli(root.clone());
     assert!(core.get_agent_id().is_err());
     let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
     assert!(inventory.exceptions.is_empty(), "{:?}", inventory.exceptions);
+    assert_eq!(inventory.deliveries.iter().map(|delivery| &delivery.task_id).collect::<Vec<_>>(), vec![&child.id]);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let result = runtime.block_on(crate::release_reconcile::reconcile_release(
         &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Backfill,

@@ -422,10 +422,11 @@ fn finish_turn_handled(rows: &[serde_json::Value], cli: cas_mux::SupervisorCli, 
 
 pub(super) fn supervisor_transcript(cas_dir: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli) -> Option<std::path::PathBuf> {
     let store = crate::store::open_agent_store(cas_dir).ok()?;
-    let agent = store.list(None).ok()?.into_iter().find(|agent|
+    let agent = store.list(None).ok()?.into_iter().filter(|agent|
         (agent.name == supervisor || agent.id == supervisor)
             && agent.role == cas_types::AgentRole::Supervisor
-            && agent.factory_session.as_deref() == Some(session))?;
+            && agent.factory_session.as_deref() == Some(session))
+        .max_by_key(|agent| (agent.status == cas_types::AgentStatus::Active, agent.registered_at))?;
     if cli == cas_mux::SupervisorCli::Codex
         && agent.cc_session_id.as_deref().is_some_and(|id| id.starts_with("codex-"))
     {

@@ -19,6 +19,12 @@ fn codex_supervisor_rollout_releases_idle_wake_and_keeps_tool_calls_busy() {
         supervisor.metadata.insert("supervisor_cli".into(), "codex".into());
         supervisor.metadata.insert("supervisor_account_dir".into(), account.to_string_lossy().into_owned());
         crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+        let mut stale = supervisor.clone();
+        stale.id = "stale-supervisor-8ff0".into();
+        stale.status = cas_types::AgentStatus::Stale;
+        stale.cc_session_id = Some("old-native-8ff0".into());
+        stale.registered_at += chrono::Duration::minutes(1);
+        crate::store::open_agent_store(&root).unwrap().register(&stale).unwrap();
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
         let id = queue.enqueue_urgent_with_outcome(
             super::SUPERVISOR_STARTUP_SOURCE, &name, "payload-wake", Some(&daemon.session_name),

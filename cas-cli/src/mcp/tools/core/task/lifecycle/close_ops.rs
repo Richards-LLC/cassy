@@ -8225,7 +8225,7 @@ impl CasCore {
                 && published_delivery_proof(&self.cas_root, &task, req.commit_receipt.as_deref()).is_none()
                 && !{
                     let mut no_code = task.clone();
-                    prepare_no_code_close_metadata(&mut no_code, req.execution_note.as_deref(), req.external_ref.as_deref()).is_ok()
+                    prepare_no_code_close_metadata(&mut no_code, inline_execution_note.as_deref(), inline_external_ref.as_deref()).is_ok()
                         && crate::mcp::tools::core::task::repo_context::resolve_repo_context(&self.cas_root, &target)
                             .is_ok_and(|context| no_code_task_without_own_commits(
                                 &context.repo_root, &no_code, &target.target_branch, req.commit_receipt.as_deref(),

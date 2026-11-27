@@ -11,7 +11,11 @@ fn connection(root: &Path) -> Result<Connection> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS efficiency_observations (
         kind TEXT NOT NULL, observation_key TEXT NOT NULL, occurred_at TEXT NOT NULL,
-        payload TEXT NOT NULL, PRIMARY KEY(kind, observation_key))",
+        payload TEXT NOT NULL, PRIMARY KEY(kind, observation_key));
+        CREATE INDEX IF NOT EXISTS efficiency_refusal_context ON events (
+            json_extract(metadata,'$.actor'),json_extract(metadata,'$.tool'),
+            json_extract(metadata,'$.action'),json_extract(metadata,'$.task_id'))
+        WHERE event_type='gate_refused' AND json_valid(metadata)",
     )?;
     Ok(db)
 }

@@ -5575,7 +5575,45 @@ The interval is `[since, until)` and both bounds are required, excluding
 `--release`. This mode reads local recorded rows only, without fetching Cloud or
 GitHub. Text and JSON include refusal calls per observed merge, supervisor wake
 latency per harness and issue-filing provenance. Closure receipts are counted by
-their update observation; actual issue close timestamps remain unknown.
+their update observation. Successful release reconciliation closes additionally
+record the time the close command completed; historical closes without that
+observation remain unknown.
+
+The window's `efficiency.time_sinks` object and text output report:
+
+- Per-task first-lifecycle phases: creation to start, implementation to first
+  review/park, review to park, park to train, train to main, and main to
+  publication. Intervals are clipped to the requested window. Median/p90 use
+  completed intervals; unfinished ends are censored separately. Later phases
+  require retained release membership and main-to-publication timing. Only
+  completed turns entirely inside one phase receive phase tokens.
+- Worker minutes partition registration through the last observed heartbeat
+  into in-turn, leased out-of-turn, blocked/waiting, and unassigned intervals.
+  Overlapping turns count once. Legacy TaskBlocked events also cover park and
+  cancellation; leased silence does not establish what the worker was doing.
+- Refusal-to-next-success minutes require the same actor, task, tool and action.
+  Repeated successes preserve the first recovery. Per-code tokens include only
+  retained, fully contained turns by that actor/task; boundary turns are
+  counted as excluded. Unresolved calls and missing context remain visible.
+- Supervisor no-op rates and recorded wake reasons; review verdict counts per
+  task and execution minutes; cross-machine Cloud creation to local admission
+  latency, with invalid clocks excluded. These are admission and execution
+  measurements, not evidence that a person acted on a message.
+- CI queue and run minutes by job, for runs created in the window. The existing
+  online release report retains job timestamps in `ledger-sensors` captures;
+  nightly reports replay overlapping captures without fetching GitHub. Jobs
+  deduplicate by ID using the newest capture. Coverage gaps, missing timestamps
+  and capture time are shown; old captures without timestamps remain unknown.
+- Retained attributed tokens per bug with an observed main/master merge or
+  published release membership in the window. Costs can include earlier turns;
+  unattributed turns mean these are lower bounds. A close or train merge alone
+  never counts as shipping.
+
+`efficiency_observations` is a local, idempotent telemetry table populated by
+successful MCP retries, accepted peer messages and successful issue closes.
+It does not change action admission. The top-five ranking compares recorded
+worker, task, message, recovery and job minutes; categories overlap and must
+not be added together. Missing sources are excluded from that ranking.
 
 `cas scorecard --release vX.Y.Z` (alias `cas ledger report`) keeps review history per delivery cycle,
 with independent, supervisor-direct or unknown historical provenance. The check

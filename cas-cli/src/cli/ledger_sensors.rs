@@ -57,6 +57,8 @@ pub(super) struct JobTiming {
     pub job_id: u64,
     pub run_id: u64,
     pub head_sha: Option<String>,
+    #[serde(default)]
+    pub run_created_at: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -485,7 +487,7 @@ fn runners(
             }
             out.jobs_examined += 1;
             out.timings.as_mut().unwrap().push(JobTiming {
-                job_id, run_id: id, head_sha: job["head_sha"].as_str().or_else(|| run["head_sha"].as_str()).map(str::to_owned),
+                job_id, run_id: id, run_created_at: Some(created), head_sha: job["head_sha"].as_str().or_else(|| run["head_sha"].as_str()).map(str::to_owned),
                 created_at: job["created_at"].as_str().and_then(time),
                 started_at: job["started_at"].as_str().and_then(time),
                 completed_at: job["completed_at"].as_str().and_then(time),
@@ -642,7 +644,13 @@ struct Capture {
     runners: Measure<RunnerLosses>,
     issues: Measure<IssueDays>,
 }
-pub(super) fn recorded_ci(root: &Path, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<JobTiming>> {
+pub(super) struct RecordedCi {
+    pub jobs: Vec<JobTiming>,
+    pub covered: Vec<(DateTime<Utc>,DateTime<Utc>)>,
+    pub captured_at: DateTime<Utc>,
+}
+
+pub(super) fn recorded_ci(root: &Path, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<RecordedCi> {
     let repo = crate::github_issue_attach::default_repo_for(root);
     let mut captures = vec![];
     for path in std::fs::read_dir(root.join("ledger-sensors"))? {
@@ -650,16 +658,23 @@ pub(super) fn recorded_ci(root: &Path, from: DateTime<Utc>, to: DateTime<Utc>) -
         if path.extension().is_none_or(|ext| ext != "json") { continue }
         if let Ok(bytes) = std::fs::read(path)
             && let Ok(capture) = serde_json::from_slice::<Capture>(&bytes)
-            && capture.from <= from && capture.to >= to && capture.actions_repo == repo {
+            && capture.from < to && capture.to > from && capture.actions_repo == repo {
             captures.push(capture);
         }
     }
     captures.sort_by_key(|capture| capture.captured_at);
-    let capture = captures.pop().context("no Actions capture covers the requested window")?;
-    match capture.runners {
-        Measure::Known(runners) => runners.timings.context("capture predates retained job timestamps"),
-        Measure::Unknown { unknown } => bail!(unknown),
+    let mut jobs = BTreeMap::new();
+    let mut covered = vec![];
+    let mut captured_at = None;
+    for capture in captures {
+        if let Measure::Known(runners) = capture.runners && let Some(timings) = runners.timings {
+            covered.push((capture.from.max(from),capture.to.min(to)));
+            captured_at = Some(capture.captured_at);
+            for job in timings { jobs.insert(job.job_id,job); }
+        }
     }
+    Ok(RecordedCi {jobs:jobs.into_values().collect(),covered,
+        captured_at:captured_at.context("no retained Actions job timestamps overlap this window")?})
 }
 
 pub(super) fn external(

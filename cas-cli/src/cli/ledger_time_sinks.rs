@@ -73,6 +73,8 @@ struct Waterfall {
     completed_minutes: BTreeMap<String, Distribution>,
     censored_minutes: BTreeMap<String, f64>,
     unattributed_turns: usize,
+    tokens_by_phase: BTreeMap<String, Tokens>,
+    coverage: &'static str,
 }
 
 #[derive(Serialize, Default)]
@@ -122,10 +124,14 @@ struct Reviews {
 #[derive(Serialize)]
 pub(super) struct Ci {
     jobs: usize,
+    captured_at: Time,
+    covered_window_minutes: f64,
+    uncovered_window_minutes: f64,
     queue_minutes: Distribution,
     run_minutes: Distribution,
     missing_queue: usize,
     missing_run: usize,
+    missing_creation_time: usize,
 }
 #[derive(Serialize)]
 struct Peers {
@@ -136,6 +142,7 @@ struct Peers {
 #[derive(Serialize)]
 struct Shipped {
     shipped_fixes: usize,
+    release_membership_known: bool,
     fixes_with_turns: usize,
     tokens: Tokens,
     input_per_fix: Option<f64>,
@@ -351,6 +358,15 @@ pub(super) fn build(root: &Path, db: &Connection, since: Time, until: Time) -> R
         add("ci_queue".into(), c.queue_minutes.total, "job minutes");
         add("ci_run".into(), c.run_minutes.total, "job minutes");
     }
+    if let Measure::Known(rows) = &out.refusal_recovery_by_code {
+        for (code, r) in rows {
+            add(
+                format!("refusal_{code}"),
+                r.minutes.total,
+                "per-call recovery minutes, may overlap",
+            );
+        }
+    }
     add(
         "review".into(),
         out.reviews.minutes.total,
@@ -435,14 +451,26 @@ fn peers(db: &Connection, window: Span) -> Result<Peers> {
 }
 
 pub(super) fn ci(root: &Path, window: Span) -> Result<Ci> {
-    let jobs = sensors::recorded_ci(root, window.0, window.1)?;
+    let capture = sensors::recorded_ci(root, window.0, window.1)?;
+    let mut covered = capture.covered;
+    covered.sort();
+    let mut covered_window_minutes = 0.0;
+    let mut end = window.0;
+    for (from, to) in covered {
+        if to > end {
+            covered_window_minutes += minutes((from.max(end), to));
+            end = to;
+        }
+    }
     let mut queue = vec![];
     let mut run = vec![];
     let mut count = 0;
+    let mut missing_creation_time = 0;
     let (mut missing_queue, mut missing_run) = (0, 0);
-    for job in jobs {
+    for job in capture.jobs {
+        missing_creation_time += usize::from(job.run_created_at.is_none());
         if job
-            .created_at
+            .run_created_at
             .is_none_or(|at| at < window.0 || at >= window.1)
         {
             continue;
@@ -459,10 +487,14 @@ pub(super) fn ci(root: &Path, window: Span) -> Result<Ci> {
     }
     Ok(Ci {
         jobs: count,
+        captured_at: capture.captured_at,
+        covered_window_minutes,
+        uncovered_window_minutes: (minutes(window) - covered_window_minutes).max(0.0),
         queue_minutes: Distribution::from(queue),
         run_minutes: Distribution::from(run),
         missing_queue,
         missing_run,
+        missing_creation_time,
     })
 }
 
@@ -519,7 +551,10 @@ fn recoveries(
                 let Some(end) = end else { continue };
                 elapsed.push(minutes((*start, *end)));
                 for event in events.iter().filter(|e| {
-                    e.actor.as_deref() == metadata["actor"].as_str() && e.actor.is_some()
+                    e.actor.as_deref() == metadata["actor"].as_str()
+                        && e.actor.is_some()
+                        && (metadata["task_id"].as_str().is_none()
+                            || e.task_id.as_deref() == metadata["task_id"].as_str())
                 }) {
                     if let Some(span) = turn_span(event)
                         && clipped(span, (*start, *end)).is_some()
@@ -681,7 +716,71 @@ fn workers(root: &Path, db: &Connection, events: &[QualityEvent], window: Span) 
     Ok(out)
 }
 
+struct Published {
+    main: Option<Time>,
+    published: Time,
+}
+
+fn release_members(
+    db: &Connection,
+    events: &[QualityEvent],
+) -> Result<(BTreeMap<String, Published>, bool)> {
+    let present: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='release_reconcile_operations')", [], |r| r.get(0))?;
+    if !present {
+        return Ok((BTreeMap::new(), false));
+    }
+    let mut members = BTreeMap::new();
+    let mut stmt = db.prepare("SELECT receipt_json FROM release_reconcile_operations")?;
+    for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
+        let receipt: crate::release_reconcile::ReleaseReconcileReceipt =
+            serde_json::from_str(&row?)?;
+        let Some(event) = events
+            .iter()
+            .filter(|e| {
+                matches!(e.payload, QualityPayload::Release { .. })
+                    && e.release_version.as_ref() == Some(&receipt.scope.release_id)
+            })
+            .min_by_key(|e| e.occurred_at)
+        else {
+            continue;
+        };
+        let main = match event.payload {
+            QualityPayload::Release {
+                main_to_published_minutes: Some(n),
+                ..
+            } if n.is_finite() && (0.0..=525600.0).contains(&n) => {
+                Some(event.occurred_at - Duration::milliseconds((n * 60000.0).round() as i64))
+            }
+            _ => None,
+        };
+        for task in receipt
+            .scope
+            .included_task_ids
+            .iter()
+            .filter(|id| !receipt.scope.no_code_members.contains_key(*id))
+        {
+            let p = Published {
+                main,
+                published: event.occurred_at,
+            };
+            members
+                .entry(task.clone())
+                .and_modify(|old: &mut Published| {
+                    if p.published < old.published {
+                        *old = Published {
+                            main: p.main,
+                            published: p.published,
+                        };
+                    }
+                })
+                .or_insert(p);
+        }
+    }
+    Ok((members, true))
+}
+
 fn waterfall(db: &Connection, events: &[QualityEvent], window: Span) -> Result<Waterfall> {
+    let (published, _) = release_members(db, events)?;
     let parks: BTreeMap<_, _> = sensors::parks(db)?
         .into_iter()
         .map(|p| (p.task_id, p.parked_at))
@@ -708,6 +807,8 @@ fn waterfall(db: &Connection, events: &[QualityEvent], window: Span) -> Result<W
         completed_minutes: BTreeMap::new(),
         censored_minutes: BTreeMap::new(),
         unattributed_turns: 0,
+        tokens_by_phase: BTreeMap::new(),
+        coverage: "First retained task start/park/train merge; window-clipped spans. Median/p90 exclude censored ends. Only turns fully inside one phase receive tokens. Release membership and recorded main-to-publication duration supply later phases when available.",
     };
     let mut values = BTreeMap::<String, Vec<f64>>::new();
     let mut attributed = BTreeSet::new();
@@ -720,7 +821,12 @@ fn waterfall(db: &Connection, events: &[QualityEvent], window: Span) -> Result<W
     })? {
         let (task, created, closed) = row?;
         let terminal = closed.as_deref().and_then(parse_time);
-        if terminal.is_some_and(|at| at <= window.0) {
+        if terminal.is_some_and(|at| at <= window.0)
+            && !published
+                .get(&task)
+                .is_some_and(|p| p.published >= window.0)
+            && !merges.get(&task).is_some_and(|at| *at >= window.0)
+        {
             continue;
         }
         let created = parse_time(&created).context("invalid task creation")?;
@@ -745,14 +851,23 @@ fn waterfall(db: &Connection, events: &[QualityEvent], window: Span) -> Result<W
             })
             .min();
         let park = parks.get(&task).copied();
+        let review = review.filter(|at| park.is_none_or(|park| *at <= park));
         let merged = merges.get(&task).copied();
+        let publication = published.get(&task);
+        let main = publication.and_then(|p| p.main);
+        let released = publication.map(|p| p.published);
         for (name, from, to) in [
             ("created_to_started", Some(created), start),
             ("implementation", start, review.or(park).or(merged)),
             ("review_to_park", review, park.or(merged)),
             ("park_to_train", park, merged),
+            ("train_to_main", merged, main),
+            ("main_to_published", main, released),
         ] {
             let Some(from) = from else { continue };
+            if name == "train_to_main" && main.is_none() {
+                continue;
+            }
             if to.is_some_and(|to| to < from) {
                 continue;
             }
@@ -790,6 +905,13 @@ fn waterfall(db: &Connection, events: &[QualityEvent], window: Span) -> Result<W
             });
         }
     }
+    for p in &out.tasks {
+        let t = out.tokens_by_phase.entry(p.phase.into()).or_default();
+        t.turns += p.tokens.turns;
+        t.input += p.tokens.input;
+        t.output += p.tokens.output;
+        t.missing += p.tokens.missing;
+    }
     out.completed_minutes = values
         .into_iter()
         .map(|(k, v)| (k, Distribution::from(v)))
@@ -814,6 +936,19 @@ fn shipped(db: &Connection, events: &[QualityEvent], window: Span) -> Result<Shi
     })? {
         fixed.insert(row?);
     }
+    let (members, release_membership_known) = release_members(db, events)?;
+    for (task, p) in members {
+        if window.0 <= p.published && p.published < window.1 {
+            let bug: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1 AND task_type='bug')",
+                [&task],
+                |r| r.get(0),
+            )?;
+            if bug {
+                fixed.insert(task);
+            }
+        }
+    }
     let mut tokens = Tokens::default();
     let mut with_turns = BTreeSet::new();
     for event in events
@@ -829,11 +964,12 @@ fn shipped(db: &Connection, events: &[QualityEvent], window: Span) -> Result<Shi
         .then_some(fixed.len() as f64);
     Ok(Shipped {
         shipped_fixes: fixed.len(),
+        release_membership_known,
         fixes_with_turns: with_turns.len(),
         input_per_fix: denominator.map(|n| tokens.input as f64 / n),
         output_per_fix: denominator.map(|n| tokens.output as f64 / n),
         tokens,
-        coverage: "Only bugs with an observed main/master merge in this window; retained attributed turns through window end. Train-only and closed-only tasks do not prove shipping; unattributed turns cannot establish full cost.",
+        coverage: "Bugs with an observed main/master merge or published release membership in this window; retained attributed turns through window end. Train-only and closed-only tasks do not prove shipping. These attributed costs are a lower bound when turns lack task attribution.",
     })
 }
 
@@ -842,10 +978,14 @@ pub(super) fn render(out: &mut String, value: &Measure<TimeSinks>) {
         let _ = writeln!(out, "  Time sinks: {}", value.render(|_| String::new()));
         return;
     };
+    let number = |n: Option<f64>| n.map_or_else(|| "unknown".into(), |n| format!("{n:.2}"));
     let distribution = |d: &Distribution| {
         format!(
-            "n={} median/p90 {:?}/{:?}, total {:.2}",
-            d.samples, d.median, d.p90, d.total
+            "n={} median/p90 {}/{}, total {:.2}",
+            d.samples,
+            number(d.median),
+            number(d.p90),
+            d.total
         )
     };
     let _ = writeln!(
@@ -888,20 +1028,24 @@ pub(super) fn render(out: &mut String, value: &Measure<TimeSinks>) {
         out,
         "  Supervisor: {}",
         s.supervisor.render(|s| format!(
-            "{} turns; {} no-op; rate {:?}; wake reasons {:?}; {} unknown actor turns",
-            s.turns, s.no_op, s.no_op_rate, s.by_wake_reason, s.unknown_actor_turns
+            "{} turns; {} no-op; rate {}; wake reasons {:?}; {} unknown actor turns",
+            s.turns,
+            s.no_op,
+            number(s.no_op_rate),
+            s.by_wake_reason,
+            s.unknown_actor_turns
         ))
     );
     let _ = writeln!(
         out,
         "  CI queue vs run (job minutes): {}",
         s.ci.render(|c| format!(
-            "{} jobs; queue {}; run {}; missing queue/run {}/{}",
+            "{} jobs; queue {}; run {}; missing queue/run {}/{}; {} without run creation time; coverage {:.2} min, {:.2} min missing; captured {}",
             c.jobs,
             distribution(&c.queue_minutes),
             distribution(&c.run_minutes),
             c.missing_queue,
-            c.missing_run
+            c.missing_run, c.missing_creation_time, c.covered_window_minutes, c.uncovered_window_minutes, c.captured_at
         ))
     );
     let _ = writeln!(
@@ -1013,6 +1157,7 @@ mod tests {
             event.actor = Some(actor.into());
             event.task_id = task.map(str::to_string);
             event.occurred_at = end;
+            event.scope = crate::cloud::resolve_canonical_id_for_sync(&root).unwrap_or_default();
             let id = event.id();
             assert!(crate::quality_ledger::emit(&root, &event));
             id
@@ -1034,6 +1179,15 @@ mod tests {
             10.0,
             false,
             Some(prior),
+        );
+        emit_turn(
+            "worker-overlap",
+            &worker.id,
+            Some(&task.id),
+            at + Duration::minutes(17),
+            5.0,
+            false,
+            None,
         );
         emit_turn(
             "lead-noop",
@@ -1115,6 +1269,8 @@ mod tests {
         crate::efficiency_facts::issue_closed(&root, "org/repo#43", window.1);
         let mut fixed = Task::new("cas-shipped".into(), "Shipped bug".into());
         fixed.task_type = TaskType::Bug;
+        fixed.created_at = at - Duration::minutes(10);
+        fixed.closed_at = Some(at + Duration::seconds(1));
         tasks.add(&fixed).unwrap();
         cas_store::record_observed_delivery_merge(
             &root,
@@ -1135,14 +1291,90 @@ mod tests {
             false,
             None,
         );
+        let mut member = Task::new("cas-release-member".into(), "Release member".into());
+        member.task_type = TaskType::Bug;
+        member.created_at = at - Duration::hours(1);
+        member.closed_at = Some(at - Duration::minutes(20));
+        tasks.add(&member).unwrap();
+        cas_store::record_observed_delivery_merge(
+            &root,
+            &member.id,
+            "factory/member",
+            "epic/train",
+            "ccccccc",
+            "ddddddd",
+            &lead.id,
+        )
+        .unwrap();
+        emit_turn(
+            "member-turn",
+            &worker.id,
+            Some(&member.id),
+            at - Duration::minutes(25),
+            2.0,
+            false,
+            None,
+        );
+        let key = cas_store::release_reconcile_store::ReleaseOperationKey {
+            project_id: "scorecard-fixture".into(),
+            release_id: "v1.0.0".into(),
+            final_release_sha: "a".repeat(40),
+        };
+        let receipt = crate::release_reconcile::ReleaseReconcileReceipt {
+            scope: crate::qa_batch::ReleaseScope {
+                project_id: key.project_id.clone(),
+                repository: "org/repo".into(),
+                release_id: key.release_id.clone(),
+                reviewed_sha: key.final_release_sha.clone(),
+                final_release_sha: key.final_release_sha.clone(),
+                promotion_pr: None,
+                release_tag: Some(key.release_id.clone()),
+                constituent_epic_ids: vec![],
+                included_task_ids: vec![member.id.clone()],
+                no_code_members: BTreeMap::new(),
+                proof_refs: vec![],
+            },
+            key: key.clone(),
+            reconciler_version: Some(env!("CARGO_PKG_VERSION").into()),
+            reconciler_stale: false,
+            preview: None,
+            triggers: vec![],
+            members: BTreeMap::new(),
+            close_intents: BTreeMap::new(),
+            issue_outcomes: vec![],
+            parents: BTreeMap::new(),
+            exceptions: vec![],
+            started_at: at.to_rfc3339(),
+            updated_at: at.to_rfc3339(),
+            complete: true,
+            sync_pending: vec![],
+            residuals: vec![],
+            notice_intent: None,
+        };
+        cas_store::release_reconcile_store::ReleaseOperation::open(&root, key)
+            .unwrap()
+            .save(&serde_json::to_value(receipt).unwrap())
+            .unwrap();
+        let mut release = NewQualityEvent::new(
+            "release-fixture",
+            QualityPayload::Release {
+                commit_to_main_minutes: None,
+                main_to_published_minutes: Some(5.0),
+                ejections: 0,
+                rescues: 0,
+            },
+        );
+        release.release_version = Some("v1.0.0".into());
+        release.occurred_at = at + Duration::minutes(50);
+        assert!(crate::quality_ledger::emit(&root, &release));
         let db = Connection::open(root.join("cas.db")).unwrap();
         let report = super::super::window::build(&root, window.0, window.1, 10).unwrap();
         let report = serde_json::to_value(report).unwrap();
         let s = &report["efficiency"]["time_sinks"];
         let w = &s["worker_minutes"]["by_worker"][&worker.id];
         assert_eq!(w["observed_alive"], 70.0);
-        assert_eq!(w["in_turn"], 14.0);
-        assert_eq!(w["leased_out_of_turn"], 30.0);
+        assert_eq!(w["in_turn"], 16.0);
+        assert_eq!(w["leased_out_of_turn"], 28.0);
         assert_eq!(w["blocked_or_waiting"], 20.0);
         assert_eq!(w["unassigned"], 6.0);
         assert_eq!(
@@ -1154,6 +1386,10 @@ mod tests {
         assert_eq!(s["supervisor"]["by_wake_reason"]["task_lifecycle"], 2);
         assert_eq!(s["reviews"]["rounds_by_task"][&task.id], 1);
         assert_eq!(s["reviews"]["minutes"]["total"], 5.0);
+        assert_eq!(
+            s["phase_waterfall"]["completed_minutes"]["main_to_published"]["total"],
+            5.0
+        );
         assert_eq!(
             s["refusal_recovery_by_code"]["G-61"]["minutes"]["median"],
             15.0
@@ -1167,7 +1403,7 @@ mod tests {
             s["peer_latency"]["cloud_created_to_admitted_minutes"]["samples"],
             1
         );
-        assert_eq!(s["tokens_per_shipped_fix"]["shipped_fixes"], 1);
+        assert_eq!(s["tokens_per_shipped_fix"]["shipped_fixes"], 2);
         assert_eq!(s["tokens_per_shipped_fix"]["input_per_fix"], 6000.0);
         assert_eq!(report["efficiency"]["issues"]["closed_in_window"], 1);
         let implementation = s["phase_waterfall"]["tasks"]

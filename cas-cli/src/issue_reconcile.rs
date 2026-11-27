@@ -94,7 +94,7 @@ impl GhIssueStates {
     /// call's deadline let one slow `gh` time out every later close (v4.22:
     /// 22 of 22, v4.21: 5 of 6). A failed or hung attempt is retried with a
     /// growing pause, and the last error names the issue for the report.
-    fn close_completed(&self, issue: &IssueRef, comment: &str) -> Result<(), String> {
+    fn close_completed(&self, issue: &IssueRef, comment: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
         let repo = repo_key(&issue.owner, &issue.repo);
         let cap = env_millis("CAS_GH_CLOSE_CAP_MS").unwrap_or(GH_CLOSE_CAP);
         let backoff = env_millis("CAS_GH_CLOSE_BACKOFF_MS").unwrap_or(GH_CLOSE_BACKOFF);
@@ -107,7 +107,7 @@ impl GhIssueStates {
             command.args(["issue", "close", &issue.number.to_string(), "--repo", &repo,
                 "--reason", "completed", "--comment", comment]).env("GH_PROMPT_DISABLED", "1");
             last = match run_command(&mut command, Deadline::after(cap), cap) {
-                Ok(output) if output.status.success() => return Ok(()),
+                Ok(output) if output.status.success() => return Ok(chrono::Utc::now()),
                 Ok(output) => format!("gh issue close {} failed: {}", issue.display(),
                     String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or("").trim()),
                 Err(error) => format!("gh issue close {} did not complete: {error:?}", issue.display()),
@@ -749,9 +749,9 @@ fn reconcile_owned_issues(
     let closed = close_in_pool(&gh, &ready);
     for ((index, _, _), result) in ready.iter().zip(closed) {
         match result {
-            Ok(()) => {
+            Ok(closed_at) => {
                 outcomes[*index].action = IssueAction::Closed;
-                crate::efficiency_facts::issue_closed(root, &outcomes[*index].issue, chrono::Utc::now());
+                crate::efficiency_facts::issue_closed(root, &outcomes[*index].issue, closed_at);
             }
             Err(error) => {
                 outcomes[*index].action = IssueAction::Failed;
@@ -765,11 +765,11 @@ fn reconcile_owned_issues(
 /// Close `ready` issues with at most [`GH_CLOSE_WORKERS`] calls in flight.
 /// Results come back in input order, so a report never depends on which close
 /// finished first.
-fn close_in_pool(gh: &GhIssueStates, ready: &[(usize, IssueRef, String)]) -> Vec<Result<(), String>> {
+fn close_in_pool(gh: &GhIssueStates, ready: &[(usize, IssueRef, String)]) -> Vec<Result<chrono::DateTime<chrono::Utc>, String>> {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let next = AtomicUsize::new(0);
-    let results: Mutex<Vec<Option<Result<(), String>>>> = Mutex::new(vec![None; ready.len()]);
+    let results: Mutex<Vec<Option<Result<chrono::DateTime<chrono::Utc>, String>>>> = Mutex::new(vec![None; ready.len()]);
     std::thread::scope(|scope| {
         for _ in 0..GH_CLOSE_WORKERS.min(ready.len()) {
             scope.spawn(|| loop {
@@ -1169,8 +1169,8 @@ exit 0
         let actions: BTreeMap<String, IssueAction> = outcomes.iter().map(|o| (o.issue.clone(), o.action.clone())).collect();
         assert_eq!(actions, expected, "{outcomes:?}");
         let db = rusqlite::Connection::open(root.join("cas.db")).unwrap();
-        let observed_closures: usize = db.query_row("SELECT count(DISTINCT json_extract(payload,'$.issue')) FROM efficiency_observations WHERE kind='issue_closed'", [], |r| r.get(0)).unwrap();
-        assert_eq!(observed_closures, expected.values().filter(|a| **a == IssueAction::Closed).count());
+        let observed_closures: u64 = db.query_row("SELECT count(DISTINCT json_extract(payload,'$.issue')) FROM efficiency_observations WHERE kind='issue_closed'", [], |r| r.get(0)).unwrap();
+        assert_eq!(observed_closures, expected.values().filter(|a| **a == IssueAction::Closed).count() as u64);
 
         let pending: Vec<&IssueOutcome> = outcomes.iter().filter(|o| o.action == IssueAction::Failed).collect();
         assert_eq!(pending.len(), 1, "exactly the exhausted close is pending: {outcomes:?}");

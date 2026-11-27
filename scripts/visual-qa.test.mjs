@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { copyFile, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { createServer } from 'node:http';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -13,6 +15,84 @@ import { runVisualQa as runBuiltinVisualQa } from '../cas-cli/src/builtins/skill
 const here = fileURLToPath(new URL('.', import.meta.url));
 const fixture = (name) => join(here, 'visual-qa-fixtures', name);
 const repoRoot = join(here, '..');
+
+test('strict build evidence binds loaded entry bytes and refuses ambiguous or replaced documents', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'visual-qa-build-'));
+  const clean = await readFile(fixture('clean.html'), 'utf8');
+  const main = 'document.body.dataset.entry = "loaded";';
+  const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+  let document, receipt, requests, foreignAllowed;
+  const serve = (request, response) => {
+    requests.push(request.url);
+    response.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'self' 'unsafe-inline'${foreignAllowed ? ` ${foreign}` : ''}; style-src 'self' 'unsafe-inline'`);
+    const body = request.url === '/entry.html' ? document : request.url === '/RECEIPT.json' ? JSON.stringify(receipt) :
+      request.url === '/main.js' ? main : request.url === '/other.js' ? 'document.body.dataset.other = "loaded";' :
+      request.url === '/next.html' ? clean.replace('<body>', '<body data-next>') : null;
+    response.writeHead(body === null ? 404 : 200, { 'Content-Type': request.url.endsWith('.js') ? 'text/javascript' : request.url.endsWith('.json') ? 'application/json' : 'text/html' });
+    response.end(body);
+  };
+  const servers = [createServer(serve), createServer(serve)];
+  await Promise.all(servers.map(server => new Promise(resolve => server.listen(0, '127.0.0.1', resolve))));
+  const origin = `http://127.0.0.1:${servers[0].address().port}`;
+  const foreign = `http://127.0.0.1:${servers[1].address().port}`;
+  const classic = '<script src="/main.js"></script>';
+  const module = '<script type="module" src="/main.js"></script>';
+  const foreignScript = `<script src="${foreign}/other.js"></script>`;
+  try {
+    for (const [producer, inspect] of [['repository', runVisualQa], ['builtin', runBuiltinVisualQa]]) {
+      for (const row of [
+        { name: 'classic with blocked external declaration', scripts: classic + foreignScript, status: 'PASS' },
+        { name: 'module with classic companion', scripts: module + '<script src="/other.js"></script>', status: 'PASS' },
+        { name: 'inline module forbids classic fallback', scripts: '<script type="module">void 0;</script>' + classic },
+        { name: 'missing declaration', scripts: '<script>void 0;</script>' },
+        { name: 'unloaded declaration', scripts: '<script src="/missing.js"></script>' },
+        { name: 'multiple classic declarations', scripts: classic + '<script src="/other.js"></script>' },
+        { name: 'duplicate classic declaration', scripts: classic + classic },
+        { name: 'multiple modules', scripts: module + '<script type="module" src="/other.js"></script>' },
+        { name: 'unloaded module forbids classic fallback', scripts: '<script type="module" src="/missing.js"></script>' + classic },
+        { name: 'foreign entry', scripts: foreignScript, foreignAllowed: true },
+        { name: 'foreign companion', scripts: classic + foreignScript, foreignAllowed: true },
+        { name: 'stale document digest', scripts: classic, wrongAsset: 'index', status: 'REFUSED' },
+        { name: 'wrong script digest', scripts: classic, wrongAsset: 'main', status: 'REFUSED' },
+        { name: 'invalid receipt revision', scripts: classic, invalidRevision: true },
+        { name: 'document continuity', scripts: classic, navigation: true, status: 'FAIL' },
+      ]) {
+        await t.test(`${producer}: ${row.name}`, async () => {
+          requests = [];
+          foreignAllowed = row.foreignAllowed;
+          document = clean.replace('href="#details"', 'href="/next.html"').replace('</body>', `${row.scripts}</body>`);
+          receipt = { revision: row.invalidRevision ? '' : 'a'.repeat(40), sha256: 'b'.repeat(64), assets: { index: digest(document), main: digest(main) } };
+          if (row.wrongAsset) receipt.assets[row.wrongAsset] = '0'.repeat(64);
+          const options = { urls: [origin + '/entry.html'], artifactDir: await mkdtemp(join(directory, 'capture-')),
+            strict: true, requireBuild: true, schemes: ['light'], viewports: ['390x800'] };
+          if (row.navigation) options.journey = { name: 'navigation', states: [{ name: 'replaced', steps: [{ click: 'a' }, { waitFor: 'body[data-next]' }] }] };
+          if (!row.status) {
+            await assert.rejects(inspect(options));
+            assert.ok(requests.includes('/entry.html'));
+            assert.equal(requests.includes('/RECEIPT.json'), Boolean(row.invalidRevision));
+            return;
+          }
+          const result = await inspect(options);
+          assert.equal(result.status, row.status, JSON.stringify(result.findings));
+          assert.equal(result.exitCode, row.status === 'PASS' ? 0 : row.status === 'REFUSED' ? 2 : 1);
+          assert.deepEqual(result.build, receipt);
+          assert.deepEqual(result.observedAssets, { index: digest(document), main: digest(main) });
+          assert.ok(requests.includes('/main.js'));
+          assert.ok(requests.includes('/RECEIPT.json'));
+          if (row.navigation) {
+            assert.ok(requests.includes('/next.html'));
+            assert.deepEqual(result.journeyRuns[0].steps.map(step => step.status), ['ok', 'ok']);
+            assert.equal(result.screenshots.length, 1);
+            assert.ok(result.findings.some(finding => finding.type === 'journey-step-failed'));
+          }
+        });
+      }
+    }
+  } finally {
+    await Promise.all(servers.map(server => new Promise(resolve => server.close(resolve))));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('explicit Playwright selection wins over a locally installed package', async () => {
   for (const script of ['scripts/visual-qa.mjs', 'cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs']) {

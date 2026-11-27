@@ -18,26 +18,16 @@ fn input(tool: &str, args: Value, cwd: &std::path::Path) -> HookInput {
     }
 }
 
-fn denied(output: HookOutput) -> Option<String> {
-    let value = serde_json::to_value(output).unwrap();
-    (value
-        .pointer("/hookSpecificOutput/permissionDecision")
-        .and_then(Value::as_str)
-        == Some("deny"))
-    .then(|| {
-        value
-            .pointer("/hookSpecificOutput/permissionDecisionReason")
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .to_string()
-    })
-}
-
 /// The warning a flagged deliverable share carries; never a block.
 fn flagged(output: HookOutput) -> Option<String> {
     assert!(!super::blocked(&output), "a demoted guard never blocks");
     super::warned(&output).contains(&"H-07").then(|| "H-07".to_string())
+}
+
+/// Whether a release-note post was held by the post-release watch (G-120), which only warns.
+fn held(output: HookOutput) -> bool {
+    assert!(!super::blocked(&output), "a demoted gate never blocks");
+    super::warned(&output).contains(&"G-120")
 }
 
 fn focus_epic(env: &mut TestEnvGuard, root: &std::path::Path, epic: &str) {
@@ -231,23 +221,22 @@ fn artifact_post_is_a_gated_deliverable_share_cassy_1148() {
 }
 
 #[test]
-fn publication_gate_post_release_pending_and_override() {
+fn publication_gate_post_release_flag_and_override() {
     let _env = TestEnvGuard::temp_home();
     let dir = tempfile::tempdir().unwrap();
     let store = epic_store(dir.path());
     let cas = dir.path().join(".cas");
     std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = './check'\n").unwrap();
     let post = json!({"channel":"release-channel","kind":"message","release_notes":true,"epic_id":"cas-pub-epic","text":"Shipped"});
-    let reason = denied(handle_pre_tool_use(&input("violet.violet_post",post.clone(),dir.path()),Some(&cas)).unwrap()).expect("pending check must refuse release notes");
-    assert!(reason.contains("post_release_pending"),"{reason}");
+    assert!(held(handle_pre_tool_use(&input("violet.violet_post",post.clone(),dir.path()),Some(&cas)).unwrap()),"pending check must flag release notes");
     std::fs::create_dir_all(dir.path().join("docs/release-notes")).unwrap();
     std::fs::write(dir.path().join("docs/release-notes/RUBRIC.md"),"- **Channel:** `#release-channel` (`C12345678`)\n").unwrap();
     let mut unmarked = post.clone();
     unmarked.as_object_mut().unwrap().remove("release_notes");
     unmarked["text"] = json!("*Live on production · User* — New capability is available.");
-    assert!(denied(handle_pre_tool_use(&input("violet.violet_post",unmarked.clone(),dir.path()),Some(&cas)).unwrap()).unwrap().contains("post_release_pending"));
+    assert!(held(handle_pre_tool_use(&input("violet.violet_post",unmarked.clone(),dir.path()),Some(&cas)).unwrap()));
     unmarked["text"] = json!("Staging database maintenance completed.");
-    assert!(denied(handle_pre_tool_use(&input("violet.violet_post",unmarked,dir.path()),Some(&cas)).unwrap()).is_none());
+    assert!(!held(handle_pre_tool_use(&input("violet.violet_post",unmarked,dir.path()),Some(&cas)).unwrap()));
     let stamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
     for (note, allowed) in [
         (format!("[{stamp}] DECISION: POST-RELEASE OVERRIDE: "),false),
@@ -256,8 +245,8 @@ fn publication_gate_post_release_pending_and_override() {
         (format!("[{stamp}] ✅ DECISION POST-RELEASE OVERRIDE: operator accepts the observation gap"),true),
     ] {
         store.append_note("cas-pub-epic",&note).unwrap();
-        let result = denied(handle_pre_tool_use(&input("violet.violet_post",post.clone(),dir.path()),Some(&cas)).unwrap());
-        assert_eq!(result.is_none(),allowed,"{result:?}");
+        let result = held(handle_pre_tool_use(&input("violet.violet_post",post.clone(),dir.path()),Some(&cas)).unwrap());
+        assert_eq!(!result,allowed);
     }
     assert!(store.get("cas-pub-epic").unwrap().notes.contains("post-release gate overridden"));
 }
@@ -272,5 +261,5 @@ fn publication_gate_non_release_post_to_rubric_channel_passes() {
     std::fs::create_dir_all(dir.path().join("docs/release-notes")).unwrap();
     std::fs::write(dir.path().join("docs/release-notes/RUBRIC.md"),"- **Channel:** `#cas-internal` (`C12345678`)\n").unwrap();
     let post = json!({"channel":"cas-internal","kind":"message","epic_id":"cas-pub-epic","text":"Staging database maintenance completed; backups are healthy."});
-    assert!(denied(handle_pre_tool_use(&input("violet.violet_post",post,dir.path()),Some(&cas)).unwrap()).is_none(),"ordinary channel status must pass while the release check is pending");
+    assert!(!held(handle_pre_tool_use(&input("violet.violet_post",post,dir.path()),Some(&cas)).unwrap()),"ordinary channel status must pass while the release check is pending");
 }

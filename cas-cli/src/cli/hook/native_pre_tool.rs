@@ -13,7 +13,6 @@ pub fn is_native_codex_pre_tool(args: &[String]) -> bool {
         && std::env::var("CAS_HOOK_HARNESS").as_deref() == Ok("codex")
 }
 
-// gate[H-01 pre-tool]: Codex native entry fail-closed
 fn bounded_cargo_validation<F>(budget: Duration, validate: F) -> HookOutput
 where
     F: FnOnce() -> Result<HookOutput, crate::error::MemError> + Send + 'static,
@@ -25,10 +24,10 @@ where
         })
         .is_err()
     {
-        return HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-01", UNAVAILABLE));
+        return HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-02", UNAVAILABLE));
     }
     let Ok(Ok(output)) = receiver.recv_timeout(budget) else {
-        return HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-01", UNAVAILABLE));
+        return HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-02", UNAVAILABLE));
     };
     // A successful callback must carry the rewrite Codex actually applies;
     // an empty/invalid output would otherwise execute the original Cargo.
@@ -42,10 +41,11 @@ where
     {
         output
     } else {
-        HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-01", UNAVAILABLE))
+        HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-02", UNAVAILABLE))
     }
 }
 
+// gate[H-01 pre-tool]: Codex native entry fail-closed
 pub(super) fn fail_open(input: Option<&HookInput>, message: &str) -> HookOutput {
     if let Ok(root) = crate::store::find_cas_root() {
         crate::hooks::handlers::handlers_events::record_demoted(input, &root, &crate::gates::tag("H-01", message));
@@ -55,7 +55,11 @@ pub(super) fn fail_open(input: Option<&HookInput>, message: &str) -> HookOutput 
 
 pub fn execute_native_pre_tool_use() -> anyhow::Result<()> {
     let mut text = String::new();
-    let input = io::stdin().read_to_string(&mut text).map(|_| text);
+    let input = match io::stdin().read_to_string(&mut text) {
+        Ok(_) => Ok(text),
+        Err(error) if text.is_empty() => Err(error),
+        Err(_) => Ok(text),
+    };
     let output = super::process_hook_input("PreToolUse", input, true)?;
     println!("{}", serde_json::to_string(&output)?);
     Ok(())
@@ -64,6 +68,12 @@ pub fn execute_native_pre_tool_use() -> anyhow::Result<()> {
 pub(super) fn process_native_input(text: &str) -> anyhow::Result<HookOutput> {
     let mut input: HookInput = match serde_json::from_str(&text) {
         Ok(input) => input,
+        Err(_) if crate::hooks::handlers::handlers_events::text_names_secret_path(text) => {
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                &crate::gates::tag("H-33", "Protected file: an unreadable hook payload names a secret file"),
+            ));
+        }
         Err(_) => return Ok(fail_open(None, "CASSY GUARD UNAVAILABLE: invalid hook input.")),
     };
     if input.agent_role.is_none() {
@@ -114,6 +124,11 @@ mod tests {
         let metadata = facts[0].metadata.as_ref().unwrap();
         assert_eq!((metadata["outcome"].as_str(), metadata["harness"].as_str(), metadata["actor"].as_str()),
             (Some("allowed"), Some("codex"), Some("native-fixture")));
+
+        let named = format!(r#"{{"cwd":"{}","tool_name":"Read","tool_input":{{"file_path":"{}/.env"#, project.path().display(), project.path().display());
+        let output = process_native_input(&named).unwrap();
+        let reason = crate::gates::facts::hook_denial(&output).expect("an unreadable payload naming a secret path stays closed");
+        assert!(crate::gates::codes_in(reason).contains(&"H-33"), "{reason}");
 
         let call = |tool: &str, tool_input: serde_json::Value| -> HookInput {
             serde_json::from_value(serde_json::json!({

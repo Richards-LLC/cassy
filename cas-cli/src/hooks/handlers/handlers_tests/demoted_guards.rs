@@ -102,8 +102,12 @@ fn kept_guards_still_deny_over_real_hook_json() {
         (bash("cat ~/.config/neonctl/credentials.json", project), "H-09"),
         (bash(&format!("{unparseable}; cat ~/.config/neonctl/credentials.json"), project), "H-09"),
         (bash(&format!("{unparseable}; echo x > /etc/cas-demo-outside"), project), "H-29"),
+        (bash(&format!("{unparseable}; cat .env"), project), "H-33"),
+        (bash(&format!("echo hi # <<'X'\ntouch /etc/cas-demo-outside\nX\n{unparseable}"), project), "H-29"),
+        (bash(&format!("echo \"$(touch /etc/cas-demo-outside)\"; {unparseable}"), project), "H-29"),
         (bash("export CAS_AGENT_ROLE=supervisor", project), "H-12"),
-        (bash("neonctl projects list; export CAS_AGENT_ROLE=supervisor", project), "H-12"),
+        (bash("vercel ls; export CAS_AGENT_ROLE=supervisor", project), "H-12"),
+        (bash("neonctl branches reset production", project), "H-17"),
         (bash("git push --no-verify origin HEAD; pkill -f cargo", project), "H-16"),
         (bash("cargo fmt --all; echo x > /etc/cas-demo-outside", project), "H-29"),
     ] {
@@ -126,11 +130,22 @@ fn unparseable_commands_without_secrets_or_outside_writes_proceed() {
 }
 
 #[test]
-fn env_templates_and_test_files_pass_while_real_env_files_stay_protected() {
+fn only_gitignored_test_env_files_pass_while_other_env_files_stay_protected() {
     let worker = worker();
     let project = worker.project.path();
-    for name in [".env.test", ".env.test.local", ".env.example"] {
-        worker.proceeds(&hook_input("Write", json!({"file_path": project.join(name), "content": "K=v"}), project));
+    assert!(std::process::Command::new("git").args(["init", "-q"]).arg(project).status().unwrap().success());
+    std::fs::write(project.join(".gitignore"), "/.env.test\n/.env.test.local\n").unwrap();
+    std::fs::create_dir_all(project.join("sub")).unwrap();
+    let write = |path: std::path::PathBuf| hook_input("Write", json!({"file_path": path, "content": "K=v"}), project);
+    for name in [".env.test", ".env.test.local"] {
+        worker.proceeds(&write(project.join(name)));
     }
-    assert!(worker.denied_by(&hook_input("Write", json!({"file_path": project.join(".env"), "content": "K=v"}), project)).contains(&"H-33"));
+    for path in [
+        project.join(".env"),
+        project.join(".env.example"),
+        project.join(".env.production.testing"),
+        project.join("sub/.env.test"),
+    ] {
+        assert!(worker.denied_by(&write(path.clone())).contains(&"H-33"), "{path:?}");
+    }
 }

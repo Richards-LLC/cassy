@@ -72,16 +72,22 @@ const WRAPPED_CLIS: &[(&str, &str)] = &[
     ("neonctl", "/usr/local/bin/neonctl projects list"),
 ];
 
-/// A worker running a stock denied CLI through wrappers or a path is flagged,
-/// with and without a CAS root.
+/// A worker running a stock denied CLI through wrappers or a path is flagged
+/// (neonctl, the production-database rail, is refused), with and without a CAS root.
 #[test]
 fn a_worker_is_flagged_for_default_clis_however_wrapped() {
     let (_env, home) = role_env("worker");
     let project = tempfile::tempdir().unwrap();
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
-    for (_, command) in WRAPPED_CLIS {
+    for (cli, command) in WRAPPED_CLIS {
         for root in [Some(cas_root.as_path()), None] {
-            assert!(flagged(handle_pre_tool_use(&bash(command, home.path()), root).unwrap()), "{command} was not flagged (root {root:?})");
+            let output = handle_pre_tool_use(&bash(command, home.path()), root).unwrap();
+            if *cli == "neonctl" {
+                let reason = denial(output).unwrap_or_else(|| panic!("{command} was allowed (root {root:?})"));
+                assert!(reason.contains("[H-17]"), "{command}: {reason}");
+            } else {
+                assert!(flagged(output), "{command} was not flagged (root {root:?})");
+            }
         }
     }
     for command in ["git log --grep vercel", "cat vercel.json", "git log --grep neonctl", "cat .env.cas-db", "npm run build"] {

@@ -58,14 +58,15 @@ HTTP output. Record statuses, tool names and redacted failures only.
    replies belong to their parents. Treat permalinks as opaque. A server
    listing, successful exit or missing receipt cannot establish publication.
 
-## Release-report PDF upload
+## Release-report uploads
 
 The report is a required publication artifact. After
 `cas release report <version> --pdf` produces the committed Markdown, brief,
 HTML, PDF and QA receipt, attach the exact PDF bytes to the User top-level
 thread through `violet.violet_post` with `kind: file`, `reply_to=user_thread_id` and
 `content_encoding: base64`. Read/encode the bytes programmatically from disk;
-never transcribe base64 through agent context. Link HTML from the Dev thread.
+never transcribe base64 through agent context. Once the PDF is verified, attach
+the exact HTML bytes to the Dev thread as a text file through Violet.
 
 The adapter discovers the Violet token variable from Claude's registration or
 Codex's `mcp_servers.violet.bearer_token_env_var` or
@@ -77,15 +78,9 @@ evaluates configuration or chooses between conflicting registrations: set
 `VIOLET_SLACK_TOKEN_ENV` explicitly in that case. Missing registered credentials
 still fail before network access, rather than using another available token.
 
-Generated GitHub report links default to `main`.
-`CAS_RELEASE_TRAIN_REPORT_HTML_REF` may name `main` or the report's release tag;
-temporary delivery refs are rejected before uploading the PDF. Confirm the
-chosen published ref contains the HTML first. A manual
-`CAS_RELEASE_TRAIN_REPORT_HTML_URL` must point to a `github.com/<repo>/blob/main/`
-or `github.com/<repo>/blob/<release-tag>/` path and is checked before network
-access. Keep a working existing link
-and its branch until a durable target exists; prepare a Violet edit and perform
-it only after the report lands there. Preserve the returned edit receipt.
+Unset `CAS_RELEASE_TRAIN_REPORT_HTML_REF` and `CAS_RELEASE_TRAIN_REPORT_HTML_URL`.
+The adapter rejects either obsolete setting before network access; it no longer
+needs the HTML on a published Git ref.
 
 Download the uploaded PDF and require source SHA-256 equality, successful PDF
 decode and matching page count before accepting it. Apply the hub skill's
@@ -96,9 +91,14 @@ the first weak receipt rather than changing or shrinking the artifact.
 Save `release-report.receipt` under the release-train run directory with
 `TAG`, `PDF_PATH`, `HTML_PATH`, `PDF_SHA256`, `PDF_SIZE_BYTES`,
 `PDF_REMOTE_SHA256`, `PDF_REMOTE_SIZE_BYTES`, `PDF_REMOTE_PAGE_COUNT`,
-`HTML_SHA256`, `PAGE_COUNT`, `PDF_FILE_PERMALINK`, `PDF_FILE_ID`,
-`PDF_MESSAGE_ID`, `PDF_MESSAGE_PERMALINK`, `HTML_FILE_ID`, `USER_THREAD_TS` and `DEV_THREAD_TS`, alongside the returned
-thread permalinks. The remote PDF fields are written only after the adapter
+`HTML_SHA256`, `HTML_SIZE_BYTES`, `HTML_REMOTE_SHA256`, `HTML_REMOTE_SIZE_BYTES`,
+`PAGE_COUNT`, both `PDF_` and `HTML_` file and message IDs/permalinks, and
+`USER_THREAD_TS` and `DEV_THREAD_TS`, alongside the returned thread permalinks.
+The adapter requires the full HTML bytes from authenticated `violet_read` by
+its returned file ID, scoped from the Dev root timestamp, to match the local
+bytes. On failure, `release-report.receipt.partial` preserves observed upload
+identities for reconciliation, not proof of delivery. Never replay an uncertain
+write. The remote PDF fields are written only after the adapter
 downloads the transport-returned explicit `download_url`, or re-reads the
 uploaded file by its returned ID through authenticated `violet_read` when the
 current hub receipt omits a download URL, and proves exact bytes plus PDF

@@ -3504,7 +3504,7 @@ impl FactoryApp {
         // enqueued below and the readiness-gated queue delivers it (GH #2128).
         self.mux.set_worker_startup_prompt(&worker_name, startup.clone().filter(|_| handoff == StartupHandoff::LaunchArgument));
 
-        if let Err(e) = self.mux.add_worker(
+        if let Err(e) = self.mux.add_worker_with_pre_spawn(
             &worker_name,
             cwd.clone(),
             cas_root.as_ref(),
@@ -4405,7 +4405,7 @@ impl FactoryApp {
         // Add pane to mux (spawns new Claude process)
         self.remove_exited_worker_pane(name)?;
         let reset_tools = self.worker_readiness_reset(name, effective_spec.cli);
-        if let Err(e) = self.mux.add_worker(
+        if let Err(e) = self.mux.add_worker_with_pre_spawn(
             name,
             cwd,
             Some(&self.cas_dir),

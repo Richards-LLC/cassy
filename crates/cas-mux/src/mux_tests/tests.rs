@@ -2317,7 +2317,7 @@ fn add_worker_persists_explicit_spec_so_effective_resolves_codex() {
     let dir = std::env::temp_dir();
     let spec = WorkerSpec::codex_default("alice");
     let mut launch_id = None;
-    mux.add_worker("alice", dir, None, "supervisor", None, Some(spec), |session_id| {
+    mux.add_worker_with_pre_spawn("alice", dir, None, "supervisor", None, Some(spec), |session_id| {
         launch_id = session_id.map(str::to_owned);
         Ok(())
     })

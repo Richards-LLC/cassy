@@ -1027,6 +1027,19 @@ impl Mux {
         supervisor_name: &str,
         teams: Option<&TeamsSpawnConfig>,
         spec: Option<WorkerSpec>,
+    ) -> Result<PaneId> {
+        self.add_worker_with_pre_spawn(name, cwd, cas_root, supervisor_name, teams, spec, |_| Ok(()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_worker_with_pre_spawn(
+        &mut self,
+        name: &str,
+        cwd: PathBuf,
+        cas_root: Option<&PathBuf>,
+        supervisor_name: &str,
+        teams: Option<&TeamsSpawnConfig>,
+        spec: Option<WorkerSpec>,
         before_spawn: impl FnOnce(Option<&str>) -> std::io::Result<()>,
     ) -> Result<PaneId> {
         // Check if pane with this name already exists

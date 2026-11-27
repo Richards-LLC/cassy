@@ -305,7 +305,13 @@ async fn g61_gate_family_ends_runnable_or_accepted_cas_fcb1() {
                 }
                 _ => unreachable!(),
             }
-            let after = if issue == "#2362" { held } else { call(closer, close).await };
+            let mut after = if issue == "#2362" { held } else { call(closer, close.clone()).await };
+            if matches!(issue, "#2380" | "#2369") {
+                assert!(crate::gates::codes_in(&after).contains(&"G-171"), "{issue}: {after}");
+                cas_store::waive_qa_pass(cas, ID, "g61-supervisor-session", WORKER, LANE, head,
+                    "Supervisor reviewed the exact rendered fixture delivery", chrono::Utc::now()).unwrap();
+                after = call(closer, close).await;
+            }
             let accepted = if issue == "#2378" {
                 !crate::gates::codes_in(&after).contains(&"G-61")
             } else {

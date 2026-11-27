@@ -1443,6 +1443,38 @@ async fn refused_close_preserves_anchor_cas_8f6e() {
     assert_eq!(retained.deliverables.historical_factory_branch_anchors, task.deliverables.historical_factory_branch_anchors);
 }
 
+#[tokio::test]
+async fn rendered_fast_lane_batch_park_requires_visual_evidence() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let base = git(f.dir.path(), &["rev-parse", "main"]);
+    let locale = "hub-web/src/locales/en.json";
+    std::fs::create_dir_all(f.worker_path.join(locale).parent().unwrap()).unwrap();
+    std::fs::write(f.worker_path.join(locale), "{\"ranking\":\"Ranking\"}\n").unwrap();
+    git(&f.worker_path, &["add", locale]);
+    git(&f.worker_path, &["commit", "-q", "-m", &format!("fix({ID}): localize ranking")]);
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    std::fs::write(f.cas_dir().join("config.toml"), format!(
+        "[project]\ncanonical_id='{PROJECT}'\n[qa]\nmode='batch'\n[fast_lane]\nenabled=true\npaths=['crates/**','hub-web/**']\nmerge_checks=['PR gate']\n"
+    )).unwrap();
+    let tasks = open_task_store(&f.cas_dir()).unwrap();
+    let mut task = tasks.get(ID).unwrap();
+    task.task_type = cas_types::TaskType::Bug;
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: WORKER.into(), branch: LANE.into(), base_sha: base,
+    });
+    tasks.update(&task).unwrap();
+    let head = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    let lane = crate::fast_lane::configured(&f.cas_dir()).unwrap();
+    assert!(matches!(crate::fast_lane::evaluate_delivery(&lane, &task, &f.worker_path, "main", &head),
+        crate::fast_lane::Eligibility::Eligible { .. }));
+    let refusal = call(&f.worker, serde_json::json!({
+        "action": "close", "id": ID, "reason": "Localization delivered", "commit_receipt": head,
+    })).await;
+    assert!(crate::gates::codes_in(&refusal).contains(&"G-171"));
+}
+
 /// cas-5ea7, through the real close: an eligible hotfix parks with its QA
 /// evidence deferred; after the lane merge Cassy's close is held while the
 /// receipt runs, reruns a failed receipt once, and, with the first parent's

@@ -183,6 +183,10 @@ signal.pause()
                 receipt = json.loads((destination/'RECEIPT.json').read_text())
                 self.assertEqual(receipt['web']['source_sha'],revision)
                 self.assertEqual(receipt['web']['dist_sha256'],receipt['web']['served_dist_sha256'])
+                web = destination/'web'
+                self.assertEqual(json.loads((web/'RECEIPT.json').read_text()), receipt)
+                self.assertEqual(receipt['assets'], {'index': candidate['sha256'](web/'commander/index.html'),
+                                                     'main': candidate['sha256'](web/'commander/app.js')})
                 original = (destination/'RECEIPT.json').read_bytes()
                 cited = destination.resolve()/'cas'
                 cited_bytes = cited.read_bytes()

@@ -122,7 +122,10 @@ def verified_receipt(published, revision):
     """The published candidate's receipt, when its binary still matches it."""
     try:
         receipt = json.loads((published / "RECEIPT.json").read_text())
-        if receipt["revision"] == revision and receipt["sha256"] == sha256(published / "cas"):
+        web = published / "web"
+        if (receipt["revision"] == revision and receipt["sha256"] == sha256(published / "cas")
+                and json.loads((web / "RECEIPT.json").read_text()) == receipt
+                and journey_dist.dist_hash(web / "commander") == receipt["web"]["served_dist_sha256"]):
             return receipt
     except (OSError, ValueError, KeyError):
         pass
@@ -276,8 +279,13 @@ def build(repo, revision, candidate_dir):
                     version_hash = sha256(stage / "VERSION.txt")
                     receipt = {"revision": revision, "version": version,
                                "sha256": binary_hash, "zig": zig.path,
-                               "zig_source": zig.source, "cargo_target": str(target), "web":web}
+                               "zig_source": zig.source, "cargo_target": str(target), "web":web,
+                               "assets": {"index": sha256(owned / "served-web/index.html"),
+                                          "main": sha256(owned / "served-web/app.js")}}
                     (stage / "RECEIPT.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+                    (stage / "web").mkdir()
+                    shutil.copytree(owned / "served-web", stage / "web/commander")
+                    shutil.copy2(stage / "RECEIPT.json", stage / "web/RECEIPT.json")
                     receipt_hash = sha256(stage / "RECEIPT.json")
                     (stage / "SHA256SUMS").write_text(
                         f"{binary_hash}  cas\n{version_hash}  VERSION.txt\n"

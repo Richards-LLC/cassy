@@ -1,0 +1,119 @@
+{
+  "status": "REFUSED",
+  "exitCode": 2,
+  "build": {
+    "revision": "2222222222222222222222222222222222222222",
+    "sha256": "1c71cd3a71456758b3b4949b422a8050478c1e33253033c73db03ee90b05ccb2",
+    "assets": {
+      "index": "a18c3bf8be92dfaa0e108cb50d1a5c145b94d94c89c848a2e4f5c5a09d7e2508",
+      "main": "b179518b8dfe4238c62ad5a21438ddf46cf4ee70cef924fe9d2d00472c00d2c3"
+    }
+  },
+  "observedAssets": {
+    "index": "a18c3bf8be92dfaa0e108cb50d1a5c145b94d94c89c848a2e4f5c5a09d7e2508",
+    "main": "a0f509deea100a2f3b1e779f6c7ffb0863603268cbff402875b56aeb7f9d6c24"
+  },
+  "strict": true,
+  "generatedAt": "2026-11-24T22:14:26.121Z",
+  "playwrightVersion": "1.66.0-alpha-2026-11-09",
+  "playwrightSource": "PLAYWRIGHT_MODULE: /Users/pippenz/.npm/_npx/9833c18b2d85bc59/node_modules/playwright",
+  "schemes": [
+    "light"
+  ],
+  "viewports": [
+    {
+      "name": "390x800",
+      "width": 390,
+      "height": 800
+    }
+  ],
+  "urls": [
+    "http://127.0.0.1:52573/ranking/"
+  ],
+  "pageDeclarations": [],
+  "readiness": [
+    {
+      "ready": true,
+      "reason": null,
+      "textNodes": 3,
+      "textCharacters": 101,
+      "mainLandmarks": 1,
+      "contentElements": 1,
+      "loadingIndicators": 0,
+      "dominantLoadingSurface": false,
+      "url": "http://127.0.0.1:52573/ranking/",
+      "scheme": "light",
+      "viewport": {
+        "name": "390x800",
+        "width": 390,
+        "height": 800
+      },
+      "timeoutMs": 5000
+    }
+  ],
+  "journey": {
+    "name": "ranking",
+    "states": [
+      "expanded"
+    ]
+  },
+  "journeyRuns": [
+    {
+      "journey": "ranking",
+      "state": "expanded",
+      "url": "http://127.0.0.1:52573/ranking/",
+      "scheme": "light",
+      "viewport": {
+        "name": "390x800",
+        "width": 390,
+        "height": 800
+      },
+      "steps": [
+        {
+          "index": 1,
+          "step": "click #show",
+          "status": "ok",
+          "ms": 226
+        },
+        {
+          "index": 2,
+          "step": "expect #ranking text=\"Ranking is visible\"",
+          "status": "ok",
+          "ms": 34
+        }
+      ],
+      "screenshot": "127-0-0-1-52573-ranking-expanded-light-390x800.png",
+      "trace": "127-0-0-1-52573-ranking-expanded-light-390x800.trace.zip"
+    }
+  ],
+  "findings": [],
+  "infoFindings": [],
+  "suppressed": [],
+  "screenshots": [
+    {
+      "path": "127-0-0-1-52573-ranking-light-390x800.png",
+      "url": "http://127.0.0.1:52573/ranking/",
+      "sha256": "44860d7ecfa2c102dccf0f8356047c063735c4d5d69cb33e5d9f10830d7c48d2",
+      "scheme": "light",
+      "viewport": {
+        "name": "390x800",
+        "width": 390,
+        "height": 800
+      }
+    },
+    {
+      "path": "127-0-0-1-52573-ranking-expanded-light-390x800.png",
+      "url": "http://127.0.0.1:52573/ranking/",
+      "state": "expanded",
+      "scheme": "light",
+      "viewport": {
+        "name": "390x800",
+        "width": 390,
+        "height": 800
+      },
+      "sha256": "888ff3d8bfb6a84dae1343e8c4b484257378a4371fb29d0a67dd0f73d1651019"
+    }
+  ],
+  "counts": {},
+  "infoCounts": {}
+}

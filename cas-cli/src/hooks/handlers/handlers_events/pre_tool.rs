@@ -533,6 +533,51 @@ fn shadowed_by_sandbox(input: &HookInput, tool_name: &str, cas_root: Option<&Pat
     true
 }
 
+/// A template or test environment file (`.env.example`, `.env.test.local`)
+/// holds no live secret.
+fn is_env_fixture(path: &str) -> bool {
+    Path::new(path).file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+        name.starts_with(".env.")
+            && (name.contains(".test") || matches!(name.rsplit('.').next(), Some("example" | "sample" | "template" | "dist")))
+    })
+}
+
+/// cas-a2ea: the pre-tool guards that keep refusing: unsaved work and secrets,
+/// policy, config and role tampering, production DB writes, host build caps,
+/// Slack through Violet and the trunk-push guard. Every other H guard records
+/// its refusal as a fact and lets the call proceed. Refusals that carry any
+/// other code (G) are not H guards and always deny.
+pub(crate) const BLOCKING_GUARDS: [&str; 16] = [
+    "H-02", "H-03", "H-04", "H-06", "H-09", "H-11", "H-12", "H-14", "H-16", "H-17", "H-22", "H-23",
+    "H-28", "H-29", "H-31", "H-33",
+];
+
+/// The one pre-tool switch. `Some(deny)` for a refusal that blocks; a demoted
+/// guard records its fact (code, actor, harness, task) and returns `None`, so
+/// the caller falls through to the remaining guards.
+fn refuse(input: &HookInput, cas_root: Option<&Path>, reason: String) -> Option<HookOutput> {
+    let codes = crate::gates::codes_in(&reason);
+    if codes.is_empty() || codes.iter().any(|code| !code.starts_with("H-") || BLOCKING_GUARDS.contains(code)) {
+        return Some(HookOutput::with_pre_tool_permission("deny", &reason));
+    }
+    if let Some(root) = cas_root {
+        let actor = std::env::var("CAS_AGENT_NAME")
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| current_agent_id(input));
+        let harness = format!("{:?}", crate::harness_policy::own_harness_from_env()).to_lowercase();
+        let task_id = agent_active_tasks(&mut ToolHookStores::new(root), input).into_iter().next().map(|task| task.id);
+        let recorded = crate::store::open_event_store(root).map_err(anyhow::Error::from).and_then(|store| {
+            crate::gates::facts::record_allowed(store.as_ref(), &codes, task_id.as_deref(), &actor, &harness, &reason)
+        });
+        if let Err(error) = recorded {
+            tracing::warn!(%error, ?codes, "could not record demoted guard fact");
+        }
+    }
+    tracing::warn!(?codes, "demoted guard would have denied; the call proceeds");
+    None
+}
+
 /// Pure admission selection; safe before logging, DB discovery or telemetry.
 pub(crate) fn worker_cargo_request(input: &HookInput) -> bool {
     crate::harness_policy::is_worker(input)
@@ -592,27 +637,23 @@ fn handle_pre_tool_use_checked(
     {
         // A post-release hold already carries its own gate code (G-120).
         let reason = if crate::gates::codes_in(&reason).is_empty() { crate::gates::tag("H-07", reason) } else { reason };
-        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+        if let Some(denial) = refuse(input, cas_root, reason) {
+            return Ok(denial);
+        }
     }
 
     // gate[H-08 pre-tool]: Browser test tier
-    if let Some(reason) = super::browser_tier_guard::denial(input) {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-08", reason)));
+    if let Some(reason) = super::browser_tier_guard::denial(input)
+        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-08", reason))
+    {
+        return Ok(denial);
     }
 
     // gate[H-09 pre-tool]: Worker operator-credential store read
-    // The credential gate refuses a shell command it cannot project. With a
-    // Cassy root, the workspace contract below refuses one the shell-effects
-    // recognizer cannot resolve, with that specific reason.
-    let workspace_refuses_unresolved = cas_root.is_some()
-        && tool_name == "Bash"
-        && crate::harness_policy::is_factory_agent(input)
-        && input.tool_input.as_ref().and_then(|tool_input| tool_input.get("command"))
-            .and_then(|command| command.as_str())
-            .is_some_and(|command| shell_effects::collect(command, Path::new(&input.cwd)).is_err());
-    if !workspace_refuses_unresolved
-        && let Some(reason) =
-            super::worker_denied_tools::credential_store_access_denial(input, tool_name)
+    // A shell command the recognizer cannot project is judged by the store
+    // paths its words name literally.
+    if let Some(reason) =
+        super::worker_denied_tools::credential_store_access_denial(input, tool_name)
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-09", reason)));
     }
@@ -621,8 +662,10 @@ fn handle_pre_tool_use_checked(
     // MCP tools are the supervisor's. Workers only; before auto-approval and
     // the missing-root early return.
     // gate[H-10 pre-tool]: Worker-denied CLIs and MCP tools
-    if let Some(reason) = super::worker_denied_tools::denial(input, tool_name, cas_root) {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-10", reason)));
+    if let Some(reason) = super::worker_denied_tools::denial(input, tool_name, cas_root)
+        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-10", reason))
+    {
+        return Ok(denial);
     }
 
     // cas-3147 (GH #1169): write roots and grants are operator-only. Every
@@ -656,8 +699,10 @@ fn handle_pre_tool_use_checked(
     // cas-803f: a supervisor in a long foreground Bash call cannot hear the
     // operator; such calls run in the background or go to a worker.
     // gate[H-49 pre-tool]: Supervisor long foreground Bash
-    if let Some(reason) = super::supervisor_foreground::denial(input) {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-49", reason)));
+    if let Some(reason) = super::supervisor_foreground::denial(input)
+        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-49", reason))
+    {
+        return Ok(denial);
     }
 
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
@@ -675,11 +720,9 @@ fn handle_pre_tool_use_checked(
             .and_then(|tool_input| tool_input.get("command"))
             .and_then(|command| command.as_str())
             .is_some_and(git_push_bypasses_required_hooks)
+        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-15", "🚫 WORKER PUSH POLICY: `--no-verify`, Git config environment overrides, and `core.hooksPath` overrides can skip required factory push checks. `-n` is a dry-run and still runs the pre-push hook; worker pushes must use a plain `git push`. If an exception is needed, ask the supervisor to run the supervisor-approved push."))
     {
-        return Ok(HookOutput::with_pre_tool_permission(
-            "deny",
-            &crate::gates::tag("H-15", "🚫 WORKER PUSH POLICY: `--no-verify`, Git config environment overrides, and `core.hooksPath` overrides can skip required factory push checks. `-n` is a dry-run and still runs the pre-push hook; worker pushes must use a plain `git push`. If an exception is needed, ask the supervisor to run the supervisor-approved push."),
-        ));
+        return Ok(denial);
     }
 
     // ========================================================================
@@ -720,17 +763,16 @@ fn handle_pre_tool_use_checked(
             .and_then(|tool_input| tool_input.get("command"))
             .and_then(|command| command.as_str());
         // gate[H-05 pre-tool]: Unscoped worker format run
-        if command.is_some_and(worker_command_runs_dangerous_formatter) {
-            return Ok(HookOutput::with_pre_tool_permission(
-                "deny",
-                &crate::gates::tag("H-05", "🚫 UNSCOPED WORKER FORMAT RUN: this repository is not workspace-rustfmt-clean, and rustfmt follows child modules by default. Either command can rewrite hundreds of unrelated files.\n\n\
+        if command.is_some_and(worker_command_runs_dangerous_formatter)
+            && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-05", "🚫 UNSCOPED WORKER FORMAT RUN: this repository is not workspace-rustfmt-clean, and rustfmt follows child modules by default. Either command can rewrite hundreds of unrelated files.\n\n\
                  Use a non-mutating check:\n  \
                  `cargo fmt --all -- --check`\n  \
                  `rustfmt --edition 2024 --check --config skip_children=true <task-files>`\n\n\
                  To format task files, make recursion explicit:\n  \
                  `rustfmt --edition 2024 --config skip_children=true <task-files>`\n\n\
-                 A workspace normalization requires separate operator approval and must not be run from a worker."),
-            ));
+                 A workspace normalization requires separate operator approval and must not be run from a worker."))
+        {
+            return Ok(denial);
         }
         if let Some(updated) = prepared_cargo_input {
             let mut rewritten_input = input.clone();
@@ -825,14 +867,13 @@ fn handle_pre_tool_use_checked(
             // tells the supervisor what IT can call, so it needs the
             // supervisor's own tool prefix, not a hardcoded mcp__cas__.
             let prefix = crate::harness_policy::own_tool_prefix();
-            return Ok(HookOutput::with_pre_tool_permission(
-                "deny",
-                &crate::gates::tag("H-18", format!(
-                    "🚫 Supervisors must not spawn isolated-worktree subagents.\n\
-                    Use {prefix}factory action=spawn_workers — factory-managed worktrees get cleaned up; Agent(isolation=\"worktree\") ones leak.\n\
-                    If you genuinely need a throwaway subagent, drop `isolation` or run as a worker via `cas factory`."
-                )),
-            ));
+            if let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-18", format!(
+                "🚫 Supervisors must not spawn isolated-worktree subagents.\n\
+                Use {prefix}factory action=spawn_workers — factory-managed worktrees get cleaned up; Agent(isolation=\"worktree\") ones leak.\n\
+                If you genuinely need a throwaway subagent, drop `isolation` or run as a worker via `cas factory`."
+            ))) {
+                return Ok(denial);
+            }
         }
     }
 
@@ -843,8 +884,9 @@ fn handle_pre_tool_use_checked(
         && tool_name == "SendMessage"
         && crate::harness_policy::is_worker(input)
         && !owns_native_message_target(input, cas_root)
+        && let Some(denial) = refuse(input, cas_root, factory_worker_send_message_denial())
     {
-        return Ok(deny_factory_worker_send_message());
+        return Ok(denial);
     }
 
     // ========================================================================
@@ -952,8 +994,9 @@ fn handle_pre_tool_use_checked(
             .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
         && let Some(refusal) =
             crate::qa_pass::supervisor_merge_refusal(root, std::path::Path::new(&input.cwd), cmd)
+        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-24", refusal))
     {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-24", refusal)));
+        return Ok(denial);
     }
 
     // cas-2ee2 (GH #1023): a pull request merged on GitHub skips both Cassy
@@ -970,8 +1013,9 @@ fn handle_pre_tool_use_checked(
             .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
         && let Some(refusal) =
             crate::qa_pass::github_merge_refusal(root, std::path::Path::new(&input.cwd), cmd)
+        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-25", refusal))
     {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-25", refusal)));
+        return Ok(denial);
     }
 
     // cas-bddf9: a supervisor's raw PR merge waits on its own unanswered ask
@@ -993,8 +1037,9 @@ fn handle_pre_tool_use_checked(
             std::env::var("CAS_FACTORY_SESSION").ok().as_deref(),
             accepted_override_codes,
         )
+        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-26", refusal))
     {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-26", refusal)));
+        return Ok(denial);
     }
 
     // cas-fee3: an epic PR opens as a draft so every merge into the epic does
@@ -1014,8 +1059,9 @@ fn handle_pre_tool_use_checked(
                 .filter(|out| out.status.success())
                 .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         })
+        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-27", refusal))
     {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-27", refusal)));
+        return Ok(denial);
     }
 
     // ========================================================================
@@ -1282,17 +1328,16 @@ fn handle_pre_tool_use_checked(
                             pending_merge_tasks.iter().map(|t| t.id.as_str()).collect();
                         let task_list = task_ids.join(", ");
 
-                        return Ok(HookOutput::with_pre_tool_permission(
-                            "deny",
-                            &crate::gates::tag("H-30", format!(
+                        if let Some(denial) = refuse(input, Some(cas_root), crate::gates::tag("H-30", format!(
                                 "🔒 WORKTREE MERGE JAIL: Task(s) {task_list} require worktree merge before you can continue.\n\n\
                             Merge and clean up each task's worktree with \
                             `{prefix}factory action=worktree_merge id=<worktree branch> task_id=<task-id> cleanup=true` \
                             (the close rejection names the branch). That call is allowed through the jail and releases it; \
                             then retry `{prefix}task action=close id=<task-id>`.",
                                 prefix = crate::harness_policy::own_tool_prefix()
-                            )),
-                        ));
+                            ))) {
+                            return Ok(denial);
+                        }
                     }
                 }
             }
@@ -1534,7 +1579,7 @@ fn handle_pre_tool_use_checked(
         {
             // Block access to protected files (e.g., .env files)
             for pattern in &protection.files {
-                if path.ends_with(pattern) || path.contains(&format!("/{pattern}")) {
+                if (path.ends_with(pattern) || path.contains(&format!("/{pattern}"))) && !is_env_fixture(path) {
                     let reason = crate::gates::tag("H-33", format!("Protected file: {pattern} files may contain secrets"));
                     if !(sandbox_denies_secret(path) && shadowed_by_sandbox(input, tool_name, Some(cas_root), &reason)) {
                         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
@@ -1574,15 +1619,13 @@ fn handle_pre_tool_use_checked(
         && dispatch.state == cas_types::VerificationDispatchState::Claimed
         && let Some(verifier) = dispatch.verifier_agent_id.as_deref()
         && stores.agents().is_some_and(|agents| agents.get(verifier).is_ok_and(|agent| crate::mcp::tools::service::agent_liveness::verifier_is_running(&agent)))
+        && let Some(denial) = refuse(input, Some(cas_root), crate::gates::tag("H-34", format!(
+            "Verifier {verifier} is already running on dispatch {} for task {task_id}; a second verifier's verdict could not be recorded once that dispatch resolves. Next: wait for its verdict or supervisor_call (`{}verification action=latest task_id={task_id}`).",
+            dispatch.id,
+            crate::harness_policy::own_tool_prefix(),
+        )))
     {
-        return Ok(HookOutput::with_pre_tool_permission(
-            "deny",
-            &crate::gates::tag("H-34", format!(
-                "Verifier {verifier} is already running on dispatch {} for task {task_id}; a second verifier's verdict could not be recorded once that dispatch resolves. Next: wait for its verdict or supervisor_call (`{}verification action=latest task_id={task_id}`).",
-                dispatch.id,
-                crate::harness_policy::own_tool_prefix(),
-            )),
-        ));
+        return Ok(denial);
     }
 
     // Mint verifier authority only on the authenticated parent's Task/Agent
@@ -1610,46 +1653,33 @@ fn handle_pre_tool_use_checked(
         use crate::mcp::tools::core::task::lifecycle::close_ops::gate_text::{
             VerifierSpawnDenial, verifier_spawn_denial,
         };
+        // The demoted guard proceeds without a handoff; the spawn is the caller's.
         let verifier_denial = |denial: VerifierSpawnDenial, task_id: Option<&str>| {
-            crate::gates::tag("H-35", verifier_spawn_denial(denial, task_id, crate::harness_policy::own_tool_prefix()))
+            let reason = crate::gates::tag("H-35", verifier_spawn_denial(denial, task_id, crate::harness_policy::own_tool_prefix()));
+            refuse(input, Some(cas_root), reason).unwrap_or_else(HookOutput::empty)
         };
         let Some(agent_store) = stores.agents() else {
-            return Ok(HookOutput::with_pre_tool_permission(
-                "deny",
-                &verifier_denial(VerifierSpawnDenial::RegistryUnavailable, None),
-            ));
+            return Ok(verifier_denial(VerifierSpawnDenial::RegistryUnavailable, None));
         };
         let Ok(parent) = agent_store.get(&current_agent_id) else {
-            return Ok(HookOutput::with_pre_tool_permission(
-                "deny",
-                &verifier_denial(VerifierSpawnDenial::UnregisteredParent, None),
-            ));
+            return Ok(verifier_denial(VerifierSpawnDenial::UnregisteredParent, None));
         };
         if !matches!(
             parent.status,
             crate::types::AgentStatus::Active | crate::types::AgentStatus::Idle
         ) {
-            return Ok(HookOutput::with_pre_tool_permission(
-                "deny",
-                &verifier_denial(VerifierSpawnDenial::InactiveParent, None),
-            ));
+            return Ok(verifier_denial(VerifierSpawnDenial::InactiveParent, None));
         }
 
         let Some(tool_input) = input.tool_input.as_ref() else {
-            return Ok(HookOutput::with_pre_tool_permission(
-                "deny",
-                &verifier_denial(VerifierSpawnDenial::MissingPrompt, None),
-            ));
+            return Ok(verifier_denial(VerifierSpawnDenial::MissingPrompt, None));
         };
         let prompt = tool_input
             .get("prompt")
             .and_then(|value| value.as_str())
             .unwrap_or_default();
         let Some(task_id) = unique_existing_task_id(prompt, stores.tasks()) else {
-            return Ok(HookOutput::with_pre_tool_permission(
-                "deny",
-                &verifier_denial(VerifierSpawnDenial::NoUniqueTask, None),
-            ));
+            return Ok(verifier_denial(VerifierSpawnDenial::NoUniqueTask, None));
         };
         let dispatch_id = match cas_store::get_latest_verification_dispatch(cas_root, &task_id) {
             Ok(Some(dispatch))
@@ -1660,36 +1690,18 @@ fn handle_pre_tool_use_checked(
                 ) =>
             {
                 if dispatch.owner_agent_id != current_agent_id {
-                    return Ok(HookOutput::with_pre_tool_permission(
-                        "deny",
-                        &verifier_denial(
-                            VerifierSpawnDenial::DispatchOwnedElsewhere,
-                            Some(task_id.as_str()),
-                        ),
-                    ));
+                    return Ok(verifier_denial(VerifierSpawnDenial::DispatchOwnedElsewhere, Some(task_id.as_str())));
                 }
                 if dispatch.deadline_at <= chrono::Utc::now() {
-                    return Ok(HookOutput::with_pre_tool_permission(
-                        "deny",
-                        &verifier_denial(
-                            VerifierSpawnDenial::DispatchDeadlineElapsed,
-                            Some(task_id.as_str()),
-                        ),
-                    ));
+                    return Ok(verifier_denial(VerifierSpawnDenial::DispatchDeadlineElapsed, Some(task_id.as_str())));
                 }
                 dispatch.id
             }
             Ok(_) => {
-                return Ok(HookOutput::with_pre_tool_permission(
-                    "deny",
-                    &verifier_denial(VerifierSpawnDenial::NoActiveDispatch, Some(task_id.as_str())),
-                ));
+                return Ok(verifier_denial(VerifierSpawnDenial::NoActiveDispatch, Some(task_id.as_str())));
             }
             Err(_) => {
-                return Ok(HookOutput::with_pre_tool_permission(
-                    "deny",
-                    &verifier_denial(VerifierSpawnDenial::DispatchUnreadable, Some(task_id.as_str())),
-                ));
+                return Ok(verifier_denial(VerifierSpawnDenial::DispatchUnreadable, Some(task_id.as_str())));
             }
         };
         let Some(tool_use_id) = input
@@ -1698,10 +1710,7 @@ fn handle_pre_tool_use_checked(
             .map(str::trim)
             .filter(|id| !id.is_empty())
         else {
-            return Ok(HookOutput::with_pre_tool_permission(
-                "deny",
-                &verifier_denial(VerifierSpawnDenial::MissingToolUseId, Some(task_id.as_str())),
-            ));
+            return Ok(verifier_denial(VerifierSpawnDenial::MissingToolUseId, Some(task_id.as_str())));
         };
         match issue_hook_verifier_handoff(
             cas_root,
@@ -1714,18 +1723,9 @@ fn handle_pre_tool_use_checked(
             Err(error) => {
                 let message = error.to_string();
                 if message.contains("already awaiting SubagentStart") {
-                    return Ok(HookOutput::with_pre_tool_permission(
-                        "deny",
-                        &verifier_denial(
-                            VerifierSpawnDenial::SpawnAlreadyPending,
-                            Some(task_id.as_str()),
-                        ),
-                    ));
+                    return Ok(verifier_denial(VerifierSpawnDenial::SpawnAlreadyPending, Some(task_id.as_str())));
                 }
-                return Ok(HookOutput::with_pre_tool_permission(
-                    "deny",
-                    &verifier_denial(VerifierSpawnDenial::HandoffFailed, Some(task_id.as_str())),
-                ));
+                return Ok(verifier_denial(VerifierSpawnDenial::HandoffFailed, Some(task_id.as_str())));
             }
         }
         return Ok(HookOutput::empty());
@@ -2748,13 +2748,9 @@ pub(crate) fn effective_worker_delivery_mode(
     }
 }
 
-/// Delivery modes of the in-progress tasks assigned to this worker, by its
-/// registered id or its pane name. Unreadable task state yields none, which
-/// leaves the session's mode in charge (the pre-cas-6db4 behaviour).
-fn worker_active_task_delivery_modes(
-    stores: &mut ToolHookStores<'_>,
-    input: &HookInput,
-) -> Vec<cas_types::DeliveryMode> {
+/// The in-progress tasks assigned to this agent, by its registered id or its
+/// pane name. Unreadable task state yields none.
+fn agent_active_tasks(stores: &mut ToolHookStores<'_>, input: &HookInput) -> Vec<cas_types::Task> {
     let agent_id = current_agent_id(input);
     let agent_name = std::env::var("CAS_AGENT_NAME")
         .ok()
@@ -2769,8 +2765,17 @@ fn worker_active_task_delivery_modes(
                 assignee == agent_id || agent_name.as_deref() == Some(assignee)
             })
         })
-        .map(|task| task.delivery_mode)
         .collect()
+}
+
+/// Delivery modes of the in-progress tasks assigned to this worker. Unreadable
+/// task state yields none, which leaves the session's mode in charge (the
+/// pre-cas-6db4 behaviour).
+fn worker_active_task_delivery_modes(
+    stores: &mut ToolHookStores<'_>,
+    input: &HookInput,
+) -> Vec<cas_types::DeliveryMode> {
+    agent_active_tasks(stores, input).into_iter().map(|task| task.delivery_mode).collect()
 }
 
 fn local_merge_push_override() -> bool {
@@ -6024,10 +6029,15 @@ fn factory_write_decision(
         .filter_map(|dir| canonicalize_for_containment(dir))
         .collect();
     let shell_effects = if tool == "Bash" {
-        match shell_effects::collect(tool_input.get("command").and_then(|value| value.as_str()).unwrap_or(""), &cwd) {
-            Ok(effects) => effects,
-            Err(rule) => return link_violation(input.cwd.clone(), cwd.clone(), rule),
-        }
+        let command = tool_input.get("command").and_then(|value| value.as_str()).unwrap_or("");
+        // A command the recognizer cannot resolve is judged by the writes and
+        // deletes it names literally; the rest of it is left to the shell.
+        shell_effects::collect(command, &cwd).unwrap_or_else(|_| {
+            let mut literal = shell_effects::ShellEffects::default();
+            literal.writes = bash_write_targets(command).into_iter().map(|path| (path, None)).collect();
+            literal.deletes = bash_delete_targets(command);
+            literal
+        })
     } else {
         shell_effects::ShellEffects::default()
     };
@@ -6215,10 +6225,10 @@ fn factory_write_decision(
             }).unwrap_or(".");
             let traverses_parent = std::path::Path::new(&raw_path).components()
                 .any(|component| component == std::path::Component::ParentDir);
-            if !prefix.is_empty() && !traverses_parent && [prefix, parent].iter().all(|path| {
+            if prefix.is_empty() || (!traverses_parent && [prefix, parent].iter().all(|path| {
                 unsanctioned_factory_path_with_worktree(input, configured_artifacts_root,
                     configured_scratch_root, is_supervisor, path, registered_worktree_root).is_none()
-            }) {
+            })) {
                 continue;
             }
             return FactoryWriteDecision::Denied(FactoryWriteViolation {
@@ -12207,17 +12217,14 @@ fn owns_native_message_target(input: &HookInput, cas_root: Option<&Path>) -> boo
     crate::hooks::handlers::owns_native_subagent(root, &input.session_id, target)
 }
 
-/// Deny the host harness transport for factory workers.
-fn deny_factory_worker_send_message() -> HookOutput {
+/// The refusal of the host harness transport for factory workers.
+fn factory_worker_send_message_denial() -> String {
     let prefix = crate::harness_policy::own_tool_prefix();
-    HookOutput::with_pre_tool_permission(
-        "deny",
-        &crate::gates::tag("H-21", format!(
-            "🚫 Native SendMessage is limited to this session's recorded subagent IDs.\n\n\
-             Use {prefix}coordination action=message target=<peer> summary=\"<brief summary>\" message=\"<message>\".\n\n\
-             This sends the message through the durable factory coordination path."
-        )),
-    )
+    crate::gates::tag("H-21", format!(
+        "🚫 Native SendMessage is limited to this session's recorded subagent IDs.\n\n\
+         Use {prefix}coordination action=message target=<peer> summary=\"<brief summary>\" message=\"<message>\".\n\n\
+         This sends the message through the durable factory coordination path."
+    ))
 }
 
 #[cfg(test)]

@@ -32,14 +32,27 @@ fn record(
     task_id: Option<&str>,
     detail: &str,
 ) -> Result<()> {
+    record_with(store, kind, codes, task_id, detail, serde_json::Map::new())
+}
+
+fn record_with(
+    store: &dyn EventStore,
+    kind: EventType,
+    codes: &[&str],
+    task_id: Option<&str>,
+    detail: &str,
+    extra: serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
     let detail: String = detail.chars().take(400).collect();
     for code in codes {
+        let mut metadata = serde_json::json!({
+            "task_id": task_id,
+            "codes": codes,
+            "detail": detail,
+        });
+        metadata.as_object_mut().expect("object literal").extend(extra.clone());
         let event = Event::new(kind, EventEntityType::Gate, *code, format!("{kind} {code}"))
-            .with_metadata(serde_json::json!({
-                "task_id": task_id,
-                "codes": codes,
-                "detail": detail,
-            }));
+            .with_metadata(metadata);
         store.record(&event)?;
     }
     Ok(())
@@ -66,6 +79,25 @@ pub fn codes_named(text: &str) -> Vec<&'static str> {
         }
     }
     codes
+}
+
+/// A guard that no longer blocks: the refusal is a countable fact and the
+/// call it would have denied proceeds. `outcome: allowed` tells it apart from a
+/// refusal that stopped the call.
+pub fn record_allowed(
+    store: &dyn EventStore,
+    codes: &[&str],
+    task_id: Option<&str>,
+    actor: &str,
+    harness: &str,
+    detail: &str,
+) -> Result<()> {
+    let heading = detail.lines().find(|line| !line.trim().is_empty()).unwrap_or_default();
+    let extra = [("outcome", "allowed"), ("actor", actor), ("harness", harness)]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), serde_json::Value::from(value)))
+        .collect();
+    record_with(store, EventType::GateRefused, codes, task_id, heading, extra)
 }
 
 /// Codes of the latest recorded refusal of `task_id`.

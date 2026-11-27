@@ -116,14 +116,14 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
     shell_references_store_with(command, initial_cwd, depth, false)
 }
 
-/// A command that cannot be projected is refused: no weaker reading stands in
-/// for the per-statement projection. An unresolved directory may be any
-/// directory, so its statements are judged from every one that could matter,
-/// or, with `known_only`, not at all.
+/// A command that cannot be projected is judged by its words alone: it is
+/// refused only when one names a store path literally. An unresolved directory
+/// may be any directory, so its statements are judged from every one that could
+/// matter, or, with `known_only`, not at all.
 fn shell_references_store_with(command: &str, initial_cwd: &Path, depth: usize, known_only: bool) -> bool {
-    if depth > 3 { return true; }
+    if depth > 3 { return words_name_store(command, initial_cwd); }
     let Some(contexts) = super::pre_tool::shell_read_contexts(command, initial_cwd) else {
-        return true;
+        return words_name_store(command, initial_cwd);
     };
     // Names stay names only if every pipe consumer in the whole command reads
     // just stdin text. Each context below is one statement and cannot see its
@@ -165,6 +165,13 @@ fn shell_references_store_with(command: &str, initial_cwd: &Path, depth: usize, 
         }) { return true; }
     }
     false
+}
+
+/// Any word of the text that names a store path, wherever it sits.
+fn words_name_store(text: &str, cwd: &Path) -> bool {
+    text.split(|c: char| c.is_whitespace() || "\"'`();|&<>=".contains(c))
+        .filter(|word| !word.is_empty())
+        .any(|word| path_references_store(word, cwd, false))
 }
 
 /// A shell executes this heredoc body. Beyond its statements, any word naming a

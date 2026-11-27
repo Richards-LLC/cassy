@@ -1185,6 +1185,7 @@ fn release_tree_entries(repo: &Path, revision: &str) -> Option<ReleaseTreeEntrie
     Some(entries)
 }
 
+// gate-audit[evidence_only]: selector Excludes report-only rows from fragment ownership; no delivery approval or refusal is waived.
 fn reviewed_import_effect(
     root: &Path, repo: &Path, task: &Task, base: &str, anchor: &str, target: &str,
 ) -> Option<Result<(), ReleaseInventoryCode>> {

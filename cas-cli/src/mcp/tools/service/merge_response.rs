@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rmcp::model::{CallToolResult, ContentBlock};
+use rmcp::model::{CallToolResult, ContentBlock, ErrorCode};
 use serde_json::{Value, json};
 
 use super::{CasService, mutation_receipt::Receipt};
@@ -55,8 +55,7 @@ impl MutationResponseReceipt {
             let request_id = receipt.spawn_request_id.get();
             let outcome = match (request_id, joined) {
                 (Some(_), _) => "COMMITTED",
-                (None, Ok(Err(_))) => "NOT_ADMITTED",
-                (None, Ok(Ok(result))) if result.is_error == Some(true) => "NOT_ADMITTED",
+                (None, Ok(Err(error))) if error.code == ErrorCode::INVALID_PARAMS => "NOT_ADMITTED",
                 (None, _) => "UNKNOWN",
             };
             return self.save(json!({"state":"completed", "result":result,

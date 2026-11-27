@@ -7712,6 +7712,11 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
             "reopen must invalidate the old resolved proof authority"
         );
 
+        let worker_id = format!("{worker_id}-fresh-cycle");
+        register_delivery_agent(&cas_root, &worker_id, "bob", AgentRole::Worker, &factory_session);
+        let mut reopened = task_store.get(&task.id).unwrap();
+        reopened.assignee = Some("bob".into());
+        task_store.update(&reopened).unwrap();
         let worker_service = delivery_service(&cas_root, &worker_id);
         let started = worker_service
             .task(Parameters(task_req(serde_json::json!({

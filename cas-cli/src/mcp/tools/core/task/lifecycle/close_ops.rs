@@ -8144,6 +8144,9 @@ impl CasCore {
         }
         #[cfg(test)]
         lifecycle_race_hook::fire_before_handoff(&id);
+        if result.as_ref().is_ok_and(|result| result.is_error.unwrap_or(false)) {
+            return result;
+        }
         let note = self.advance_queue_after_delivery(&id).await;
         match note {
             Ok(Some(note)) => if let Ok(result) = result.as_mut() {

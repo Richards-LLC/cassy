@@ -531,7 +531,8 @@ Keep reading.".into(),
             branch_transfer_git(root, &["switch", "factory/test-agent"]);
             let mut parked = Task::new("cas-parked".into(), "Prior delivery".into());
             parked.status = cas::types::TaskStatus::AwaitingMerge;
-            parked.assignee = Some("test-agent".into());
+            parked.assignee = Some("prior-worker".into());
+            parked.deliverables.parked_branch = Some("factory/test-agent".into());
             parked.deliverables.factory_branch_anchor = Some(tip.clone());
             store.add(&parked).unwrap();
             task.deliverables.work_target = Some(cas::types::WorkTarget {
@@ -7806,6 +7807,7 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
         // pin: the worker consumes this copyable task-start command from its queued assignment.
         assert!(dispatch.iter().any(|row| row.prompt.contains(&format!("action=start id={id}"))),
             "accepted creation must reach the same worker it displays");
+        task_store.delete(&id).unwrap();
     }
     let shown = extract_text(
         service

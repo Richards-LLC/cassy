@@ -291,7 +291,7 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
         name: "User-Facing Paths",
         description: "Comma-separated repo-relative globs. A factory delivery whose diff touches one needs the independent QA pass even without a label or demo_statement.",
         value_type: ConfigType::StringList,
-        default: "**/*.html,**/*.css,**/*.scss,**/*.vue,**/*.svelte,**/*.tsx,**/*.jsx",
+        default: "**/*.html,**/*.css,**/*.scss,**/*.vue,**/*.svelte,**/*.tsx,**/*.jsx,**/locales/**,**/locale/**,**/localizations/**,**/i18n/**,**/*.ftl,**/*.po,**/*.mjml,**/*.hbs,**/*.handlebars,**/*.liquid,**/*.mustache",
         constraint: Constraint::None,
         advanced: false,
         requires_feature: None,

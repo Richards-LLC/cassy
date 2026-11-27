@@ -832,7 +832,7 @@ fn read_wake_inputs(
         } else {
             crate::mcp::tools::service::factory_ops::worker_cli_from_agent(agent)
         };
-        let path = if is_supervisor {
+        let path = if is_supervisor && cli == cas_mux::SupervisorCli::Codex {
             agent.factory_session.as_deref().and_then(|session|
                 super::supervisor_commands::supervisor_transcript(cas_dir, session, name, cli))
         } else {

@@ -191,6 +191,7 @@ impl PeerMailboxRuntime {
                     transcript::serve(&self.cas_dir, &mailbox, recipient, message)
                 },
                 &move |recipient, message| {
+                    crate::efficiency_facts::peer_admitted(&cas_dir, message, chrono::Utc::now());
                     match crate::cloud::epic_split::ingest(&cas_dir, recipient, message)? {
                         crate::cloud::epic_split::Ingested::Ignored(why) => {
                             tracing::info!(message = %message.id, %why, "epic split message ignored");

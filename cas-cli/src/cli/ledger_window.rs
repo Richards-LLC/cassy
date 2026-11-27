@@ -24,6 +24,7 @@ pub(super) struct Efficiency {
     refusals: Measure<Refusals>,
     supervisor_wakes_by_harness: Measure<BTreeMap<String, WakeLatency>>,
     issues: Issues,
+    time_sinks: Measure<super::time_sinks::TimeSinks>,
 }
 
 #[derive(Serialize, Default)]
@@ -99,12 +100,13 @@ pub(super) fn build(root: &Path, since: DateTime<Utc>, until: DateTime<Utc>, vis
     let agent_filed = filed.values().filter(|known| **known).count();
     let issues = Issues {
         recorded_filed: filed.len(), agent_filed, unattributed_filed: filed.len() - agent_filed,
-        closed_in_window: unknown("issue close timestamps are not retained; receipt update time is only an observation"),
+        closed_in_window: measured(super::time_sinks::issue_closures(&db, (since, until))),
         closures_in_reconcile_receipts: measured(closures(&db, since, until)),
     };
     Ok(WindowReport { ledger, efficiency: Efficiency {
         interval: "[since, until)", refusals,
         supervisor_wakes_by_harness: measured(wakes(root, &db, since, until)), issues,
+        time_sinks: measured(super::time_sinks::build(root, &db, since, until)),
     } })
 }
 
@@ -201,6 +203,7 @@ pub(super) fn render(efficiency: &Efficiency) -> String {
     let _ = writeln!(out, "  Issues: {} recorded filed; {} agent-filed, {} unattributed; closed: {}; closure receipts updated in window: {}",
         i.recorded_filed, i.agent_filed, i.unattributed_filed, i.closed_in_window.render(|n| n.to_string()),
         i.closures_in_reconcile_receipts.render(|n| n.to_string()));
+    super::time_sinks::render(&mut out, &efficiency.time_sinks);
     out
 }
 

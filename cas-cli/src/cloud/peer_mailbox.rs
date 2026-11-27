@@ -1546,6 +1546,9 @@ fn deliver_claimed_with_history(
                         continue; // Only transient recording failures are retried.
                     }
                 }
+                if let Some((root, _)) = workers {
+                    crate::efficiency_facts::peer_admitted(root, message, chrono::Utc::now());
+                }
                 match admitted {
                     EnqueueIdempotentResult::Created(id) => {
                         report.delivered += 1;

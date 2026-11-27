@@ -749,7 +749,10 @@ fn reconcile_owned_issues(
     let closed = close_in_pool(&gh, &ready);
     for ((index, _, _), result) in ready.iter().zip(closed) {
         match result {
-            Ok(()) => outcomes[*index].action = IssueAction::Closed,
+            Ok(()) => {
+                outcomes[*index].action = IssueAction::Closed;
+                crate::efficiency_facts::issue_closed(root, &outcomes[*index].issue, chrono::Utc::now());
+            }
             Err(error) => {
                 outcomes[*index].action = IssueAction::Failed;
                 outcomes[*index].comment_or_error = error;
@@ -1165,6 +1168,10 @@ exit 0
             if n == 110 { IssueAction::Failed } else { IssueAction::Closed })));
         let actions: BTreeMap<String, IssueAction> = outcomes.iter().map(|o| (o.issue.clone(), o.action.clone())).collect();
         assert_eq!(actions, expected, "{outcomes:?}");
+        let db = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        let observed_closures: usize = db.query_row("SELECT count(DISTINCT json_extract(payload,'$.issue')) FROM efficiency_observations WHERE kind='issue_closed'", [], |r| r.get(0)).unwrap();
+        assert_eq!(observed_closures, expected.values().filter(|a| **a == IssueAction::Closed).count());
+
         let pending: Vec<&IssueOutcome> = outcomes.iter().filter(|o| o.action == IssueAction::Failed).collect();
         assert_eq!(pending.len(), 1, "exactly the exhausted close is pending: {outcomes:?}");
         assert!(pending[0].comment_or_error.contains("example/issue-fixture#110"), "{}", pending[0].comment_or_error);

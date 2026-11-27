@@ -48,6 +48,18 @@ pub(super) struct RunnerLosses {
     by_job_and_runner_labels: BTreeMap<String, usize>,
     /// Missing logs/annotations prevent a known zero, but retain confirmed hits.
     pub(super) missing: Vec<String>,
+    #[serde(default)]
+    timings: Option<Vec<JobTiming>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct JobTiming {
+    pub job_id: u64,
+    pub run_id: u64,
+    pub head_sha: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(super) struct IssueDay {
@@ -64,9 +76,9 @@ pub(super) struct IssueDays {
     agent_evidence: String,
 }
 #[derive(Debug, Clone, Serialize)]
-struct Park {
-    task_id: String,
-    parked_at: DateTime<Utc>,
+pub(super) struct Park {
+    pub task_id: String,
+    pub parked_at: DateTime<Utc>,
     source: String,
     origin_machine: Option<String>,
     owner_machine: Option<String>,
@@ -128,7 +140,7 @@ fn attribute<'a>(line: &'a str, name: &str) -> Option<&'a str> {
     line.split_once(&format!("{name}=\""))?.1.split('"').next()
 }
 
-fn parks(db: &rusqlite::Connection) -> Result<Vec<Park>> {
+pub(super) fn parks(db: &rusqlite::Connection) -> Result<Vec<Park>> {
     let mut found = BTreeMap::<String, Park>::new();
     let mut stmt = db.prepare("SELECT id, notes FROM tasks")?;
     for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
@@ -450,7 +462,7 @@ fn runners(
             runs.extend(pages(root, &path, Some("workflow_runs"))?);
         }
     }
-    let mut out = RunnerLosses::default();
+    let mut out = RunnerLosses { timings: Some(vec![]), ..Default::default() };
     let mut seen = BTreeSet::new();
     for run in runs {
         let created = run["created_at"]
@@ -472,6 +484,12 @@ fn runners(
                 continue;
             }
             out.jobs_examined += 1;
+            out.timings.as_mut().unwrap().push(JobTiming {
+                job_id, run_id: id, head_sha: job["head_sha"].as_str().or_else(|| run["head_sha"].as_str()).map(str::to_owned),
+                created_at: job["created_at"].as_str().and_then(time),
+                started_at: job["started_at"].as_str().and_then(time),
+                completed_at: job["completed_at"].as_str().and_then(time),
+            });
             if matches!(job["conclusion"].as_str(), Some("success" | "skipped")) {
                 continue;
             }
@@ -624,6 +642,26 @@ struct Capture {
     runners: Measure<RunnerLosses>,
     issues: Measure<IssueDays>,
 }
+pub(super) fn recorded_ci(root: &Path, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<JobTiming>> {
+    let repo = crate::github_issue_attach::default_repo_for(root);
+    let mut captures = vec![];
+    for path in std::fs::read_dir(root.join("ledger-sensors"))? {
+        let path = path?.path();
+        if path.extension().is_none_or(|ext| ext != "json") { continue }
+        if let Ok(bytes) = std::fs::read(path)
+            && let Ok(capture) = serde_json::from_slice::<Capture>(&bytes)
+            && capture.from <= from && capture.to >= to && capture.actions_repo == repo {
+            captures.push(capture);
+        }
+    }
+    captures.sort_by_key(|capture| capture.captured_at);
+    let capture = captures.pop().context("no Actions capture covers the requested window")?;
+    match capture.runners {
+        Measure::Known(runners) => runners.timings.context("capture predates retained job timestamps"),
+        Measure::Unknown { unknown } => bail!(unknown),
+    }
+}
+
 pub(super) fn external(
     root: &Path,
     from: Option<DateTime<Utc>>,
@@ -896,7 +934,7 @@ mod tests {
         config.save(&root).unwrap();
         let job = |id, labels, conclusion| {
             json!({"id":id,"name":"suite","runner_name":"GitHub Actions 9","labels":labels,
-            "status":"completed","conclusion":conclusion,"check_run_url":format!("https://api.github.com/repos/owner/code/check-runs/{id}")})
+            "status":"completed","conclusion":conclusion,"created_at":"2026-11-18T10:00:00Z","started_at":"2026-11-18T10:02:00Z","completed_at":"2026-11-18T10:07:00Z","head_sha":"aabbccdd","check_run_url":format!("https://api.github.com/repos/owner/code/check-runs/{id}")})
         };
         let fixtures = json!({
             "repos/owner/code/actions/runs": {"total_count":1,"workflow_runs":[{"id":10,"created_at":"2026-11-18T10:00:00Z"}]},
@@ -940,6 +978,14 @@ print(value if isinstance(value,str) else json.dumps(value))
             2
         );
         assert_eq!(json["hosted_runner_losses"]["jobs_examined"], 5);
+        let timing = super::super::time_sinks::ci(&root, (from.unwrap(),to.unwrap())).unwrap();
+        let timing = serde_json::to_value(timing).unwrap();
+        assert_eq!(timing["jobs"], 5);
+        assert_eq!(timing["queue_minutes"]["total"], 10.0);
+        assert_eq!(timing["run_minutes"]["total"], 25.0);
+        assert_eq!(timing["missing_queue"], 0);
+        assert_eq!(timing["missing_run"], 0);
+
         assert_eq!(json["hosted_runner_losses"]["missing"], json!([]));
         assert_eq!(json["daily_issues"]["days"]["2026-11-18"]["opened"], 2);
         assert_eq!(json["daily_issues"]["days"]["2026-11-18"]["closed"], 1);

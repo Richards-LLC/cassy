@@ -19,6 +19,8 @@ mod sensors;
 mod health;
 #[path = "ledger_window.rs"]
 mod window;
+#[path = "ledger_time_sinks.rs"]
+mod time_sinks;
 
 #[derive(Args)]
 pub struct ScorecardArgs {

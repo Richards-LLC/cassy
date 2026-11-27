@@ -233,6 +233,9 @@ pub(crate) fn observe_tool_result_as(
             tracing::warn!(%error, "could not record gate refusal fact");
         }
     } else if !refused {
+        if let (Some(actor), Some(tool), Some(action)) = (actor, tool, value("action").and_then(|a| a.as_str())) {
+            crate::efficiency_facts::tool_succeeded(cas_root, &actor.id, tool, action, task_id, Utc::now());
+        }
         let codes = super::override_codes_in(&text);
         if codes.is_empty() { return; }
         let reason = value("reason").and_then(|reason| reason.as_str()).unwrap_or(&text);

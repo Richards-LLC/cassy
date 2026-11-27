@@ -381,12 +381,25 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     let uncoded = store.list_by_type(cas_types::EventType::GateRefused, 100).unwrap().into_iter()
         .find(|event| event.entity_id == UNCODED && event.metadata.as_ref().is_some_and(|m| m["task_id"] == "cas-does-not-exist"))
         .expect("uncoded MCP refusal must be retained");
+    let refusal_id = uncoded.id.to_string();
     let metadata = uncoded.metadata.unwrap();
     assert_eq!(metadata["actor"], "gate-supervisor");
     assert_eq!(metadata["role"], "supervisor");
     assert_eq!(metadata["harness"], "codex");
     assert_eq!(metadata["tool"], "task");
     assert_eq!(metadata["action"], "show");
+    tasks.add(&Task::new("cas-does-not-exist".into(), "Now recorded".into())).unwrap();
+    let request = serde_json::from_value(serde_json::json!({
+        "name":"task", "arguments":{"action":"show", "id":"cas-does-not-exist"},
+    })).unwrap();
+    let response = client.call_tool(request).await.unwrap();
+    assert_ne!(response.is_error, Some(true));
+    work.wait_idle().await;
+    let db = rusqlite::Connection::open(dir.path().join("cas.db")).unwrap();
+    let recoveries: usize = db.query_row("SELECT count(*) FROM efficiency_observations WHERE kind='refusal_recovered' AND observation_key=?1",
+        [&refusal_id], |row| row.get(0)).unwrap();
+    assert_eq!(recoveries, 1);
+
     // The real task-close producer must identify the verification gate it
     // waived, and the common MCP observer must persist exactly one fact.
     let request = serde_json::from_value(serde_json::json!({

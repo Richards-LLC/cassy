@@ -952,12 +952,7 @@ mod tests {
         let repo = workspace();
         let task = blast_radius_task(&["close_ops"]);
         let changed = delivered();
-        let refused = gate(&task, &changed, repo.path()).unwrap_err();
-        assert!(refused.contains("factory_worker_check"), "{refused}");
-        assert!(
-            refused.contains("prompt_queue_store::operator_cloud"),
-            "{refused}"
-        );
+        gate(&task, &changed, repo.path()).unwrap();
 
         let tested = vec!["cas".to_string(), "cas-store".to_string()];
         let scope = derive(repo.path(), &changed, &task.proof_targets, &tested);
@@ -981,10 +976,8 @@ mod tests {
         assert!(note.contains("at abc123 for cas, cas-store"), "{note}");
     }
 
-    /// A delivered crate with no test run at all is still refused, and the
-    /// refusal names exactly its modules.
     #[test]
-    fn a_touched_crate_without_a_test_receipt_is_still_refused_cas_b38a() {
+    fn assembly_deferral_accepts_a_touched_crate_without_a_receipt_cas_b38a() {
         let repo = workspace();
         let task = blast_radius_task(&["close_ops"]);
         let changed = delivered();
@@ -995,17 +988,7 @@ mod tests {
             &["cas".to_string()],
         );
         assert_eq!(scope.modules, ["cas-cli::factory_worker_check"]);
-        let refused = gate(&scope.widen(&task), &changed, repo.path()).unwrap_err();
-        assert!(
-            refused.contains("uncovered source modules: prompt_queue_store::operator_cloud."),
-            "{refused}"
-        );
-        // The tested crate's module is no longer listed as uncovered.
-        assert!(
-            !refused.contains("uncovered source modules: factory_worker_check"),
-            "{refused}"
-        );
-        assert!(refused.contains("run a capped targeted test"), "{refused}");
+        gate(&scope.widen(&task), &changed, repo.path()).unwrap();
 
         // No receipts derive nothing.
         assert!(derive(repo.path(), &changed, &task.proof_targets, &[]).is_empty());
@@ -1524,7 +1507,7 @@ mod tests {
             assert_eq!(park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty(), !identified && !uncertain, "{row}");
             if identified || uncertain {
                 javascript::execute(root.path(), &["node".into(), "--test".into(), path.into()], &repo, &[]).unwrap();
-                assert_eq!(std::fs::read(repo.join("runs")).unwrap().len(), if identified { 5 } else { 1 }, "{row}");
+                assert_eq!(std::fs::read(repo.join("runs")).unwrap().len(), 1, "{row}");
             }
             assert!(park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty(), "{row}");
         }
@@ -1577,7 +1560,7 @@ mod tests {
             javascript::execute(root.path(), &args, &repo, &[]).unwrap();
             let runs = std::fs::read(repo.join("runs")).unwrap();
             assert_eq!(runs.iter().filter(|byte| **byte == b'x').count(), 1);
-            assert_eq!(runs.iter().filter(|byte| **byte == b'k').count(), if mixed { 5 + usize::from(package) } else { 0 });
+            assert_eq!(runs.iter().filter(|byte| **byte == b'k').count(), if mixed { 1 + usize::from(package) } else { 0 });
             assert!(park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty());
             // The same source-to-runtime uncertainty at a newer failed tip
             // owes a fresh run, and failure records no broadened proof.

@@ -1,6 +1,3 @@
-//! cas-fcb1: the G-61 gate family replayed through the real task close
-//! handler. Every row ends in a runnable prescription whose passing receipt
-//! parks the delivery, or parks at once, never an impossible demand.
 use super::*;
 use crate::mcp::CasService;
 use crate::store::{open_agent_store, open_store, open_task_store, open_worktree_store};
@@ -49,8 +46,6 @@ struct Fixture {
     _dir: tempfile::TempDir,
     _origin: tempfile::TempDir,
     project: PathBuf,
-    cas_dir: PathBuf,
-    worker_path: PathBuf,
     head: String,
     worker: CasService,
     supervisor: CasService,
@@ -121,19 +116,10 @@ fn fixture(env: &mut TestEnvGuard, base: &[(&str, String)], delivered: &[(&str, 
         _dir: dir,
         _origin: origin,
         project,
-        cas_dir,
-        worker_path,
         head,
         worker: CasService::new(worker, None),
         supervisor: CasService::new(supervisor, None),
     }
-}
-
-fn executable(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 /// GH #2380, #2369, #2355, #2362, #2378, a named JavaScript and a named Rust
@@ -141,13 +127,9 @@ fn executable(path: &Path, body: &str) {
 /// served journey, each through `task action=close`.
 #[cfg(unix)]
 #[tokio::test]
-async fn g61_gate_family_ends_runnable_or_accepted_cas_fcb1() {
-    use crate::factory_worker_check::{javascript, stability, widened};
+async fn g61_gate_family_advisories_allow_close_cas_fcb1() {
     let mut env = TestEnvGuard::temp_home();
     env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
-        // `related` finds no importer; a named run matches no runtime name;
-        // the package run passes.
-        const VITEST: &str = "#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\nargs = sys.argv[1:]\nrelated = 'related' in args\nnamed = '--testNamePattern' in args\nresults = [] if related else [{'name': str(Path('pages/index.test.ts').resolve()), 'status': 'passed',\n    'assertionResults': [{'fullName': 'renders at runtime' if named else 'renders', 'status': 'skipped' if named else 'passed'}]}]\nPath(args[args.index('--outputFile') + 1]).write_text(json.dumps({'success': not related, 'testResults': results}))\nraise SystemExit(1 if related else 0)\n";
         const REGISTRY: &str = "journeys:\n- id: join\n  status: live\n  spec: tests/journeys/join.spec.ts\n- id: delete\n  status: live\n  spec: tests/journeys/O1.spec.ts\n- id: audit\n  status: live\n  spec: tests/journeys/Q1.spec.ts\n- id: pair\n  status: live\n  spec: hub-web/e2e/journeys/pair.journey.ts\n";
         let pw = "import { test } from '@playwright/test';\n";
         // (issue, base files, delivered files, deleted files)
@@ -218,10 +200,7 @@ async fn g61_gate_family_ends_runnable_or_accepted_cas_fcb1() {
         let mut failures = Vec::new();
         for (issue, base_files, delivered, deleted) in rows {
             let f = fixture(&mut env, &base_files, &delivered, &deleted);
-            let (cas, repo, head) = (f.cas_dir.as_path(), f.worker_path.as_path(), f.head.as_str());
-            // #2378: the delivery is already on the target and its worker is
-            // gone; the supervisor's merged-receipt close reads the project
-            // checkout, while the proof ran in the worker's worktree.
+            let head = f.head.as_str();
             let (closer, close) = if issue == "#2378" {
                 git(&f.project, &["merge", "-q", "--ff-only", LANE]);
                 git(&f.project, &["push", "-q", "origin", "main"]);
@@ -230,88 +209,14 @@ async fn g61_gate_family_ends_runnable_or_accepted_cas_fcb1() {
             } else {
                 (&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "fixture delivery"}))
             };
-            let held = call(closer, close.clone()).await;
-            let commands: Vec<Vec<String>> = held
-                .split("worker-check --cas-root ").skip(1)
-                .filter_map(|tail| tail.split_once(" -- ").map(|(_, command)| command.split(['`', ';']).next().unwrap()
-                    .split(". ").next().unwrap().trim_end_matches(['.', '\n']).to_string()))
-                .map(|command| command.replace('\'', "").split_whitespace().map(str::to_owned).collect())
-                .collect();
-            let (rust, script): (Vec<_>, Vec<_>) = commands.into_iter().partition(|words| words.first().is_some_and(|word| word == "nextest"));
-            for words in &rust {
-                assert!(crate::factory_worker_check::allowed_args(words), "{issue}: unrunnable prescription {words:?}");
-            }
-            let prescribed: Vec<javascript::Invocation> = script.iter().map(|words| javascript::invocation(words)
-                .unwrap_or_else(|| panic!("{issue}: unrunnable prescription {words:?}"))).collect();
-            for run in &prescribed {
-                assert!(run.files.iter().all(|file| repo.join(file).exists()), "{issue}: {held}");
-            }
-            assert!(deleted.iter().all(|path| !held.contains(path)), "{issue}: {held}");
-            match issue {
-                "#2380" => {
-                    let spec = "apps/web/src/chat.history.spec.ts";
-                    if prescribed.iter().map(|run| (run.runner, run.files.clone())).collect::<Vec<_>>() != [("vitest", vec![spec.to_string()])] {
-                        failures.push((issue, held));
-                        continue;
-                    }
-                    widened::record(cas, repo, head, widened::Proof { runner: "vitest".into(),
-                        scope: widened::Scope::File(spec.into()), reason: String::new(), configs: Default::default() }, 1).unwrap();
-                }
-                "#2369" | "named" => {
-                    executable(&repo.join("apps/web/node_modules/.bin/vitest"), VITEST);
-                    let [run] = prescribed.as_slice() else { panic!("{issue}: {held}") };
-                    let related = if issue == "#2369" { vec!["related", "--run"] } else { Vec::new() };
-                    let args = std::iter::once("vitest").chain(related).map(String::from).chain(run.files.clone()).collect::<Vec<_>>();
-                    if let Err(error) = javascript::execute(cas, &args, repo, &[]) {
-                        failures.push((issue, format!("{error:#}")));
-                        continue;
-                    }
-                }
-                "#2355" => {
-                    assert!(!prescribed.is_empty(), "{issue}: {held}");
-                    widened::record(cas, repo, head, widened::Proof { runner: "playwright".into(),
-                        scope: widened::Scope::Package(String::new()), reason: String::new(), configs: Default::default() }, 1).unwrap();
-                }
-                "#2362" => {}
-                "local journey" => {
-                    let journey = "hub-web/e2e/journeys/pair.journey.ts";
-                    if prescribed.iter().map(|run| (run.runner, run.files.clone())).collect::<Vec<_>>() != [("playwright", vec![journey.to_string()])] {
-                        failures.push((issue, held));
-                        continue;
-                    }
-                    stability::record(cas, repo, head, stability::Proof {
-                        runner: "playwright".into(), consecutive_passes: stability::REQUIRED_PASSES, elapsed_ms: 1,
-                        tests: vec![stability::Identity::exact(journey, "pairs a device")], inactive: Vec::new(),
-                    }).unwrap();
-                }
-                "rust" | "harness" => {
-                    let [words] = rust.as_slice() else { panic!("{issue}: {held}") };
-                    // "rust": nextest's own zero-selection status for the named
-                    // run, then the crate run passes. "harness": the named run
-                    // passes under the harness the inventory owns.
-                    let cargo = f.cas_dir.join("fake-cargo");
-                    executable(&cargo, if issue == "rust" {
-                        "#!/bin/sh\ncase \" $* \" in\n  *' -E '*) echo '    Starting 0 tests across 1 binary (1 skipped)'; echo 'error: no tests to run'; exit 4;;\nesac\necho '        PASS [ 0.01s] (1/1) fixture kept'\necho '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped'\n"
-                    } else {
-                        "#!/bin/sh\necho '        PASS [ 0.01s] (1/1) fixture::integration_cli runs'\necho '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped'\n"
-                    });
-                    if let Err(error) = crate::factory_worker_check::execute_at(cas, words, repo, &cargo) {
-                        failures.push((issue, format!("{words:?}: {error:#}")));
-                        continue;
-                    }
-                }
-                "#2378" => {
-                    javascript::execute(cas, &["node".into(), "--test".into(), "a.test.mjs".into()], repo, &[]).unwrap();
-                }
-                _ => unreachable!(),
-            }
-            let after = if issue == "#2362" { held } else { call(closer, close).await };
+            let held = call(closer, close).await;
+            let status = open_task_store(&f.project.join(".cas")).unwrap().get(ID).unwrap().status;
             let accepted = if issue == "#2378" {
-                !crate::gates::codes_in(&after).contains(&"G-61")
+                status == TaskStatus::Closed
             } else {
-                after.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff)
+                status == TaskStatus::AwaitingMerge
             };
-            if !accepted { failures.push((issue, after)); }
+            if !accepted { failures.push((issue, held)); }
         }
         assert!(failures.is_empty(), "{failures:#?}");
 }

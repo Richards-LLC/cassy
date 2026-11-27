@@ -1057,7 +1057,7 @@ async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
                 &f.worker,
                 serde_json::json!({"action": "close", "id": code_id, "reason": "Stylesheet changed"}),
             ).await;
-            assert!(refused.contains("QA evidence bundle"), "{refused}");
+            assert!(crate::gates::codes_in(&refused).contains(&"G-59"), "{refused}");
             assert_eq!(f.task(code_id).status, TaskStatus::InProgress, "{refused}");
 
             // A clean, merged local lane must not hide the remote's newer

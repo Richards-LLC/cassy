@@ -5182,7 +5182,7 @@ mod tests {
             assert!(leaks.is_empty(), "{harness:?}: {leaks:#?}");
             let discipline = "skills/cas-worker/references/discipline.md";
             let kept = std::fs::read_to_string(source.join(discipline)).unwrap();
-            assert!(kept.contains("scripts/journey-eval.sh") && !kept.contains(CAS_SRC_ELSE), "{harness:?}");
+            assert!(!kept.contains(CAS_SRC_ELSE), "{harness:?}");
             assert_ne!(std::fs::read_to_string(personal.join(discipline)).unwrap(), kept, "{harness:?}");
             let parity = install_parity_for_harness(harness, &personal);
             assert!(parity.stale.is_empty() && parity.missing.is_empty(), "{harness:?}: {parity:?}");

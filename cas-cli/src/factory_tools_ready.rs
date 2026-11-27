@@ -9,11 +9,18 @@
 //! its tools before an upgraded daemon adopted it) never lists again, so
 //! holding it would hold its wakes forever (GH #2185).
 //!
-//! The record names the stable front, not the backend that answered: a hot
-//! update replaces the backend under a live client that never lists again.
+//! Codex launches bind readiness to the session ID passed to the actual client.
+//! The scalar is a compatibility projection; only matching catalog replies
+//! populate the authoritative record for a stamped launch.
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
+use serde::{Deserialize, Serialize};
+
 const DIR: &str = "factory-tools-ready";
+const MAX_FRONTS: usize = 32;
 
 /// Request ids the stable front uses for its own catalog probe, which runs before
 /// it answers the client's `initialize`. The client holds no tools at that point.
@@ -27,14 +34,96 @@ fn marker(cas_root: &Path, session: &str, worker: &str) -> Option<PathBuf> {
     (safe(session) && safe(worker) && !worker.starts_with('.')).then(|| cas_root.join(DIR).join(session).join(worker))
 }
 
-/// Called by the worker's MCP server when it lists its tools.
-pub(crate) fn record_tools_listed(cas_root: &Path, session: &str, worker: &str, server_pid: u32) -> std::io::Result<()> {
+#[derive(Deserialize, Serialize)]
+struct Front {
+    pid: u32,
+    starttime: Option<u64>,
+}
+
+impl Front {
+    fn new(pid: u32) -> Self {
+        Self { pid, starttime: crate::mcp::daemon::read_pid_starttime(pid) }
+    }
+
+    fn is_live(&self, pid_alive: &impl Fn(u32) -> bool) -> bool {
+        pid_alive(self.pid) && self.starttime.is_none_or(|starttime|
+            crate::mcp::daemon::pid_matches_fingerprint(self.pid, starttime))
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct Launch {
+    session_id: String,
+    fronts: Vec<Front>,
+}
+
+impl Launch {
+    fn read(path: &Path) -> io::Result<Option<Self>> {
+        let file = match File::open(companion(path, "launch")) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let launch: Self = serde_json::from_reader(file.take(8192))?;
+        if launch.fronts.len() > MAX_FRONTS {
+            return Err(io::Error::other("worker readiness front limit exceeded"));
+        }
+        Ok(Some(launch))
+    }
+
+    fn write(&self, path: &Path) -> io::Result<()> {
+        let bytes = serde_json::to_vec(self)?;
+        write_atomically(&companion(path, "launch"), &bytes)
+    }
+}
+
+fn companion(path: &Path, suffix: &str) -> PathBuf {
+    let worker = path.file_name().expect("worker marker has a name").to_string_lossy();
+    path.with_file_name(format!(".{worker}.{suffix}"))
+}
+
+fn lock_marker(path: &Path) -> io::Result<File> {
+    std::fs::create_dir_all(path.parent().expect("marker has a parent"))?;
+    let lock = OpenOptions::new().create(true).truncate(false).write(true)
+        .open(companion(path, "lock"))?;
+    FileExt::lock_exclusive(&lock)?;
+    Ok(lock)
+}
+
+fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut staged = tempfile::NamedTempFile::new_in(path.parent().expect("marker has a parent"))?;
+    staged.write_all(bytes)?;
+    staged.persist(path).map(|_| ()).map_err(|error| error.error)
+}
+
+fn record_listing(cas_root: &Path, session: &str, worker: &str, launch_id: Option<&str>, server_pid: u32) -> io::Result<()> {
     // A standby server answers tools/list before any store exists and must not create one.
     let Some(path) = marker(cas_root, session, worker).filter(|_| cas_root.is_dir()) else { return Ok(()) };
-    std::fs::create_dir_all(path.parent().expect("marker has a parent"))?;
-    let staged = path.with_extension(format!("pid{server_pid}"));
-    std::fs::write(&staged, server_pid.to_string())?;
-    std::fs::rename(staged, path)
+    let _lock = lock_marker(&path)?;
+    let pid_alive = crate::mcp::daemon::pid_alive;
+    if !pid_alive(server_pid) {
+        return Ok(());
+    }
+    let Some(mut launch) = Launch::read(&path)? else {
+        return write_atomically(&path, server_pid.to_string().as_bytes());
+    };
+    if launch_id != Some(launch.session_id.as_str()) {
+        return Ok(());
+    }
+    launch.fronts.retain(|front| front.is_live(&pid_alive));
+    if !launch.fronts.iter().any(|front| front.pid == server_pid) {
+        if launch.fronts.len() == MAX_FRONTS {
+            return Err(io::Error::other("worker readiness front limit reached"));
+        }
+        launch.fronts.push(Front::new(server_pid));
+    }
+    write_atomically(&path, launch.fronts[0].pid.to_string().as_bytes())?;
+    launch.write(&path)
+}
+
+#[cfg(test)]
+pub(crate) fn record_tools_listed(cas_root: &Path, session: &str, worker: &str, server_pid: u32) -> io::Result<()> {
+    record_listing(cas_root, session, worker, None, server_pid)
 }
 
 /// A `tools/list` was answered. Only the external client's listing counts: the
@@ -59,16 +148,31 @@ pub(crate) fn record_from_environment(cas_root: &Path) {
 /// the record live; a server with no front names itself.
 fn record_from_environment_as(cas_root: &Path, session: &str, worker: &str, own_pid: u32) {
     let pid = std::env::var(FRONT_PID_ENV).ok().and_then(|pid| pid.parse().ok()).unwrap_or(own_pid);
-    if let Err(error) = record_tools_listed(cas_root, session, worker, pid) {
+    let launch_id = std::env::var("CAS_SESSION_ID").ok();
+    if let Err(error) = record_listing(cas_root, session, worker, launch_id.as_deref(), pid) {
         tracing::warn!(%error, "could not record that this worker's tools are listed");
     }
+}
+
+pub(crate) fn await_launch_listing(cas_root: &Path, session: &str, worker: &str, launch_id: &str) -> io::Result<()> {
+    let path = marker(cas_root, session, worker).filter(|_| cas_root.is_dir())
+        .ok_or_else(|| io::Error::other("invalid worker readiness path"))?;
+    let _lock = lock_marker(&path)?;
+    Launch { session_id: launch_id.to_owned(), fronts: Vec::new() }.write(&path)?;
+    write_atomically(&path, AWAITING.as_bytes())
 }
 
 /// A new or recycled worker starts awaiting its listing, so a record from its
 /// predecessor's still-live server cannot release its first wake early.
 pub(crate) fn await_listing(cas_root: &Path, session: &str, worker: &str) {
     let Some(path) = marker(cas_root, session, worker).filter(|_| cas_root.is_dir()) else { return };
-    let written = std::fs::create_dir_all(path.parent().expect("marker has a parent")).and_then(|()| std::fs::write(&path, AWAITING));
+    let written = lock_marker(&path).and_then(|_lock| {
+        write_atomically(&path, AWAITING.as_bytes())?;
+        match std::fs::remove_file(companion(&path, "launch")) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    });
     if let Err(error) = written {
         tracing::warn!(%error, worker, "could not record that this worker awaits its tools listing");
     }
@@ -80,8 +184,15 @@ const AWAITING: &str = "awaiting";
 /// record, or one left by a server that has since exited, does not count; no
 /// record at all is a worker this daemon did not launch, whose tools are listed.
 pub(crate) fn tools_listed(cas_root: &Path, session: &str, worker: &str, pid_alive: impl Fn(u32) -> bool) -> bool {
-    let Some(record) = marker(cas_root, session, worker).and_then(|path| std::fs::read_to_string(path).ok()) else { return true };
-    record.trim().parse::<u32>().is_ok_and(pid_alive)
+    let Some(path) = marker(cas_root, session, worker) else { return true };
+    match Launch::read(&path) {
+        Ok(Some(launch)) => return launch.fronts.iter().any(|front| front.is_live(&pid_alive)),
+        Ok(None) => {},
+        Err(_) => return false,
+    }
+    let mut value = String::new();
+    let read = File::open(path).and_then(|file| file.take(32).read_to_string(&mut value));
+    read.is_err() || value.trim().parse::<u32>().is_ok_and(pid_alive)
 }
 
 /// A backend that is not the front's own process lists tools: `backend_pid` is that

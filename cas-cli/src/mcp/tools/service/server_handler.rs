@@ -1464,6 +1464,111 @@ pub(crate) fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
 mod tests {
     use super::potentially_mutating_call;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worker_catalog_readiness_survives_sibling_front_exit_cas_a43b() {
+        use crate::factory_tools_ready::{FRONT_PID_ENV, await_launch_listing, await_listing, path_for_test, tools_listed};
+        use crate::mcp::{CasCore, CasService, daemon::pid_alive};
+        use rmcp::ServiceExt;
+        use std::process::Stdio;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_SESSION", "factory-test");
+        env.set("CAS_AGENT_NAME", "worker-test");
+        let first_launch = "codex-worker-test-first";
+        let next_launch = "codex-worker-test-next";
+        env.set("CAS_SESSION_ID", first_launch);
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let service = CasService::new(CasCore::with_daemon(root.clone(), None, None),
+            #[cfg(feature = "mcp-proxy")] None);
+        let ready = || tools_listed(&root, "factory-test", "worker-test", pid_alive);
+        let spawn_front = || {
+            tokio::process::Command::new("/bin/cat").stdin(Stdio::piped())
+                .stdout(Stdio::null()).kill_on_drop(true).spawn().unwrap()
+        };
+        let connect = async || {
+            let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+            let service = service.clone();
+            let server = tokio::spawn(async move {
+                service.serve(server_io).await.unwrap().waiting().await.unwrap();
+            });
+            (().serve(client_io).await.unwrap(), server)
+        };
+
+        await_launch_listing(&root, "factory-test", "worker-test", first_launch).unwrap();
+        let marker = path_for_test(&root, "factory-test", "worker-test");
+        let legacy_list = |pid: u32| {
+            let staged = marker.with_extension(format!("pid{pid}"));
+            std::fs::write(&staged, pid.to_string()).unwrap();
+            std::fs::rename(staged, &marker).unwrap();
+        };
+        let mut primary_front = spawn_front();
+        let (primary, primary_server) = connect().await;
+        assert!(!ready());
+        let primary_pid = primary_front.id().unwrap();
+        env.set(FRONT_PID_ENV, &primary_pid.to_string());
+        env.set("CAS_AGENT_NAME", "foreign-worker");
+        primary.list_tools(None).await.unwrap();
+        assert!(!ready());
+        env.set("CAS_AGENT_NAME", "worker-test");
+        assert!(primary.list_tools(None).await.unwrap().tools.iter().any(|tool| tool.name == "task"));
+        assert!(ready());
+
+        let mut sibling_front = spawn_front();
+        let (sibling, sibling_server) = connect().await;
+        env.set(FRONT_PID_ENV, &sibling_front.id().unwrap().to_string());
+        sibling.list_tools(None).await.unwrap();
+        sibling.cancel().await.unwrap();
+        sibling_server.await.unwrap();
+        sibling_front.kill().await.unwrap();
+        primary.send_request(rmcp::model::PingRequest::default().into()).await.unwrap();
+        assert!(ready(), "a listed live front must survive a sibling's exit");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().parse::<u32>().unwrap(), primary_pid);
+
+        let mut successor_front = spawn_front();
+        let (successor, successor_server) = connect().await;
+        let successor_pid = successor_front.id().unwrap();
+        env.set(FRONT_PID_ENV, &successor_pid.to_string());
+        successor.list_tools(None).await.unwrap();
+        primary.cancel().await.unwrap();
+        primary_server.await.unwrap();
+        primary_front.kill().await.unwrap();
+        assert!(ready(), "a genuinely listed successor keeps the same launch ready");
+
+        await_launch_listing(&root, "factory-test", "worker-test", next_launch).unwrap();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "awaiting");
+        successor.list_tools(None).await.unwrap();
+        assert!(!ready(), "a live predecessor's fresh catalog cannot open the next launch");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "awaiting");
+        legacy_list(successor_pid);
+        assert!(!ready(), "an old writer cannot acknowledge a stamped launch");
+
+        let mut next_front = spawn_front();
+        let (next_client, next_server) = connect().await;
+        let next_pid = next_front.id().unwrap();
+        env.set(FRONT_PID_ENV, &next_pid.to_string());
+        env.set("CAS_SESSION_ID", next_launch);
+        assert!(!ready());
+        next_client.list_tools(None).await.unwrap();
+        assert!(ready());
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().parse::<u32>().unwrap(), next_pid);
+        legacy_list(primary_pid);
+        assert!(ready(), "a legacy writer does not replace stamped acknowledgments");
+
+        await_listing(&root, "factory-test", "worker-test");
+        assert!(!ready());
+        legacy_list(successor_pid);
+        assert!(ready(), "an unstamped launch still accepts a legacy listing");
+        next_client.cancel().await.unwrap();
+        next_server.await.unwrap();
+        next_front.kill().await.unwrap();
+        successor.cancel().await.unwrap();
+        successor_server.await.unwrap();
+        successor_front.kill().await.unwrap();
+    }
+
     #[test]
     fn cas_4e19_authenticated_non_worker_verdict_skips_store_access_across_clones() {
         use crate::mcp::server::{AgentIdentitySource, CasCore};

@@ -465,6 +465,7 @@ impl Pane {
             factory_session,
             active_workers,
             None,
+            |_| Ok(()),
         )
     }
 
@@ -488,6 +489,7 @@ impl Pane {
         factory_session: Option<&str>,
         active_workers: Option<usize>,
         startup_prompt: Option<&str>,
+        before_spawn: impl FnOnce(Option<&str>) -> std::io::Result<()>,
     ) -> Result<Self> {
         cli.backend().prepare_workdir(&cwd, config_dir)?;
         cli.backend().prepare_worker_catalog(&cwd);
@@ -512,6 +514,7 @@ impl Pane {
         push_factory_session_env(&mut config, cli, factory_session);
         record_runtime_capabilities(cli, &config);
         let session_id = cas_session_id_from_config(&config);
+        before_spawn(session_id.as_deref())?;
         let pty = Pty::spawn(name, config)?;
         let pane = Self::with_pty(name, PaneKind::Worker, pty, rows, cols, cli)?;
         if let Some(sid) = session_id {

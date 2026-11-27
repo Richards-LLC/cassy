@@ -1289,6 +1289,7 @@ async fn no_delivery_isolates_held_and_integrated_sibling_lanes_gh1370() {
         let repo = f.dir.path();
         let worker_path = f.cas_dir().join("worktrees").join(WORKER);
         let mut held = assigned("cas-a0b1", TaskType::Bug, "main");
+        held.assignee = Some("held-worker".into());
         held.status = TaskStatus::AwaitingMerge;
         held.deliverables.parked_branch = Some(LANE.into());
         held.deliverables.factory_branch_anchor = Some(f.foreign_tip.clone());
@@ -1326,6 +1327,7 @@ async fn no_delivery_isolates_held_and_integrated_sibling_lanes_gh1370() {
         git(repo, &["merge", "-q", "--no-ff", &c_lane, "-m", "Integrate C"]);
         git(repo, &["push", "-q", "origin", "main"]);
         let mut delivered = assigned("cas-c3d4", TaskType::Bug, "main");
+        delivered.assignee = Some("integrated-worker".into());
         delivered.status = TaskStatus::Closed;
         delivered.deliverables.parked_branch = Some(c_lane.clone());
         delivered.deliverables.factory_branch_anchor = Some(c_tip.clone());
@@ -4530,8 +4532,17 @@ async fn parked_review_fix_keeps_recorded_source_task_gh2250_gh2274() {
 
         let mut b = assigned("cas-b0b0", TaskType::Bug, "epic/next");
         b.status = TaskStatus::Open;
+        b.assignee = Some("sibling-worker".into());
+        let sibling_checkout = f.cas_dir().join("worktrees/sibling-worker");
+        git(repo, &["worktree", "add", "-b", "factory/sibling-worker", sibling_checkout.to_str().unwrap(), "origin/epic/next"]);
+        let mut sibling = Agent::new_with_role("sibling-session".into(), "sibling-worker".into(), AgentRole::Worker);
+        sibling.metadata.insert("clone_path".into(), sibling_checkout.display().to_string());
+        agents.register(&sibling).unwrap();
+        let sibling_core = CasCore::with_daemon(f.cas_dir(), None, None);
+        sibling_core.set_agent_id_for_testing(sibling.id.clone());
+        let sibling_service = CasService::new(sibling_core, None);
         f.put(&b);
-        call(&f.worker, serde_json::json!({"action":"start", "id":b.id})).await;
+        call(&sibling_service, serde_json::json!({"action":"start", "id":b.id})).await;
         // Separate the lease clocks explicitly; Git timestamps must not depend
         // on whether two starts happen to fall in the same host clock tick.
         let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
@@ -4539,12 +4550,12 @@ async fn parked_review_fix_keeps_recorded_source_task_gh2250_gh2274() {
             conn.execute("UPDATE task_lease_history SET timestamp=?1 WHERE task_id=?2", rusqlite::params![time, task]).unwrap();
         }
         if b_parked {
-            std::fs::write(checkout.join("b.md"), "task B\n").unwrap();
-            git(&checkout, &["add", "b.md"]);
-            git(&checkout, &["commit", "-qm", "fix(cas-b0b0): delivery B"]);
-            let branch = git(&checkout, &["branch", "--show-current"]);
-            git(&checkout, &["push", "-q", "origin", &branch]);
-            let response = call(&f.worker, serde_json::json!({"action":"close", "id":b.id, "reason":"Delivery B ready"})).await;
+            std::fs::write(sibling_checkout.join("b.md"), "task B\n").unwrap();
+            git(&sibling_checkout, &["add", "b.md"]);
+            git(&sibling_checkout, &["commit", "-qm", "fix(cas-b0b0): delivery B"]);
+            let branch = git(&sibling_checkout, &["branch", "--show-current"]);
+            git(&sibling_checkout, &["push", "-q", "origin", &branch]);
+            let response = call(&sibling_service, serde_json::json!({"action":"close", "id":b.id, "reason":"Delivery B ready"})).await;
             assert_eq!(f.task(&b.id).status, TaskStatus::AwaitingMerge, "{response}");
         }
         let b_before = f.task(&b.id);
@@ -4587,7 +4598,7 @@ async fn parked_review_fix_keeps_recorded_source_task_gh2250_gh2274() {
         assert_eq!(f.task(id).status, TaskStatus::Open, "{returned}");
         env.set("CAS_AGENT_ROLE", "worker");
         if !b_parked {
-            call(&f.worker, serde_json::json!({"action":"update", "id":b.id, "status":"blocked"})).await;
+            call(&sibling_service, serde_json::json!({"action":"update", "id":b.id, "status":"blocked"})).await;
         }
         // First start delivers the unread correction decision without mutation.
         let _ = f.worker.task(Parameters(serde_json::from_value(start.clone()).unwrap())).await;

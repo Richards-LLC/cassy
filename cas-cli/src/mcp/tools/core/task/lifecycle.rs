@@ -5353,18 +5353,22 @@ mod related_recall_response_tests {
         let mut dependent = plain_task_request("Dependent dashboard calibration");
         dependent.assignee = Some(worker.name.clone());
         dependent.blocked_by = Some(task.id.clone());
-        // Ordinary blocks permit parallel preparation in the current ready policy.
-        core.cas_task_create(Parameters(dependent)).await.unwrap();
-        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 2);
+        let count = core.open_task_store().unwrap().list(None).unwrap().len();
+        core.cas_task_create(Parameters(dependent)).await.unwrap_err();
+        assert_eq!(core.open_task_store().unwrap().list(None).unwrap().len(), count);
+        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 1);
         let mut config = crate::config::Config::load(&core.cas_root).unwrap();
         let mut orchestration = config.orchestration();
         orchestration.auto_prompt.on_task_assigned = false;
         config.orchestration = Some(orchestration.clone());
         config.save(&core.cas_root).unwrap();
+        let mut disabled_worker = cas_types::Agent::new_with_role("disabled-worker-id".into(), "disabled-worker".into(), cas_types::AgentRole::Worker);
+        disabled_worker.factory_session = worker.factory_session.clone();
+        core.open_agent_store().unwrap().register(&disabled_worker).unwrap();
         let mut disabled = plain_task_request("Disabled dispatch nutrition study");
-        disabled.assignee = Some(worker.id.clone());
+        disabled.assignee = Some(disabled_worker.id.clone());
         core.cas_task_create(Parameters(disabled)).await.unwrap();
-        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 2);
+        assert!(queue.peek_for_targets(&[&disabled_worker.name], Some("assignment-session"), 10).unwrap().is_empty());
         orchestration.auto_prompt.on_task_assigned = true;
         config.orchestration = Some(orchestration);
         config.save(&core.cas_root).unwrap();
@@ -5381,7 +5385,7 @@ mod related_recall_response_tests {
         retired.assignee = Some(worker.id.clone());
         core.cas_task_create(Parameters(retired)).await.unwrap();
         core.cas_task_create(Parameters(plain_task_request("Unassigned storage cleanup"))).await.unwrap();
-        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 2);
+        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 1);
 
     }
 

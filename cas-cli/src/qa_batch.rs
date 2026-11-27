@@ -422,8 +422,8 @@ pub(crate) fn resolve_release_inventory(
     for (delivery, measured) in members {
         if measured
             && let Some(anchor) = delivery.anchor.as_deref()
-            && let Err(code) = release_delivery_effect_reviewed(
-                repo, delivery.base_sha.as_deref(), anchor, &scope.final_release_sha, &delivery.task_id,
+            && let Err(code) = release_delivery_effect_for_task(
+                root, repo, &tasks[&delivery.task_id], delivery.base_sha.as_deref(), anchor, &scope.final_release_sha,
                 review.reviewed_drop(&delivery.task_id, Some(anchor)).as_deref(),
             )
         {
@@ -1071,9 +1071,9 @@ pub(crate) fn prepare_release_tag_receipt(
         let anchor = resolved_delivery_anchor(&repo, &task, &target)
             .ok_or_else(|| crate::gates::tag("G-117", format!("task {id} has no resolvable delivery anchor")))?;
         let reviewed_drop = release_close::reviewed_drop_for_tag(&reviews, &repo, id, &anchor, &candidate);
-        if release_delivery_effect_reviewed(&repo,
+        if release_delivery_effect_for_task(root, &repo, &task,
             task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
-            &anchor, &candidate, &task.id, reviewed_drop.as_deref()).is_err() {
+            &anchor, &candidate, reviewed_drop.as_deref()).is_err() {
             return Err(crate::gates::tag("G-117", format!("release tag {tag} does not contain task {id}'s delivery tree effect")));
         }
         heads.insert(id.clone(), anchor);
@@ -1100,14 +1100,63 @@ pub(crate) fn prepare_release_tag_receipt(
 
 /// History membership cannot prove shipment: a later revert retains ancestry.
 /// The final tree must preserve the delivery's effect, including ordinary edits.
-pub(crate) fn release_tag_ships_delivery(repo: &Path, base: Option<&str>, anchor: &str, tag_sha: &str, task_id: &str) -> bool {
-    release_delivery_effect(repo, base, anchor, tag_sha, task_id).is_ok()
-}
-
 pub(crate) fn release_delivery_effect(
     repo: &Path, base: Option<&str>, anchor: &str, target: &str, task_id: &str,
 ) -> Result<(), ReleaseInventoryCode> {
     release_delivery_effect_reviewed(repo, base, anchor, target, task_id, None)
+}
+
+fn release_delivery_effect_for_task(
+    root: &Path, repo: &Path, task: &Task, base: Option<&str>, anchor: &str, target: &str,
+    reviewed_drop: Option<&str>,
+) -> Result<(), ReleaseInventoryCode> {
+    use crate::mcp::tools::core::{task::{self, lifecycle::close_ops, repo_context}, workflow::premerge_verification::cycle};
+    let presence = release_delivery_effect_reviewed(repo, base, anchor, target, &task.id, reviewed_drop);
+    if !matches!(presence, Err(ReleaseInventoryCode::UnprovenContent)) {
+        return presence;
+    }
+    let source_effect = || {
+        let base = base?;
+        let grants = close_ops::task_commit_identity(task, None).approved_merge_parents;
+        if grants.is_empty() || ancestor(repo, anchor, target) != Some(true) {
+            return None;
+        }
+        let output = Command::new("git").args(["show", "-s", "--format=%P", anchor, "--"])
+            .current_dir(repo).output().ok().filter(|result| result.status.success())?;
+        let parents = std::str::from_utf8(&output.stdout).ok()?.split_whitespace().collect::<Vec<_>>();
+        let [parent, source_head] = parents.as_slice() else { return None; };
+        let tree = |revision: &str| Command::new("git")
+            .args(["rev-parse", "--verify", "--end-of-options", &format!("{revision}^{{tree}}")])
+            .current_dir(repo).output().ok().filter(|result| result.status.success())
+            .map(|result| result.stdout);
+        let same_tree = |left: &str, right: &str| tree(left).is_some_and(|tree_id| tree(right) == Some(tree_id));
+        if *parent != base || !grants.iter().any(|grant| grant == source_head)
+            || !same_tree(anchor, source_head) {
+            return None;
+        }
+        let project = crate::cloud::resolve_canonical_id(root)?;
+        let sources = release_close::read_tasks(root).ok()?.list(Some(cas_types::TaskStatus::Closed)).ok()?;
+        let mut sources = sources.iter().filter(|source| {
+            source.id != task.id && source.task_type != cas_types::TaskType::Epic
+                && !crate::qa_pass::is_no_code(source) && source.deliverables.evidence_only.is_none()
+                && task::task_owned_by_project(source, root, Some(&project))
+                && source.deliverables.factory_branch_anchor.as_deref() == Some(*source_head)
+        });
+        let source = sources.next()?;
+        let start = source.deliverables.factory_branch_start.as_ref()?;
+        if sources.next().is_some() || start.base_sha == *source_head
+            || commit(repo, &start.base_sha).as_deref() != Some(start.base_sha.as_str())
+            || ancestor(repo, &start.base_sha, source_head) != Some(true)
+            || !repo_context::repo_answers_to(repo, &start.work_target.repo_selector)
+            || !same_tree(base, &start.base_sha) {
+            return None;
+        }
+        let approved = cycle::approved(root, repo, source, source_head, target).ok()?.is_some()
+            || (release_close::no_local_review(&release_close::read_connection(root).ok()?, &source.id).ok()?
+                && release_close::carried_approval(source, source_head));
+        approved.then(|| release_delivery_effect(repo, Some(&start.base_sha), source_head, target, &source.id))
+    };
+    source_effect().unwrap_or(presence)
 }
 
 /// As [`release_delivery_effect`], where a supervisor's reviewed drop may
@@ -1276,7 +1325,7 @@ fn walk_receipts(
                 if !known
                     || ![anchor.as_str(), head].contains(&reviewed.as_str())
                     || commit(repo, &tag_ref).as_deref() != Some(receipt.staging_sha.as_str())
-                    || !release_tag_ships_delivery(repo, task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()), reviewed, &receipt.staging_sha, &task.id)
+                    || release_delivery_effect_for_task(root, repo, task, task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()), reviewed, &receipt.staging_sha, None).is_err()
                 {
                     break 'judge Some("TAG_UNBOUND");
                 }

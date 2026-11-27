@@ -217,13 +217,10 @@ fn preview_scope(root: &Path, repo: &Path, scope: ReleaseScope) -> Result<Releas
 fn cut_scope(root: &Path, repo: &Path, commit: &str, version: &str, train: Option<&str>, inputs: Option<&Path>) -> Result<ReleaseScope> {
     ensure!(version_ok(version), "expected version x.y.z");
     ensure!(commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()), "release commit must be a full SHA");
-    let mut scope = super::release_adapters::tag_scope(root, repo, None, train.unwrap_or(""), &format!("v{version}"), commit)?;
+    let audit = inputs.map(|path| read_cut_inputs(path, repo, commit)).transpose()?;
+    let mut scope = super::release_adapters::tag_scope(root, repo, None, train.unwrap_or(""), &format!("v{version}"), commit, audit.as_ref())?;
     scope.release_tag = None;
     scope.constituent_epic_ids = train.map(|id| vec![id.to_string()]).unwrap_or_default();
-    if let Some(path) = inputs {
-        let audit = read_cut_inputs(path, repo, commit)?;
-        scope.included_task_ids = audit.included_task_ids;
-    }
     scope.bind_reports(root).map_err(anyhow::Error::msg)?;
     Ok(scope)
 }
@@ -1284,7 +1281,7 @@ pub(super) mod tests {
         let tag = format!("v{}", args.version);
         git(repo, &["tag", &tag]).unwrap();
         let scope = super::super::release_adapters::tag_scope(
-            &root, repo, Some(&context), &train.id, &tag, &args.commit,
+            &root, repo, Some(&context), &train.id, &tag, &args.commit, None,
         ).unwrap();
         assert_eq!(scope.no_code_members.get("cas-e3041"), Some(&vec![proof.clone()]));
         // A legacy publication may already contain an explicitly included,
@@ -1760,11 +1757,35 @@ pub(super) mod tests {
             let tasks = open_task_store(&root).unwrap();
             tasks.add(&child).unwrap();
             tasks.add_dependency(&Dependency::new(child.id.clone(), train.id.clone(), DependencyType::ParentChild)).unwrap();
-            let args = PreviewArgs { scope: None, commit: Some(track.commit.clone()),
-                version: Some(track.version.clone()), inputs: None, train: Some(train.id.clone()) };
+            let repo = temp.path();
+            let final_sha = git(repo, &["commit-tree", &format!("{}^{{tree}}", track.commit),
+                "-p", &track.commit, "-m", "release: v9.99.2"]).unwrap();
+            let inputs = root.join("release-inputs.json");
+            fs::write(&inputs, serde_json::json!({ "checked_sha": track.commit, "included_task_ids": [child.id] }).to_string()).unwrap();
+            let stale = git(repo, &["rev-parse", &format!("{}^1", track.commit)]).unwrap();
+            for (id, staging_sha, schema_version) in [
+                ("qab-stale", stale.clone(), cas_store::RELEASE_VERDICT_SCHEMA),
+                ("qab-current", track.commit.clone(), cas_store::QA_BATCH_RECEIPT_SCHEMA),
+            ] {
+                cas_store::import_qa_batch_receipt(&root, &cas_store::QaBatchReceipt {
+                    id: id.into(), schema_version, project_id: identity.clone(), staging_sha,
+                    ledger_artifact_id: format!("art-{id}"), ledger_path: "/peer/qa.md".into(),
+                    ledger_sha256: "a".repeat(64), ledger_size_bytes: 10,
+                    task_heads: BTreeMap::from([(child.id.clone(), track.commit.clone())]),
+                    recorder_agent_id: "supervisor".into(), recorded_at: "2026-11-11T00:00:00Z".into(),
+                    release_tag: None, ledger_author_id: Some("reviewer".into()), ledger_author_role: Some("sub_agent".into()),
+                    author_overrides: BTreeMap::new(), imported: true,
+                }).unwrap();
+            }
+            let args = PreviewArgs { scope: None, commit: Some(final_sha.clone()),
+                version: Some(track.version.clone()), inputs: Some(inputs), train: Some(train.id.clone()) };
             let _cwd = env.enter_dir(temp.path());
             let current = preview_release_close(&args, &root).unwrap();
             assert_eq!(current.scope.project_id, identity);
+            assert_eq!(current.scope.reviewed_sha, track.commit);
+            assert_eq!(current.scope.proof_refs.iter().map(|proof| proof.receipt_id.as_deref()).collect::<Vec<_>>(), [Some("qab-current")]);
+            let historical = cut_scope(&root, repo, &final_sha, &track.version, Some(&train.id), None).unwrap();
+            assert_eq!(historical.reviewed_sha, stale);
             let current = serde_json::to_value(current).unwrap();
             lag_one_column(&root);
             let live = || {

@@ -131,6 +131,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
             let mut task = Task::new("cas-assembly".into(), "Reviewed assembly".into());
             task.origin_project = Some("reverted".into());
             task.status = TaskStatus::AwaitingMerge;
+            task.labels.push(crate::mcp::tools::core::task::lifecycle::review_tier::FORCE_VERIFIER_LABEL.into());
             task.deliverables.work_target = Some(target.clone());
             task.deliverables.factory_branch_anchor = Some(assembly.clone());
             task.deliverables.factory_branch_start = Some(FactoryBranchStart {
@@ -221,6 +222,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
             branch: id.into(), assignee: "worker".into(), base_sha: base,
         });
         if id == "cas-redrafted" {
+            task.status = TaskStatus::Closed;
             task.deliverables.premerge_approval = Some(cas_types::PortablePremergeApproval {
                 verdict_id: "ver-source".into(), dispatch_id: "vdispatch-source".into(),
                 approved_anchor: anchor.clone(), delivery_cycle: task.deliverables.delivery_cycle,
@@ -295,6 +297,44 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
     assert!(inventory.deliveries.iter().any(|delivery| delivery.task_id == "cas-assembly"), "{:?}", inventory.exceptions);
     let preview = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();
+    let assembly = tasks.get("cas-assembly").unwrap();
+    let source = tasks.get("cas-redrafted").unwrap();
+    let expect_content_hold = |scope: &ReleaseScope, code| {
+        let inventory = resolve_release_inventory(&root, &repo, scope).unwrap();
+        assert!(inventory.exceptions.iter().any(|exception| exception.task_id == assembly.id && exception.code == code));
+    };
+    for foreign_target in [false, true] {
+        let mut changed = assembly.clone();
+        if foreign_target {
+            changed.deliverables.authorized_merge_sources[0].work_target.target_branch = "other".into();
+        } else {
+            changed.deliverables.authorized_merge_sources.clear();
+        }
+        tasks.update(&changed).unwrap();
+        expect_content_hold(&scope, ReleaseInventoryCode::UnprovenContent);
+    }
+    let mut unreviewed = assembly.clone();
+    unreviewed.deliverables.premerge_approval = None;
+    tasks.update(&unreviewed).unwrap();
+    let current = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();
+    assert!(matches!(current.get(&assembly.id), Some(CassyMergeClose::Held(code)) if code == "REVIEW_MISSING"));
+    tasks.update(&assembly).unwrap();
+    let mut stale_source = source.clone();
+    stale_source.deliverables.premerge_approval.as_mut().unwrap().delivery_cycle += 1;
+    tasks.update(&stale_source).unwrap();
+    expect_content_hold(&scope, ReleaseInventoryCode::UnprovenContent);
+    tasks.update(&source).unwrap();
+    let mut unrelated = assembly.clone();
+    let base = &assembly.deliverables.factory_branch_start.as_ref().unwrap().base_sha;
+    let tree = git(&["rev-parse", &format!("{}^{{tree}}", scope.final_release_sha)]);
+    let unrelated_head = git(&["commit-tree", &tree, "-p", base, "-p", &anchors["cas-redrafted"], "-m", "different-tree merge"]);
+    unrelated.deliverables.factory_branch_anchor = Some(unrelated_head.clone());
+    tasks.update(&unrelated).unwrap();
+    let mut unrelated_scope = scope.clone();
+    unrelated_scope.release_tag = None;
+    unrelated_scope.final_release_sha = unrelated_head;
+    expect_content_hold(&unrelated_scope, ReleaseInventoryCode::UnprovenContent);
+    tasks.update(&assembly).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let result = runtime.block_on(crate::release_reconcile::reconcile_release(
         &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Publish { tag: tag.clone() },
@@ -313,13 +353,13 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     }
     for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone", "cas-doc-evolved", "cas-doc-reverted", "cas-doc-only"] {
         let task = tasks.get(id).unwrap();
-        assert_eq!(release_tag_ships_delivery(&repo,
+        assert_eq!(release_delivery_effect(&repo,
             task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
-            task.deliverables.factory_branch_anchor.as_deref().unwrap(), &scope.final_release_sha, id),
+            task.deliverables.factory_branch_anchor.as_deref().unwrap(), &scope.final_release_sha, id).is_ok(),
             ["cas-retained", "cas-redrafted", "cas-evolved", "cas-doc-evolved"].contains(&id), "{id}");
     }
     // cas-8f6f: the published tag consumes the same reviewed drop as closeout.
-    for id in ["cas-retained", "cas-superseded"] {
+    for id in ["cas-retained", "cas-superseded", "cas-assembly"] {
         let verdict = prepare_release_tag_receipt(&root, &[id.into()], &tag).unwrap();
         assert_eq!(verdict.task_heads.get(id), anchors.get(id));
         assert_eq!(verdict.release_tag.as_deref(), Some(tag.as_str()));
@@ -330,6 +370,12 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     std::fs::write(&ledger, format!("{body}\nUnrecorded amendment.\n")).unwrap();
     assert!(prepare_release_tag_receipt(&root, &["cas-superseded".into()], &tag).is_err());
     assert_eq!(serde_json::to_value(&preview).unwrap(), serde_json::to_value(&result.members).unwrap());
+    git(&["rm", "cas-redrafted.rs"]);
+    git(&["commit", "-qm", "drop the imported source"]);
+    let mut dropped = scope;
+    dropped.release_tag = None;
+    dropped.final_release_sha = git(&["rev-parse", "HEAD"]);
+    expect_content_hold(&dropped, ReleaseInventoryCode::Reverted);
 }
 
 #[test]

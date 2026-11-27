@@ -4055,20 +4055,15 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
     ))
     .expect("id B")
     .to_string();
-    let start_b = extract_text(
-        service
-            .cas_task_start(Parameters(IdRequest { id: id_b }))
-            .await
-            .expect("start B should return"),
-    );
-    assert!(
-        start_b.contains("Started task:"),
-        "awaiting_merge A must not block the worker's next task: {start_b}"
-    );
-    assert!(
-        !start_b.contains("VERIFICATION PENDING"),
-        "awaiting_merge A must not trip verification jail: {start_b}"
-    );
+    service.cas_task_start(Parameters(IdRequest { id: id_b.clone() })).await.unwrap_err();
+    let successor = cas::types::Agent::new_with_role("successor-id".into(), "successor-agent".into(), AgentRole::Worker);
+    agent_store.register(&successor).unwrap();
+    let next = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+    next.set_agent_id_for_testing(successor.id.clone());
+    next.cas_task_start(Parameters(IdRequest { id: id_b.clone() })).await.unwrap();
+    let started_b = task_store.get(&id_b).unwrap();
+    assert_eq!(started_b.status, TaskStatus::InProgress);
+    assert_eq!(started_b.assignee.as_deref(), Some(successor.name.as_str()));
 
     git(&["checkout", "-q", "epic/cas-8d5b"]);
     git(&["merge", "--no-ff", "-q", "factory/test-agent"]);

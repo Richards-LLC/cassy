@@ -3600,10 +3600,10 @@ async fn supervisor_fix_plan_opens_one_round_past_the_escalation_cas_624f() {
     let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
-    let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
 
     let mut head = git(&repo, &["rev-parse", "HEAD"]);
     for round in 1..=3u32 {
+        let reviewer = reviewer_core(&cas_dir, &format!("qa-reviewer-{round}"));
         let parked = close_text(&core, &task_id).await;
         assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "round {round}: {parked}");
         reject_open_round(&reviewer, &repo, &task_id, round, &head).await;
@@ -3656,6 +3656,7 @@ async fn supervisor_fix_plan_opens_one_round_past_the_escalation_cas_624f() {
 
     // A 4th rejection escalates again: the worker's next park opens nothing.
     drop(_role);
+    let reviewer = reviewer_core(&cas_dir, "qa-reviewer-4");
     reject_open_round(&reviewer, &repo, &task_id, 4, &head).await;
     commit_file(&repo, "web/composer.css", ".composer{gap:12px}\n", "fix round 4");
     let escalated_again = close_text(&core, &task_id).await;

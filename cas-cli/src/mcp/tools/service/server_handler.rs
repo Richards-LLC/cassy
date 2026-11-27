@@ -1881,6 +1881,72 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn isolated_spawn_deadline_reconciles_one_queue_admission_cas_b5f3() {
+        use crate::mcp::{CasCore, CasService};
+        use rmcp::model::ErrorCode;
+        use serde_json::{Value, json};
+        use std::time::Duration;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_AGENT_NAME", "spawn-receipt-fixture");
+        env.set("CAS_FACTORY_SESSION", "spawn-receipt-fixture");
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let task_id = "cas-spawn-receipt";
+        tasks.add(&cas_types::Task::new(task_id.into(), "Spawn receipt fixture".into())).unwrap();
+        let queue = crate::store::open_spawn_queue_store(&root).unwrap();
+        let service = CasService::new(CasCore::with_daemon(root.clone(), None, None),
+            #[cfg(feature = "mcp-proxy")] None);
+        let request = |count| serde_json::from_value(json!({
+            "action": "spawn_workers", "count": count, "isolate": true,
+            "task_id": task_id, "cli": "grok", "worker_names": "steady-owl-21"
+        })).unwrap();
+
+        let refused = service.factory_with_budget_for_testing(
+            request(2), Duration::from_secs(5), Duration::ZERO).await.unwrap_err();
+        assert_eq!(refused.code, ErrorCode::INVALID_PARAMS);
+        assert!(queue.peek(10).unwrap().is_empty());
+
+        let writer = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let result = service.factory_with_budget_for_testing(
+            request(1), Duration::from_millis(120), Duration::ZERO).await;
+        let pending_rows: i64 = writer.query_row("SELECT count(*) FROM spawn_queue", [], |row| row.get(0)).unwrap();
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(pending_rows, 0);
+        let answer = result.expect("deadline must return a durable spawn continuation");
+        let answer = answer.structured_content.expect("structured continuation");
+        assert_eq!(answer["mutation_outcome"], "IN_PROGRESS");
+        let receipt_id = answer["receipt_id"].as_str().expect("receipt ID");
+        let path = std::path::Path::new(answer["receipt_path"].as_str().expect("receipt path"));
+        assert!(path.starts_with(&root));
+        let read = || serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let outcome = read();
+                assert_eq!(outcome["receipt_id"], receipt_id);
+                if outcome["state"] == "completed" {
+                    break outcome;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("spawn handler must finish after the queue write is released");
+        assert_eq!(outcome["mutation_outcome"], "COMMITTED", "{outcome}");
+        let admitted = queue.peek(10).unwrap();
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(outcome["request_id"], admitted[0].id);
+        assert_eq!(admitted[0].count, Some(1));
+        assert!(admitted[0].isolate);
+        assert_eq!(admitted[0].task_id.as_deref(), Some(task_id));
+        assert_eq!(read(), outcome);
+        assert_eq!(queue.peek(10).unwrap().len(), 1);
+        assert_eq!(tasks.get(task_id).unwrap().status, cas_types::TaskStatus::Open);
+    }
+
     #[tokio::test]
     async fn message_timeout_after_commit_reports_notification_id_cas_e4a8() {
         use crate::mcp::server::CasCore;

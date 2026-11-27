@@ -592,6 +592,10 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     // Handle sync-only mode (just sync .claude/.codex files)
     if args.sync {
+        if let Some(worktree) = cas_root.and_then(linked_sync_checkout) {
+            return sync_claude_files_into(cli, cas_root, Some(&worktree))
+                .and_then(check_managed_commit);
+        }
         return sync_claude_files(cli, cas_root).and_then(check_managed_commit);
     }
 
@@ -1451,10 +1455,15 @@ fn update_banner_text(report: &RefreshReport) -> String {
     } else {
         String::new()
     };
+    let warned = if report.warned_count > 0 {
+        format!(" · {} with warnings", report.warned_count)
+    } else {
+        String::new()
+    };
     format!(
-        "Cassy {} · {} projects refreshed · {} failed{user}{skipped} · {}",
+        "Cassy {} · {} projects refreshed · {} failed{user}{warned}{skipped} · {}",
         env!("CARGO_PKG_VERSION"),
-        report.project_count,
+        report.project_count.saturating_sub(report.warned_count),
         report.failed_projects,
         format_elapsed(report.elapsed)
     )
@@ -1474,12 +1483,15 @@ fn receipt_lines(report: &RefreshReport, width: usize) -> Vec<String> {
     let core = format!(
         "Cassy {} · {} projects refreshed · {} failed",
         env!("CARGO_PKG_VERSION"),
-        report.project_count,
+        report.project_count.saturating_sub(report.warned_count),
         report.failed_projects
     );
     let mut extras = Vec::new();
     if report.user_level_failed {
         extras.push("user-level store failed".to_owned());
+    }
+    if report.warned_count > 0 {
+        extras.push(format!("{} with warnings", report.warned_count));
     }
     if report.skipped_unregistered > 0 {
         extras.push(format!("{} skipped", report.skipped_unregistered));
@@ -2208,6 +2220,8 @@ fn refresh_phase_result(result: &anyhow::Result<RefreshReport>) -> live::PhaseRe
         format!("{} of {total} failed", report.failed_projects)
     } else if report.user_level_failed {
         "user-level store failed".to_owned()
+    } else if report.warned_count > 0 {
+        format!("{total} checked")
     } else if total == 1 {
         "1 project refreshed".to_owned()
     } else {
@@ -2545,7 +2559,12 @@ fn refresh_project_files(cli: &Cli, cas_root: &Path, dry_run: bool) -> ProjectPh
             report.conflicts.join(", ")
         )),
         Ok(report) if report.commit_warning.is_some() => {
-            ProjectPhase::Warning(report.commit_warning.unwrap())
+            let warning = report.commit_warning.unwrap();
+            ProjectPhase::Warning(if report.outcome == "deferred" {
+                format!("managed files deferred; {warning}")
+            } else {
+                warning
+            })
         }
         Ok(report) if report.outcome == "staged" => {
             ProjectPhase::Warning("managed changes staged; commit pending".into())
@@ -2780,6 +2799,8 @@ fn project_refresh_receipt_json(
             || user_level.failed()
         {
             "refresh_failed"
+        } else if receipts.iter().any(ProjectRefreshReceipt::warned) {
+            "partial"
         } else {
             "complete"
         },
@@ -3159,6 +3180,19 @@ fn sync_claude_files(
     sync_claude_files_into(cli, cas_root_param, None)
 }
 
+fn linked_sync_checkout(cas_root: &Path) -> Option<PathBuf> {
+    use crate::worktree::GitOperations;
+
+    let project = cas_root.parent()?;
+    let checkout = GitOperations::detect_repo_root(&std::env::current_dir().ok()?).ok()?;
+    if checkout.canonicalize().ok()? == project.canonicalize().ok()? {
+        return None;
+    }
+    let project_key = GitOperations::new(project.to_path_buf()).canonical_repo_key().ok()?;
+    let checkout_key = GitOperations::new(checkout.clone()).canonical_repo_key().ok()?;
+    (project_key == checkout_key).then_some(checkout)
+}
+
 /// [`sync_claude_files`] writing the harness files under `project_root`
 /// instead of `cas_root.parent()` (cas-49c0: a worker's own worktree).
 fn sync_claude_files_into(
@@ -3180,6 +3214,10 @@ fn sync_claude_files_into(
 
     let _refresh_host_integration = project_root.is_none();
     let project_root = project_root.unwrap_or_else(|| cas_root.parent().unwrap_or(&cas_root));
+    if let Some(report) = crate::cli::project_files::deferred_sync(project_root, &cas_root) {
+        report_managed_files(cli, &report)?;
+        return Ok(report);
+    }
     let claude_dir = project_root.join(".claude");
     let codex_dir = project_root.join(".codex");
     let codex_enabled = codex_dir.exists();
@@ -5588,6 +5626,8 @@ fn report_managed_files(
             )
         } else if report.outcome == "staged" {
             "Managed files: staged; review with git diff --cached".to_string()
+        } else if report.outcome == "deferred" {
+            "Managed files: deferred; no changes written".to_string()
         } else {
             format!(
                 "Managed files: {} ({} untracked, {} staged)",
@@ -5596,7 +5636,8 @@ fn report_managed_files(
         };
         println!("{message}");
         if let Some(warning) = &report.commit_warning {
-            println!("WARN: {warning}");
+            let (lines, _) = findings::wrap(warning, 80 - "WARN: ".len(), false);
+            println!("WARN: {}", lines.join("\n      "));
         }
         if report.outcome == "committed" {
             println!("Next: commit is local-only; push to origin and open a PR.");

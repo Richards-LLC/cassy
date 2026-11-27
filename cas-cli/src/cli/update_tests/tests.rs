@@ -2841,6 +2841,11 @@ fn managed_sync_commits_on_named_branches_cas_10ad() {
         config["factory"]["epic_base_branch"] =
             toml_edit::value(format!("refs/remotes/origin/{configured_base}"));
         std::fs::write(&path, config.to_string()).unwrap();
+        if branch == "release/shared-state" {
+            let config: crate::config::Config = toml::from_str(&config.to_string()).unwrap();
+            std::fs::remove_file(&path).unwrap();
+            std::fs::write(root.join("config.yaml"), serde_yaml::to_string(&config).unwrap()).unwrap();
+        }
         if branch == "repair/config-unreadable" {
             // A directory fails config reading on every host, including root.
             std::fs::remove_file(&path).unwrap();
@@ -2859,8 +2864,13 @@ fn managed_sync_commits_on_named_branches_cas_10ad() {
         let index = std::fs::read(project.join(".git/index")).unwrap();
         let refs = cas_6718_git(&project, &["show-ref"]);
         let paths = cas_6718_git(&project, &["ls-files"]);
-        let files = paths.lines().chain([".claude/skills/cas-search/SKILL.md"])
-            .map(|path| (project.join(path), std::fs::read(project.join(path)).ok()))
+        let files = paths.lines().map(|path| project.join(path)).chain([
+            project.join(".claude/skills/cas-search/SKILL.md"),
+            root.join("config.toml"),
+            root.join("config.yaml"),
+            root.join("config.yaml.bak"),
+        ])
+            .map(|path| (std::fs::read(&path).ok(), path))
             .collect::<Vec<_>>();
         let before = cas_6718_git(&project, &["rev-parse", "HEAD"]);
         let (result, _) = capture_phase(true, || sync_claude_files_into(
@@ -2899,7 +2909,7 @@ fn managed_sync_commits_on_named_branches_cas_10ad() {
             assert!(json["commit_warning"].is_string(), "{branch}");
             assert_eq!(std::fs::read(project.join(".git/index")).unwrap(), index, "{branch}");
             assert_eq!(cas_6718_git(&project, &["show-ref"]), refs, "{branch}");
-            for (path, original) in files {
+            for (original, path) in files {
                 assert_eq!(std::fs::read(&path).ok(), original, "{branch}: {}", path.display());
             }
         }
@@ -3037,6 +3047,25 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
         &std::fs::read(project.join(unchanged[0])).unwrap()).unwrap();
     assert!(settings["hooks"]["PreToolUse"].as_array().unwrap().iter()
         .any(|group| group["hooks"][0]["timeout"] == 17));
+
+    let linked = env.home().join("linked");
+    cas_6718_git(&project, &[
+        "worktree", "add", "-qb", "repair/linked", linked.to_str().unwrap(), "main",
+    ]);
+    let primary_head = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+    let primary_index = std::fs::read(project.join(".git/index")).unwrap();
+    let linked_head = cas_6718_git(&linked, &["rev-parse", "HEAD"]);
+    let nested = linked.join(".claude");
+    env.set_current_dir(&nested);
+    let (result, output) = capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+    result.unwrap();
+    let receipt: serde_json::Value = output.lines().last().unwrap().parse().unwrap();
+    assert_eq!(receipt["managed_files"]["outcome"], "committed");
+    assert_ne!(cas_6718_git(&linked, &["rev-parse", "HEAD"]), linked_head);
+    assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), primary_head);
+    assert_eq!(std::fs::read(project.join(".git/index")).unwrap(), primary_index);
+    assert!(!linked.join(".cas").exists());
+    assert!(std::fs::read_to_string(linked.join(unchanged[1])).unwrap().contains(&rule.content));
 }
 
 #[test]
@@ -3189,7 +3218,7 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
     env.set("CAS_CREDENTIALS_FILE", host.path().join("credentials.env"));
     let mut diagnostic_failures = Vec::new();
     #[cfg(unix)]
-    for mode in ["all-projects", "sync", "worker-sync", "commit-msg-sync", "human-sync"] {
+    for mode in ["deferred-projects", "all-projects", "sync", "worker-sync", "commit-msg-sync", "human-sync"] {
         use std::os::unix::fs::PermissionsExt;
         let fixture_home = host.path().join(mode);
         let project = cas_6718_drifted_project(&fixture_home);
@@ -3199,8 +3228,12 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
         env.set("CAS_AGENT_ROLE", if mode == "worker-sync" { "worker" } else { "supervisor" });
         env.set("CAS_PROJECT_ROOTS", &fixture_home);
         env.set_current_dir(&project);
-        // Hook refusal is tested on a branch where automatic commits are allowed.
-        cas_6718_git(&project, &["branch", "-M", "repair/hook-refusal"]);
+        let deferred = mode == "deferred-projects";
+        if deferred {
+            cas_6718_git(&project, &["checkout", "-q", "main"]);
+        } else {
+            cas_6718_git(&project, &["branch", "-M", "repair/hook-refusal"]);
+        }
         let head = cas_6718_git(&project, &["rev-parse", "HEAD"]);
         let readme = project.join("README.md");
         std::fs::write(&readme, "Unstaged user work survives refusal\n").unwrap();
@@ -3227,12 +3260,24 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
         let hook_before = std::fs::read(&hook).unwrap();
         let config_before = std::fs::read(project.join(".git/config")).unwrap();
         let mut args = update_test_args();
-        args.all_projects = mode == "all-projects";
-        args.sync = mode != "all-projects";
+        args.all_projects = deferred || mode == "all-projects";
+        args.sync = !args.all_projects;
         let human = mode == "human-sync";
         env.set("COLUMNS", "80");
         let (result, output) =
             capture_phase(true, || execute(&args, &update_test_cli(!human), Some(&root)));
+        if deferred {
+            result.unwrap();
+            let receipt: serde_json::Value = output.lines().last().unwrap().parse().unwrap();
+            assert_eq!(receipt["refresh_status"], "partial");
+            let managed = &receipt["projects"][0]["phase_documents"]["skills"][0]["managed_files"];
+            assert_eq!(managed["outcome"], "deferred");
+            assert_eq!(managed["commit"], serde_json::Value::Null);
+            assert!(managed["commit_warning"].is_string());
+            assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), head);
+            assert_eq!(std::fs::read(&readme).unwrap(), user_before);
+            continue;
+        }
         assert!(
             result.is_err(),
             "{mode}: refused commit must make update incomplete, got success:\n{output}"

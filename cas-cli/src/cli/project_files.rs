@@ -78,19 +78,70 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-fn may_commit_managed_files(root: &Path, cas_root: &Path) -> Result<bool> {
-    let Some(_) = git(root, &["symbolic-ref", "--quiet", "HEAD"])
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .and_then(|reference| reference.trim().strip_prefix("refs/heads/").map(str::to_string))
-        .filter(|branch| !branch.is_empty())
-    else {
-        // Detached or unreadable HEAD is not permission to create history.
+fn configured_sync_base(cas_root: &Path) -> Result<Option<String>> {
+    for name in ["config.toml", "config.yaml"] {
+        let content = match std::fs::read_to_string(cas_root.join(name)) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let config: crate::config::Config = if name == "config.toml" {
+            toml::from_str(&content)?
+        } else {
+            serde_yaml::from_str(&content)?
+        };
+        if let Some(factory) = config.factory {
+            return Ok(factory.epic_base_branch);
+        }
+    }
+    Ok(None)
+}
+
+fn protected_sync_branch(root: &Path, cas_root: &Path, branch: &str) -> Result<bool> {
+    if branch.is_empty() {
         return Ok(false);
+    }
+    if matches!(branch, "main" | "master" | "staging" | "develop" | "trunk")
+        || branch.starts_with("epic/")
+        || branch == crate::worktree::GitOperations::new(root.to_path_buf()).detect_default_branch()
+    {
+        return Ok(true);
+    }
+    Ok(configured_sync_base(cas_root)?.is_some_and(|base| {
+        base == branch
+            || base.strip_prefix("refs/heads/") == Some(branch)
+            || base.strip_prefix("refs/remotes/origin/") == Some(branch)
+            || base.strip_prefix("origin/") == Some(branch)
+    }))
+}
+
+pub(crate) fn deferred_sync(root: &Path, cas_root: &Path) -> Option<Report> {
+    if authoring(root) || !git_root(root) {
+        return None;
+    }
+    let protected = git(root, &["branch", "--show-current"]).and_then(|branch| {
+        protected_sync_branch(root, cas_root, text(&branch)?.trim())
+    });
+    let reason = match protected {
+        Ok(false) => return None,
+        Ok(true) => "Protected branch.",
+        Err(_) => "Branch protection could not be verified; check Git and Cassy config.",
     };
-    // Sync owns managed commits on named branches, including main and train
-    // branches. Never complete someone else's merge/rebase/sequencer operation.
-    crate::config::Config::load(cas_root)?;
+    Some(Report {
+        outcome: "deferred",
+        commit_warning: Some(format!(
+            "{reason} Cut a repair branch from the published base, run `cas update --sync`, then review and open a PR."
+        )),
+        ..Default::default()
+    })
+}
+
+fn may_commit_managed_files(root: &Path, cas_root: &Path) -> Result<bool> {
+    let branch = git(root, &["branch", "--show-current"])?;
+    let branch = text(&branch)?.trim();
+    if branch.is_empty() || protected_sync_branch(root, cas_root, branch)? {
+        return Ok(false);
+    }
     for state in ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"] {
         let path = git(root, &["rev-parse", "--path-format=absolute", "--git-path", state])?;
         if Path::new(text(&path)?.trim()).exists() {
@@ -288,7 +339,6 @@ pub(crate) struct Report {
     /// An attempted Git commit failed; this is not a file-body conflict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_error: Option<String>,
-    /// Commit policy could not be read; the repair remains safely staged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_warning: Option<String>,
     pub conflicts: Vec<String>,
@@ -682,7 +732,7 @@ impl Reconcile {
         } else if !self.report.conflicts.is_empty()
             || !may_commit_managed_files(root, cas_root).unwrap_or_else(|_| {
                 self.report.commit_warning = Some(
-                    "Commit guard config unreadable; repair staged. Fix config, then retry.".into(),
+                    "Commit eligibility could not be verified; repair remains staged.".into(),
                 );
                 false
             })

@@ -2,7 +2,7 @@
 
 | Field | Contract |
 | --- | --- |
-| First two lines | The managed-files receipt says current, committed, staged, conflicts or commit failed, with the pending action where needed. |
+| First two lines | The managed-files receipt says current, committed, staged, deferred, conflicts or commit failed, with the pending action where needed. |
 | Scannable | One compact managed-files line per project; doctor has one managed file drift finding. |
 | Readable | A refused standalone sync shows its cause and one hook-scope inspection command once, wrapped at 80 columns; a staged repair names `git diff --cached` for review without assuming why the commit was held. |
 | Machine output | Update adds managed_files with outcome, untracked, staged, commit and conflicts to its existing JSON receipt; a failed commit adds commit_error and outcome commit_failed, while doctor retains its checks shape. |
@@ -19,22 +19,23 @@ sync also fails. It never becomes a user file-conflict warning. Hook enforcement
 and the existing summary renderer stay authoritative. User staging remains a
 pending commit for review, and no hook is bypassed or rewritten.
 
-Trunk, the configured epic base, and `epic/*` integration branches retain the
-repair as staged changes. Their managed-files receipt uses the existing
-`staged` outcome and null commit; it never implies that an automatic commit
-was attempted. The compact staged line is scoped for terminal QA, with the
+Trunk, the detected default, the configured epic base, and `epic/*` defer the
+whole managed phase, including ignored projections. The receipt uses
+`outcome: "deferred"`, null commit, zero staged/untracked counts, and a
+`commit_warning`. Standalone sync exits successfully without writing; the
+sweep shows a warning and reports a partial refresh without failing the binary
+install. On a repair branch based on the reviewed published base, run the
+existing `cas update --sync`, review the result, and open a PR. Explicit sync
+respects a same-repository linked checkout and uses the shared store. See the
 operator recovery procedure in ARCHITECTURE.md.
 
 ## Commit guard uncertainty (cas-bb3c)
 
-A guard config read failure keeps the repair staged and adds one short ASCII
-warning naming the unreadable commit-guard config, the staged outcome and the
-retry action. The existing staged receipt supplies `git diff --cached`.
-`managed_files.commit_warning` carries the same warning in JSON; it is distinct
-from `commit_error`, so this safe refusal exits zero and remains a warning in
-compact sweeps. The guard uses the CAS root passed to sync, including worktrees
-without a local `.cas`. Detached HEAD and an unidentifiable default branch keep
-repairs staged. This adds no automatic push, reset or config rewrite.
+An unreadable branch policy defers the whole managed phase rather than staging
+a repair on a potentially protected branch. The check reads config from the
+authoritative store without migrating it, including in worktrees without a
+local `.cas`. Detached HEAD still leaves repairs staged. The historical
+cas-bb3c captures below describe the earlier staged behavior.
 
 Fresh terminal evidence for this addition belongs to the cas-bb3c task's
 commit-bound ledger; earlier captures below cover only their named changes.

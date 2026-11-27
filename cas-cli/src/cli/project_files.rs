@@ -736,7 +736,7 @@ impl Reconcile {
                 );
                 false
             })
-            || !staged_sync_only(root).unwrap_or(false)
+            || !staged_sync_only_from(root, cas_root).unwrap_or(false)
         {
             if self.report.commit_warning.is_none() {
                 self.report.commit_warning = Some(
@@ -824,16 +824,19 @@ impl Reconcile {
 /// In particular, a managed path may also contain staged project content.
 /// Read-only: callers use this both for commit admission and merge recovery.
 pub(crate) fn staged_sync_only(root: &Path) -> Result<bool> {
+    staged_sync_only_from(root, &root.join(".cas"))
+}
+
+fn staged_sync_only_from(root: &Path, cas_root: &Path) -> Result<bool> {
     let harnesses = harnesses(root);
-    let cas_root = root.join(".cas");
-    let Some(plan) = Reconcile::begin(root, &cas_root, &harnesses)? else { return Ok(false); };
+    let Some(plan) = Reconcile::begin(root, cas_root, &harnesses)? else { return Ok(false); };
     if !plan.report.conflicts.is_empty() { return Ok(false); }
     let pending = git(root, &["diff", "--cached", "--name-only", "-z"])?;
     if pending.is_empty() { return Ok(false); }
     let committed: BTreeMap<_, _> = TRACKED.iter().filter_map(|path| {
         git(root, &["show", &format!("HEAD:{path}")]).ok().map(|bytes| ((*path).to_string(), bytes))
     }).collect();
-    let projected = configuration_projection_excluding(root, &cas_root, &committed, &[])?;
+    let projected = configuration_projection_excluding(root, cas_root, &committed, &[])?;
     let ignored_paths = ignored_paths(root, &harnesses);
     for path in pending.split(|b| *b == 0).filter(|path| !path.is_empty()) {
         let path = text(path)?;

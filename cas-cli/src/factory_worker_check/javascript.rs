@@ -4404,7 +4404,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
     /// another existing catalogue, or when both spec and catalogue change.
     #[test]
     fn changed_json_catalogue_refuses_static_selection_of_its_spec() {
-        use super::super::widened::Scope;
+        use super::super::{stability, widened::Scope};
         let repo = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
             let output = Command::new("git").current_dir(repo.path())
@@ -4458,7 +4458,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         write("docs/evidence/scripts/dump.json", "[]");
         write(script, "const dump = require('./dump.json');\nconst { match } = require('./match.cjs');\nconsole.log(match(dump));\n");
         let catalogue_only = commit("catalogue only");
-        let required = super::super::stability::requirements(repo.path(), &catalogue_only, &base, &[catalogue.into(), script.into(), "docs/evidence/scripts/dump.json".into()], None).unwrap();
+        let required = stability::requirements(repo.path(), &catalogue_only, &base, &[catalogue.into(), script.into(), "docs/evidence/scripts/dump.json".into()], None).unwrap();
         assert_eq!(required, (Vec::new(), [spec, derived, external, titled, constructed].map(|path| Scope::File(path.into())).into_iter().collect::<BTreeSet<_>>().into_iter().collect()));
         write(labels, "const t = (key: string) => key;\ndescribe('workbench', () => {\n\
             beforeEach(() => { vi.stubGlobal('useI18n', () => ({ t })); });\n  it('names the first channel', () => { t('x'); });\n});\n");
@@ -4475,6 +4475,28 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let both = commit("harness and catalogue");
         assert!(changed_tests(repo.path(), &base, &both, &[spec.into()], None).is_err());
         assert_eq!(super::super::widened::scope(repo.path(), spec), Some(Scope::File(spec.into())));
+
+        let locale = "src/__scenarios__/en.json";
+        let billing = "src/__scenarios__/billing.spec.ts";
+        let dynamic = "src/__scenarios__/dynamic.spec.ts";
+        let unresolved = "src/__scenarios__/unresolved.spec.ts";
+        write(billing, "import en from './en.json';\nit(en.billing.cta, () => {});\n");
+        write(dynamic, "import en from './en.json';\nit(en.billing[plan], () => {});\n");
+        write(unresolved, "import en from './en.json';\nimport { registerCases } from './register';\nregisterCases(en);\n");
+        write(locale, r#"{"billing":{"cta":"Subscribe"}}"#);
+        let locale_base = commit("locale consumers");
+        write(locale, r#"{"billing":{"cta":"Subscribe"},"settings":{"saving":"Saving"}}"#);
+        let additive = commit("add an independent saving label");
+        write(locale, r#"{"billing":{"cta":"Choose a plan"},"settings":{"saving":"Saving"}}"#);
+        let renamed = commit("change the billing registration title");
+
+        for (base, head, requires_billing) in [(&additive, &renamed, true), (&locale_base, &additive, false)] {
+            let (tests, widened) = stability::requirements(repo.path(), head, base, &[locale.into()], None).unwrap();
+            assert!(tests.is_empty());
+            let mut expected = BTreeSet::from([Scope::File(dynamic.into()), Scope::File(unresolved.into())]);
+            if requires_billing { expected.insert(Scope::File(billing.into())); }
+            assert_eq!(widened.into_iter().collect::<BTreeSet<_>>(), expected, "{base}..{head}");
+        }
     }
 
     /// GH #1977, #2000, #1971: park asks only for tests the task's own

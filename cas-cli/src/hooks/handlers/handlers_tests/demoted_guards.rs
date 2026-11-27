@@ -95,6 +95,7 @@ fn a_demoted_guard_proceeds_and_records_one_refusal_fact() {
 fn kept_guards_still_deny_over_real_hook_json() {
     let worker = worker();
     let project = worker.project.path();
+    std::fs::write(project.join(".env"), "K=v").unwrap();
     let unparseable = "n=$(cat src/n); printf '%s' $((n+1))";
     for (input, code) in [
         (hook_input("Read", json!({"file_path": project.join(".env")}), project), "H-33"),

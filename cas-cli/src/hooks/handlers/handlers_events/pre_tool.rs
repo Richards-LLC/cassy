@@ -558,10 +558,13 @@ fn secret_path_hit(path: &str, protection: &crate::config::PreToolUseProtectionC
         || protection.patterns.iter().any(|pattern| path.ends_with(pattern.as_str()) || path.contains(pattern.as_str()))
 }
 
-/// A word that is a real secret file once resolved: `.env` and its non-template variants,
-/// credential and key files by basename. Templates and gitignored test files are not secrets.
+/// A word that is an existing real secret file once resolved: `.env` and its non-template
+/// variants, credential and key files by basename. Templates and gitignored test files are not secrets.
 fn real_secret_word(word: &str, cwd: &Path, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
     let path = cwd.join(word);
+    if !path.exists() {
+        return false;
+    }
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
@@ -1775,6 +1778,8 @@ fn handle_pre_tool_use_checked(
             }
         }
         if tool_name == "Bash"
+            && !((!is_factory_agent || crate::harness_policy::is_supervisor(input))
+                && super::operator_credentials::references_store(input, tool_name))
             && input
                 .tool_input
                 .as_ref()

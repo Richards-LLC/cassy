@@ -59,7 +59,7 @@ fn role_env(role: &str) -> (TestEnvGuard, tempfile::TempDir) {
 
 const WRAPPED_CLIS: &[(&str, &str)] = &[
     ("vercel", "vercel env ls production"),
-    ("vercel", "env VERCEL_ORG_ID=team_1 vercel env pull .env.local"),
+    ("vercel", "env VERCEL_ORG_ID=team_1 vercel env pull"),
     ("vercel", "sudo -u deploy vercel ls"),
     ("vercel", "sh -c 'vercel env ls production'"),
     ("vercel", "cd web && npx vercel logs"),

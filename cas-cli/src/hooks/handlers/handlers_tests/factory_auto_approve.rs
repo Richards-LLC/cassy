@@ -1019,6 +1019,9 @@ mod credential_write_tests {
     fn bash_secret_file_reads_are_refused_and_quoted_text_stays_allowed_cas_5c83() {
         let mut env = TestEnvGuard::new();
         let (root, cwd) = fixture(&mut env);
+        for name in [".env", ".env.local", ".env.example", "credentials.json"] {
+            std::fs::write(cwd.path().join(name), "K=v").unwrap();
+        }
         for command in ["cat .env", "grep '^NAME=' credentials.json", "cp .env ordinary.txt", "source ./.env.local"] {
             let output = call(root.path(), cwd.path(), "Bash", serde_json::json!({"command": command}));
             assert!(deny_reason(&output).is_some_and(|reason| reason.contains("[H-33]")), "a real secret read is refused: {command}: {output:?}");

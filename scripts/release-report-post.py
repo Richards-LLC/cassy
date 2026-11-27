@@ -44,7 +44,6 @@ TOKEN_SELECTOR_ENV_NAMES = (
     LEGACY_TOKEN_SELECTOR_ENV,
 )
 DEFAULT_CHANNEL = "cas-internal"
-DEFAULT_REPO = "Richards-LLC/cassy"
 MCP_PROTOCOL_VERSION = "2025-06-18"
 MAX_REMOTE_PDF_BYTES = 32 * 1024 * 1024
 MAX_HUB_FILE_BYTES = 4 * 1024 * 1024
@@ -133,15 +132,15 @@ def is_loopback(host: str) -> bool:
         return False
 
 
-def slack_timestamp_since(value: str) -> str:
+def slack_timestamp_since(value: str, label: str) -> str:
     match = SLACK_TIMESTAMP.fullmatch(value)
     if not match:
-        fail("USER_THREAD_TS must be a valid Slack timestamp (seconds[.fraction])")
+        fail(f"{label} must be a valid Slack timestamp (seconds[.fraction])")
     seconds, fraction = match.groups()
     try:
         timestamp = datetime.fromtimestamp(int(seconds), tz=timezone.utc)
     except (OverflowError, OSError, ValueError):
-        fail("USER_THREAD_TS must be a valid Slack timestamp (seconds[.fraction])")
+        fail(f"{label} must be a valid Slack timestamp (seconds[.fraction])")
     timestamp = timestamp.replace(microsecond=int((fraction or "").ljust(6, "0")))
     return timestamp.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
@@ -603,7 +602,7 @@ class McpClient:
                     return decoded
         fail(f"Violet tool {name} returned no JSON envelope")
 
-    def read_file(self, channel: str, file_id: str, since: str) -> bytes:
+    def read_file(self, channel: str, file_id: str, since: str, label: str) -> bytes:
         """Read an uploaded file through the hub's authenticated file packer.
 
         ``file_id`` scopes the read to this file only (no history or channel
@@ -635,21 +634,21 @@ class McpClient:
             if file.get("skipped") is True:
                 reason = file.get("skip_reason")
                 fail(
-                    "Violet file read skipped the uploaded PDF content "
+                    f"Violet file read skipped the uploaded {label} content "
                     f"(skip_reason={reason if isinstance(reason, str) else 'unknown'})"
                 )
             content = file.get("content_base64")
             if not isinstance(content, str) or not content:
-                fail("Violet file read returned no uploaded PDF bytes")
+                fail(f"Violet file read returned no uploaded {label} bytes")
             try:
                 raw = base64.b64decode(content, validate=True)
             except (ValueError, binascii.Error):
-                fail("Violet file read returned invalid uploaded PDF bytes")
+                fail(f"Violet file read returned invalid uploaded {label} bytes")
             size = file.get("size_bytes")
             if not isinstance(size, int) or size != len(raw):
-                fail("Violet file read returned inconsistent uploaded PDF size")
+                fail(f"Violet file read returned inconsistent uploaded {label} size")
             return raw
-        fail("Violet file read returned no receipt for the uploaded PDF")
+        fail(f"Violet file read returned no receipt for the uploaded {label}")
 
 
 def message_receipt(
@@ -669,25 +668,30 @@ def message_receipt(
     return message_id, permalink
 
 
-def file_receipt(envelope: dict[str, Any]) -> tuple[str, str, str | None]:
-    message_id, message_permalink = message_receipt(envelope, "PDF", allow_unavailable_permalink=True)
+def file_receipt(
+    envelope: dict[str, Any], label: str, observed: dict[str, str]
+) -> dict[str, Any]:
+    message_id, message_permalink = message_receipt(envelope, label, allow_unavailable_permalink=True)
+    observed[f"{label}_MESSAGE_ID"] = message_id
+    observed[f"{label}_MESSAGE_PERMALINK"] = message_permalink or "unavailable"
     file_block = envelope.get("file")
     if not isinstance(file_block, dict):
         files = envelope.get("files")
         if isinstance(files, list) and len(files) == 1:
             file_block = files[0]
     if not isinstance(file_block, dict):
-        fail("PDF post returned no file id")
+        fail(f"{label} post returned no file id")
     file_id = file_block.get("file_id") or file_block.get("id")
     file_permalink = file_block.get("permalink") or file_block.get("url")
     if not isinstance(file_id, str) or not file_id.strip() or file_id == message_id:
-        fail("PDF post returned no distinct file id")
+        fail(f"{label} post returned no distinct file id")
+    observed[f"{label}_FILE_ID"] = file_id
     if not isinstance(file_permalink, str) or not file_permalink.startswith("https://"):
-        fail("PDF post returned no HTTPS file permalink")
+        fail(f"{label} post returned no HTTPS file permalink")
     if file_permalink == message_permalink:
-        fail("PDF post returned no distinct file permalink")
-    download_url = file_block.get("download_url")
-    return file_id, file_permalink, checked_download_url(download_url) if download_url is not None else None
+        fail(f"{label} post returned no distinct file permalink")
+    observed[f"{label}_FILE_PERMALINK"] = file_permalink
+    return file_block
 
 
 def checked_download_url(value: Any) -> str:
@@ -744,7 +748,7 @@ def verify_remote_pdf(
     remote_bytes = (
         client.download(download_url)
         if download_url
-        else client.read_file(channel, file_id, since)
+        else client.read_file(channel, file_id, since, "PDF")
     )
     remote_size = len(remote_bytes)
     if remote_size != len(local_bytes):
@@ -766,43 +770,6 @@ def verify_remote_pdf(
             f"(local={local_pages}, remote={remote_pages})"
         )
     return remote_sha, remote_size, remote_pages
-
-
-def html_url(tag: str) -> str:
-    repo = os.environ.get("CAS_RELEASE_TRAIN_REPO", DEFAULT_REPO).strip().strip("/")
-    ref = os.environ.get("CAS_RELEASE_TRAIN_REPORT_HTML_REF", "main").strip() or "main"
-    if ref not in {"main", tag}:
-        fail("release report HTML ref must be main or the release tag; temporary delivery branches cannot be published")
-    configured = os.environ.get("CAS_RELEASE_TRAIN_REPORT_HTML_URL")
-    if configured:
-        try:
-            parsed = urllib.parse.urlsplit(configured)
-            port = parsed.port
-        except ValueError:
-            fail("CAS_RELEASE_TRAIN_REPORT_HTML_URL must use a GitHub blob URL for main or the release tag")
-        if any(segment in {".", ".."} for segment in urllib.parse.unquote(parsed.path).split("/")):
-            fail("CAS_RELEASE_TRAIN_REPORT_HTML_URL cannot contain '.' or '..' path segments")
-        path_prefix = f"/{repo}/blob/"
-        ref_and_path = parsed.path[len(path_prefix):] if parsed.path.startswith(path_prefix) else ""
-        configured_ref, separator, report_path = ref_and_path.partition("/")
-        if (
-            parsed.scheme.lower() != "https"
-            or parsed.hostname is None
-            or parsed.hostname.lower() != "github.com"
-            or parsed.username is not None
-            or parsed.password is not None
-            or port not in {None, 443}
-            or parsed.fragment
-            or not separator
-            or not report_path
-            or configured_ref not in {"main", tag}
-        ):
-            fail(
-                "CAS_RELEASE_TRAIN_REPORT_HTML_URL must use a GitHub blob URL for "
-                "main or the release tag"
-            )
-        return configured
-    return f"https://github.com/{repo}/blob/{ref}/docs/release-reports/{tag}.html"
 
 
 def write_receipt(path: Path, fields: dict[str, str]) -> None:
@@ -857,12 +824,21 @@ def main(argv: list[str]) -> int:
             )
             return 2
 
+    observed: dict[str, str] = {}
     try:
-        read_since = slack_timestamp_since(user_thread)
-        report_url = html_url(tag)
+        pdf_since = slack_timestamp_since(user_thread, "USER_THREAD_TS")
+        html_since = slack_timestamp_since(dev_thread, "DEV_THREAD_TS")
+        for option in ("CAS_RELEASE_TRAIN_REPORT_HTML_REF", "CAS_RELEASE_TRAIN_REPORT_HTML_URL"):
+            if option in os.environ:
+                fail(f"Unset obsolete {option}; the HTML report is delivered as an attachment")
+        upload_limit = hub_upload_limit()
         pdf_bytes = pdf_path.read_bytes()
-        check_upload_size(f"PDF {pdf_path.name}", len(pdf_bytes), hub_upload_limit())
+        check_upload_size(f"PDF {pdf_path.name}", len(pdf_bytes), upload_limit)
         html_bytes = html_path.read_bytes()
+        check_upload_size(f"HTML {html_path.name}", len(html_bytes), upload_limit)
+        if not html_bytes:
+            fail("The HTML report is empty")
+        html_text = html_bytes.decode("utf-8")
         pdf_sha = sha256(pdf_bytes)
         html_sha = sha256(html_bytes)
         pages = page_count(pdf_path, pdf_bytes)
@@ -888,8 +864,9 @@ def main(argv: list[str]) -> int:
             for tool in tools.get("tools", [])
             if isinstance(tool, dict) and isinstance(tool.get("name"), str)
         }
-        if "violet_post" not in tool_names:
-            fail("authenticated Violet tools/list does not expose violet_post")
+        for tool_name in ("violet_post", "violet_read"):
+            if tool_name not in tool_names:
+                fail(f"authenticated Violet tools/list does not expose {tool_name}")
 
         pdf_envelope = client.tool(
             "violet_post",
@@ -905,21 +882,34 @@ def main(argv: list[str]) -> int:
                 }],
             },
         )
-        pdf_message_id, pdf_message_permalink = message_receipt(pdf_envelope, "PDF", allow_unavailable_permalink=True)
-        pdf_file_id, pdf_permalink, pdf_download_url = file_receipt(pdf_envelope)
+        pdf_file = file_receipt(pdf_envelope, "PDF", observed)
+        pdf_file_id = observed["PDF_FILE_ID"]
+        download_url = pdf_file.get("download_url")
+        pdf_download_url = checked_download_url(download_url) if download_url is not None else None
         remote_pdf_sha, remote_pdf_size, remote_pdf_pages = verify_remote_pdf(
-            client, channel, pdf_file_id, pdf_download_url, read_since, pdf_bytes, pdf_sha, pages
+            client, channel, pdf_file_id, pdf_download_url, pdf_since, pdf_bytes, pdf_sha, pages
         )
         html_envelope = client.tool(
             "violet_post",
             {
                 "channel": channel,
-                "kind": "message",
+                "kind": "file",
                 "reply_to": dev_thread,
-                "text": f"Release report HTML: <{report_url}|open the standalone report>",
+                "files": [{
+                    "filename": html_path.name,
+                    "title": f"Cassy {tag} release report (HTML)",
+                    "content": html_text,
+                    "content_encoding": "text",
+                    "sha256": html_sha,
+                    "size_bytes": len(html_bytes),
+                }],
             },
         )
-        html_file_id, _html_permalink = message_receipt(html_envelope, "HTML")
+        file_receipt(html_envelope, "HTML", observed)
+        html_file_id = observed["HTML_FILE_ID"]
+        remote_html = client.read_file(channel, html_file_id, html_since, "HTML")
+        if remote_html != html_bytes:
+            fail("Uploaded HTML bytes do not match the local report")
         write_receipt(
             receipt_path,
             {
@@ -932,12 +922,11 @@ def main(argv: list[str]) -> int:
                 "PDF_REMOTE_SIZE_BYTES": str(remote_pdf_size),
                 "PDF_REMOTE_PAGE_COUNT": str(remote_pdf_pages),
                 "HTML_SHA256": html_sha,
+                "HTML_SIZE_BYTES": str(len(html_bytes)),
+                "HTML_REMOTE_SHA256": sha256(remote_html),
+                "HTML_REMOTE_SIZE_BYTES": str(len(remote_html)),
                 "PAGE_COUNT": str(pages),
-                "PDF_FILE_PERMALINK": pdf_permalink,
-                "PDF_FILE_ID": pdf_file_id,
-                "PDF_MESSAGE_ID": pdf_message_id,
-                "PDF_MESSAGE_PERMALINK": pdf_message_permalink if pdf_message_permalink is not None else "unavailable",
-                "HTML_FILE_ID": html_file_id,
+                **observed,
                 "USER_THREAD_TS": user_thread,
                 "DEV_THREAD_TS": dev_thread,
             },
@@ -946,10 +935,20 @@ def main(argv: list[str]) -> int:
         return 0
     except (AdapterError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 1
     except Exception as exc:  # noqa: BLE001 - an operator sees a line, never a traceback
         print(f"error: unexpected {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 1
+    if observed:
+        partial_path = receipt_path.with_name(f"{receipt_path.name}.partial")
+        try:
+            write_receipt(partial_path, {
+                "TAG": tag, "USER_THREAD_TS": user_thread, "DEV_THREAD_TS": dev_thread, **observed,
+            })
+            print(f"Observed upload identities saved to {partial_path}; reconcile before retrying", file=sys.stderr)
+        except OSError as exc:
+            print(f"error: could not save partial receipt: {exc}", file=sys.stderr)
+            for key, value in observed.items():
+                print(f"{key}={value}", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":

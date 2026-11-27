@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -25,6 +26,10 @@ OLD_THREAD = "1709999999.999999"
 NEW_REPLY = "1710000000.000002"
 READ_SINCE = "2024-03-09T16:00:00.000001Z"
 PDF_MESSAGE_PERMALINK = "https://example.test/archives/C-report/p1710000000000002?thread_ts=1710000000.000001"
+HTML = "<!doctype html><title>Release café</title>\n".encode()
+HTML_FILE_ID = "F-html"
+HTML_FILE_PERMALINK = "https://example.test/files/report.html"
+HTML_MESSAGE_PERMALINK = "https://example.test/messages/html"
 
 
 class StubState:
@@ -45,7 +50,8 @@ class StubState:
         self.pdf_message_id = "file-message"
         self.pdf_message_permalink = PDF_MESSAGE_PERMALINK
         self.pdf_file_permalink = "https://example.test/files/report.pdf"
-        self.html_ref = "main"
+        self.read_html = HTML
+        self.partial_receipt = None
 
 
 def envelope(result: dict) -> bytes:
@@ -116,31 +122,34 @@ def handler_for(state: StubState):
                 if tool_name == "violet_read":
                     arguments = request["params"]["arguments"]
                     assert arguments["channel"] == "cas-internal"
-                    assert arguments["since"] == READ_SINCE
+                    html_read = arguments["file_id"] == HTML_FILE_ID
+                    assert arguments["since"] == (
+                        "2024-03-09T16:00:00.000010Z" if html_read else READ_SINCE
+                    )
                     assert arguments["include_files"] is True
                     assert arguments["include_threads"] is True
                     assert arguments["max_file_bytes"] == 4 * 1024 * 1024
                     assert arguments["max_files"] == 50
                     # Scoped file read: only this file, no channel directory.
-                    assert arguments["file_id"] == "F-report"
+                    assert arguments["file_id"] in {"F-report", HTML_FILE_ID}
                     assert arguments["include_channels"] is False
-                    state.read_since = arguments["since"]
+                    if not html_read:
+                        state.read_since = arguments["since"]
                     # The hub's bounded response excludes older roots while
                     # retaining the selected User root and its reply.
                     state.read_messages = [USER_THREAD, NEW_REPLY]
-                    read_file = {
-                        "file_id": "F-report",
-                        "size_bytes": len(state.read_pdf),
-                    }
-                    if state.read_mode == "wrong_file_id":
+                    content = state.read_html if html_read else state.read_pdf
+                    mode = "valid" if html_read else state.read_mode
+                    read_file = {"file_id": arguments["file_id"], "size_bytes": len(content)}
+                    if mode == "wrong_file_id":
                         read_file["file_id"] = "F-other"
-                    if state.read_mode == "invalid_base64":
+                    if mode == "invalid_base64":
                         read_file["content_base64"] = "not-base64"
-                    elif state.read_mode != "missing_base64":
-                        read_file["content_base64"] = base64.b64encode(state.read_pdf).decode("ascii")
-                    if state.read_mode == "size_mismatch":
+                    elif mode != "missing_base64":
+                        read_file["content_base64"] = base64.b64encode(content).decode("ascii")
+                    if mode == "size_mismatch":
                         read_file["size_bytes"] += 1
-                    if state.read_mode == "skipped":
+                    if mode == "skipped":
                         read_file.pop("content_base64", None)
                         read_file.update(skipped=True, skip_reason="exceeds_max_bytes")
                     result = {
@@ -196,7 +205,28 @@ def handler_for(state: StubState):
                     self.end_headers()
                     self.wfile.write(body)
                     return
-                if arguments["kind"] == "file":
+                if arguments["kind"] == "file" and arguments["reply_to"] == DEV_THREAD:
+                    upload, = arguments["files"]
+                    assert upload["filename"] == "v9.99.0.html"
+                    assert upload["content_encoding"] == "text"
+                    assert upload["content"].encode() == HTML
+                    assert upload["size_bytes"] == len(HTML)
+                    assert upload["sha256"] == hashlib.sha256(HTML).hexdigest()
+                    result = {
+                        "_id": request_id,
+                        "structuredContent": {
+                            "ok": True,
+                            "schema_version": 1,
+                            "kind": "file",
+                            "message": {
+                                "message_id": "html-message",
+                                "thread_id": DEV_THREAD,
+                                "permalink": HTML_MESSAGE_PERMALINK,
+                            },
+                            "files": [{"file_id": HTML_FILE_ID, "permalink": HTML_FILE_PERMALINK}],
+                        },
+                    }
+                elif arguments["kind"] == "file":
                     assert arguments["reply_to"] == USER_THREAD
                     batch = "files" in arguments
                     uploads = arguments["files"] if batch else [arguments["file"]]
@@ -240,7 +270,6 @@ def handler_for(state: StubState):
                 else:
                     assert arguments["kind"] == "message"
                     assert arguments["reply_to"] == DEV_THREAD
-                    assert f"https://github.com/Richards-LLC/cassy/blob/{state.html_ref}/docs/release-reports/v9.99.0.html" in arguments["text"]
                     result = {
                         "_id": request_id,
                         "content": [
@@ -254,7 +283,7 @@ def handler_for(state: StubState):
                                         "message": {
                                             "message_id": "html-message",
                                             "thread_id": DEV_THREAD,
-                                            "permalink": "https://example.test/messages/html",
+                                            "permalink": HTML_MESSAGE_PERMALINK,
                                         },
                                     }
                                 ),
@@ -581,18 +610,19 @@ def run_adapter(
     dev_thread: str = DEV_THREAD,
     pdf_path: Path = PDF,
     credential_mode: str = "legacy",
-    html_ref: str | None = "main",
+    html_ref: str | None = None,
     html_url: str | None = None,
+    html_bytes: bytes = HTML,
 ):
     module = adapter_module()
     state.remote_pdf = remote_pdf
     state.requests.clear()
     state.download_requests.clear()
-    state.html_ref = html_ref or "main"
+    state.partial_receipt = None
     with tempfile.TemporaryDirectory(prefix="release-report-post-") as directory:
         root = Path(directory)
         html = root / "v9.99.0.html"
-        html.write_text("<!doctype html><title>stub</title>\n", encoding="utf-8")
+        html.write_bytes(html_bytes)
         credentials = root / "credentials.env"
         values = {(module.LEGACY_TOKEN_PREFIX + "_TEST"): "stub-token", module.LEGACY_BYPASS_ENV: "stub-bypass"}
         if credential_mode == "violet":
@@ -622,7 +652,6 @@ def run_adapter(
                 "CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS": dev_thread,
                 "CAS_CREDENTIALS_FILE": str(credentials),
                 module.LEGACY_TRAIN_SELECTOR_ENV: (module.LEGACY_TOKEN_PREFIX + "_TEST"),
-                "CAS_RELEASE_TRAIN_REPORT_REPO": "Richards-LLC/cassy",
             }
         )
         environment.pop("CAS_RELEASE_TRAIN_REPORT_HTML_REF", None)
@@ -712,6 +741,11 @@ def run_adapter(
         fields = None
         if receipt.is_file():
             fields = dict(line.split("=", 1) for line in receipt.read_text(encoding="utf-8").splitlines())
+        partial = receipt.with_suffix(".receipt.partial")
+        if partial.is_file():
+            state.partial_receipt = dict(
+                line.split("=", 1) for line in partial.read_text(encoding="utf-8").splitlines()
+            )
         return result, fields
 
 
@@ -755,55 +789,7 @@ def main() -> int:
             assert "stub-token" not in result.stderr and "wrong-token" not in result.stderr
             assert "config.toml" in result.stderr and "VIOLET_SLACK_TOKEN_ENV" in result.stderr
         print("Codex registration: default/custom homes passed; ambiguous/conflicting/missing credentials refused before network")
-        result, fields = run_adapter(server, state, pdf, html_ref="v9.99.0")
-        assert result.returncode == 0 and fields is not None, result.stderr
-        result, fields = run_adapter(server, state, pdf, html_ref="factory/temporary-report")
-        assert result.returncode != 0, result.stderr
-        assert fields is None and state.requests == [], "temporary report links must refuse before any upload"
-        result, fields = run_adapter(
-            server,
-            state,
-            pdf,
-            html_ref="factory/temporary-report",
-            html_url="https://example.test/manual-report.html",
-        )
-        assert result.returncode != 0, result.stderr
-        assert fields is None and state.requests == [], "manual HTML URLs must obey the ref policy"
-        result, fields = run_adapter(
-            server,
-            state,
-            pdf,
-            html_ref=None,
-            html_url=(
-                "https://github.com/Richards-LLC/cassy/blob/factory/temporary-report/"
-                "docs/release-reports/v9.99.0.html"
-            ),
-        )
-        assert result.returncode != 0, result.stderr
-        assert fields is None and state.requests == [], "manual factory URLs must refuse before network"
-        for segment in (".", ".."):
-            result, fields = run_adapter(
-                server,
-                state,
-                pdf,
-                html_ref=None,
-                html_url=(
-                    "https://github.com/Richards-LLC/cassy/blob/main/docs/"
-                    f"{segment}/release-reports/v9.99.0.html"
-                ),
-            )
-            assert result.returncode != 0, result.stderr
-            assert fields is None and state.requests == [], "dot path segments must refuse before network"
-        print("Report links: main/tag accepted; temporary branch refused before network")
-        result, fields = run_adapter(
-            server,
-            state,
-            pdf,
-            html_url=(
-                "https://github.com/Richards-LLC/cassy/blob/main/"
-                "docs/release-reports/v9.99.0.html"
-            ),
-        )
+        result, fields = run_adapter(server, state, pdf)
         if result.returncode != 0:
             raise AssertionError(f"adapter failed: stdout={result.stdout!r} stderr={result.stderr!r}")
         assert fields is not None
@@ -813,7 +799,12 @@ def main() -> int:
         assert fields["PDF_MESSAGE_PERMALINK"] == PDF_MESSAGE_PERMALINK
         assert fields["PDF_FILE_PERMALINK"] == "https://example.test/files/report.pdf"
         print("Release receipt links: upload message and PDF file retain their distinct returned permalinks")
-        assert fields["HTML_FILE_ID"] == "html-message"
+        assert fields["HTML_FILE_ID"] == HTML_FILE_ID, fields["HTML_FILE_ID"]
+        assert fields["HTML_FILE_PERMALINK"] == HTML_FILE_PERMALINK
+        assert fields["HTML_MESSAGE_ID"] == "html-message"
+        assert fields["HTML_MESSAGE_PERMALINK"] == HTML_MESSAGE_PERMALINK
+        assert fields["HTML_SHA256"] == fields["HTML_REMOTE_SHA256"] == hashlib.sha256(HTML).hexdigest()
+        assert fields["HTML_SIZE_BYTES"] == fields["HTML_REMOTE_SIZE_BYTES"] == str(len(HTML))
         assert fields["USER_THREAD_TS"] == USER_THREAD
         assert fields["DEV_THREAD_TS"] == DEV_THREAD
         assert len(fields["PDF_SHA256"]) == 64
@@ -823,8 +814,35 @@ def main() -> int:
         assert fields["PDF_REMOTE_SIZE_BYTES"] == fields["PDF_SIZE_BYTES"]
         assert fields["PDF_REMOTE_PAGE_COUNT"] == fields["PAGE_COUNT"]
         assert state.download_requests == ["/download/report.pdf"]
-        methods = [request.get("method") for request in state.requests]
-        assert methods == ["initialize", "notifications/initialized", "tools/list", "tools/call", "tools/call"]
+        calls = [request["params"] for request in state.requests if request["method"] == "tools/call"]
+        assert [call["name"] for call in calls] == ["violet_post", "violet_post", "violet_read"]
+        assert [call["arguments"]["kind"] for call in calls[:2]] == ["file", "file"]
+        assert calls[-1]["arguments"]["file_id"] == HTML_FILE_ID
+        assert state.partial_receipt is None
+
+        state.read_html = HTML.replace(b"Release", b"RELEASE")
+        result, fields = run_adapter(server, state, pdf)
+        assert result.returncode != 0 and fields is None
+        assert state.partial_receipt is not None
+        assert state.partial_receipt["PDF_FILE_ID"] == "F-report"
+        assert state.partial_receipt["HTML_FILE_ID"] == HTML_FILE_ID
+        assert state.partial_receipt["HTML_MESSAGE_ID"] == "html-message"
+        assert "HTML_REMOTE_SHA256" not in state.partial_receipt
+        assert [request["params"] for request in state.requests if request["method"] == "tools/call"] == calls
+        state.read_html = HTML
+
+        for invalid in (
+            {"html_ref": "v9.99.0"},
+            {"html_ref": "factory/temporary-report"},
+            {"html_url": "https://github.com/Richards-LLC/cassy/blob/main/docs/release-reports/v9.99.0.html"},
+            {"html_bytes": b" " * (1024 * 1024 + 1)},
+            {"html_bytes": b"\xff"},
+            {"dev_thread": "invalid-timestamp"},
+        ):
+            result, fields = run_adapter(server, state, pdf, **invalid)
+            assert result.returncode != 0 and fields is None, invalid.keys()
+            assert state.requests == [] and state.partial_receipt is None
+        print("HTML attachment: 1 verified delivery, 1 substituted read-back, 6 preflight refusals")
 
         # Violet #109: the upload succeeded but no shared-message URL exists.
         state.pdf_message_permalink = None
@@ -833,7 +851,7 @@ def main() -> int:
         assert fields["PDF_MESSAGE_ID"] == "file-message"
         assert fields["PDF_MESSAGE_PERMALINK"] == "unavailable"
         assert fields["PDF_FILE_PERMALINK"] == "https://example.test/files/report.pdf"
-        assert fields["HTML_FILE_ID"] == "html-message"
+        assert fields["HTML_FILE_ID"] == HTML_FILE_ID
         assert fields["PDF_REMOTE_SHA256"] == fields["PDF_SHA256"]
         state.pdf_message_permalink = PDF_MESSAGE_PERMALINK
         for attribute, invalid in (
@@ -888,6 +906,7 @@ def main() -> int:
             "initialize",
             "notifications/initialized",
             "tools/list",
+            "tools/call",
             "tools/call",
             "tools/call",
             "tools/call",

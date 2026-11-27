@@ -108,7 +108,7 @@ must state the measured time and whether it exceeded the recorded budget.
    Markdown, brief, standalone HTML, PDF and QA evidence under
    `docs/release-reports/`. Verify source fidelity and PDF pagination before
    either top-level message is sent. These local artifacts precede the later
-   upload/link receipt, which needs existing parent messages.
+   upload receipt, which needs existing parent messages.
 2. Post the four messages through Violet in order: the reviewed User top-level,
    User logical reply, Dev top-level, Dev logical reply. A logical reply is one
    body submitted once; Violet may split it into multiple Slack messages under
@@ -117,13 +117,12 @@ must state the measured time and whether it exceeded the recorded budget.
 3. After the four messages (including all returned parts), run
    `CAS_RELEASE_TRAIN_REPORT_RECEIPT=<run-dir>/release-report.receipt
    scripts/release-report-post.py vX.Y.Z <pdf> <html> <user-parent-id> <dev-parent-id>`.
-   It attaches the PDF to the existing User thread through Violet with
-   `kind: file` and links the HTML from the existing Dev thread. Require uploaded-PDF
-   download, decode, page-count and source-hash checks before accepting delivery.
-   Preserve the returned file permalink, User/Dev thread receipts, local PDF
-   SHA-256/size, verified remote PDF SHA-256/size/page count, the HTML SHA-256,
-   both file IDs, the PDF upload's message ID and message permalink, and the
-   local page count in `release-report.receipt` in the run
+   Through Violet `kind: file`, it attaches and verifies the PDF in the User
+   thread before attaching the HTML in the Dev thread. The adapter re-reads
+   the HTML by its returned file ID and requires an exact match to the local bytes.
+   Preserve both file and message IDs and permalinks, User/Dev thread receipts,
+   local and verified remote SHA-256/size for both files, and local and verified
+   remote PDF page counts in `release-report.receipt` in the run
    directory. The adapter must download the returned explicit `download_url`, or
    re-read the uploaded file by its returned ID through authenticated `violet_read`
    when the current hub receipt omits a download URL, and compare the bytes and
@@ -139,7 +138,8 @@ must state the measured time and whether it exceeded the recorded budget.
    The adapter also
    re-hashes the local PDF and checks every remote evidence field agrees with
    the local artifact; local checks alone do not prove uploaded-file integrity.
-   Preserve partial receipts and stop on failure; never retry an uncertain write.
+   On failure, preserve observed upload identities from `release-report.receipt.partial`
+   and reconcile them before any further write. Do not treat it as delivery proof.
    Publication completion requires all message, installation, published-asset
    and verified report receipts. A missing receipt keeps completion pending.
 
@@ -303,14 +303,11 @@ returned ID. Each generated `## POSTED` row includes `message_id=…`,
 `part_ids=[…]` and the returned permalink. The same ordered-list requirement
 applies to diary replies recorded manually.
 
-`release-report.receipt` must additionally retain `PDF_MESSAGE_ID` and
-`PDF_MESSAGE_PERMALINK`, separate from `PDF_FILE_ID` and `PDF_FILE_PERMALINK`.
-The message permalink must open the upload message in its Slack thread and
-retain the exact URL returned by the upload response, including thread context.
-The report is incomplete without its upload message identity. The receipts
-stage refreshes `## POSTED` from the saved receipts, adding the PDF upload's
-message ID, message permalink and file ID after report delivery. Report uploads
-and links are separate from the four announcement bodies.
+`release-report.receipt` retains each upload's message ID and permalink
+separately from its file ID and permalink. Keep each returned message URL
+including thread context, or record `unavailable` if Violet supplies none.
+When refreshing `## POSTED` from the saved receipts, include the returned report
+upload identities separately from the four announcement bodies.
 
 Preserve incomplete receipts and reconcile missing IDs through a bounded
 Violet read; do not repeat publication to repair evidence. These rules make
@@ -343,11 +340,10 @@ compatibility snapshot. Neither includes factory plumbing or ticket IDs.
 - [ ] `cas release report <version> --pdf` produced the Markdown, brief, HTML,
   PDF and QA receipt under `docs/release-reports/`; A4/Letter pagination and
   source fidelity passed.
-- [ ] The PDF is attached to the User thread, the HTML is linked from the Dev
-  thread, and `release-report.receipt` records both paths, local PDF
-  SHA-256/size, verified remote PDF SHA-256/size/page count, HTML SHA-256, both
-  file ids, PDF upload message ID/permalink, the User/Dev thread timestamps,
-  file permalink and local PDF page count.
+- [ ] The PDF is attached to the User thread and the HTML to the Dev thread.
+  `release-report.receipt` records both paths, local and verified remote
+  SHA-256/size, both file and message IDs/permalinks, the User/Dev thread
+  timestamps, and local and verified remote PDF page counts.
 - [ ] Post 1 (user): punch (was→now) + plain-language details
 - [ ] Post 2 (dev): punch (was→now) + technical details
 - [ ] Both: zero ticket numbers, zero internal-agent narration

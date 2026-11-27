@@ -73,9 +73,8 @@ Lead with the user-visible before/after; an implementation inventory is not a re
 
 ## Published version report
 
-After a published version release, run `cas-release-report` and link its HTML
-and PDF from the announcement (PDF attached to the User thread, HTML linked
-from the Dev thread).
+After a published version release, run `cas-release-report` and verify both
+attachments: the PDF in the User thread and the HTML in the Dev thread.
 
 ## Artifact
 

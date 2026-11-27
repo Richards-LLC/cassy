@@ -1,0 +1,4 @@
+title: Post-publication report HTML is delivered independently of Git refs
+statement: After verifying the User PDF, the release adapter attaches the approved HTML to the Dev thread and verifies exact remote bytes by file ID. Missing or changed bytes leave observed upload identities for reconciliation, not a success receipt.
+tasks: [cas-9daa]
+journeys: [CLI-RELEASE]

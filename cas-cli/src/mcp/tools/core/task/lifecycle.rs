@@ -2701,6 +2701,10 @@ impl CasCore {
             }
         }
         let task_store = self.open_task_store()?;
+        if let Some(worker) = worker.as_ref() {
+            crate::worker_lifecycle::ensure_assignment(task_store.as_ref(), worker, &req.id)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        }
 
         if queue_enabled && let Some(worker) = worker.as_ref() {
             // GH #1695: a close saved with its active verification dispatch
@@ -4013,6 +4017,8 @@ impl CasCore {
             }
         };
         if is_worker {
+            crate::worker_lifecycle::bind_task(&self.cas_root, &agent_id, &req.id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
             blocker_warning.push_str(&epic_lane::assignment_branch_note(&self.cas_root, task_store.as_ref(), &task));
         }
         // cas-2e1b: lane CI binds its impact selection to this newly recorded

@@ -13986,6 +13986,9 @@ impl CasCore {
         crate::cloud::peer_claims::release_task_claim_in_background(&self.cas_root, &task.id);
         crate::cloud::file_leases::release_for_task(&self.cas_root, &task.id);
 
+        crate::worker_lifecycle::retire_after_delivery(&self.cas_root, &task.id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+
         // cas-7877: cancelling a QA work item is the supervisor deciding the
         // review will not happen. Withdraw its round too, so the delivery is
         // no longer gated on it and the next park does not re-open it.

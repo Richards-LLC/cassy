@@ -267,6 +267,8 @@ pub(crate) fn admit_assignment(root: &Path, task: &cas_types::Task, live: Option
         queues.bind_spawn(receipt.id, session, &worker.name)?;
     }
     let tasks = crate::store::open_task_store(root)?;
+    crate::worker_lifecycle::ensure_assignment(tasks.as_ref(), &worker, &task.id)
+        .map_err(crate::error::CasError::Other)?;
     // A director snapshot may predate a cancellation or reassignment.
     let current = tasks.get(&task.id)?;
     if current.status != TaskStatus::Open || current.assignee != task.assignee {
@@ -369,6 +371,8 @@ impl CasCore {
             ensure_owned_queue_checkout(&self.cas_root, &worker, None)?;
         }
         if let Some(mut ids) = task_ids {
+            if ids.len() != 1 { return Err(error("Each worker owns one task; spawn a fresh worker for each task")); }
+            crate::worker_lifecycle::ensure_assignment(self.open_task_store()?.as_ref(), &worker, &ids[0]).map_err(error)?;
             if expected.is_some_and(|expected| expected != queue.revision) {
                 return Err(error(
                     "Worker task queue revision changed; inspect it before replacing",
@@ -478,46 +482,8 @@ impl CasCore {
         &self,
         id: &str,
     ) -> Result<Option<String>, McpError> {
-        let tasks = self.open_task_store()?;
-        let task = tasks.get(id).map_err(error)?;
-        if !matches!(task.status, TaskStatus::Closed | TaskStatus::AwaitingMerge)
-            || task.deliverables.merge_conflicted
-        {
-            return Ok(None);
-        }
-        let Some(worker) = task.assignee.as_deref() else {
-            return Ok(None);
-        };
-        let agents = self.open_agent_store()?;
-        let Some(registration) = agents
-            .list(None)
-            .map_err(error)?
-            .into_iter()
-            .filter(|a| a.role == AgentRole::Worker && (a.name == worker || a.id == worker))
-            .max_by_key(|a| a.registered_at)
-        else {
-            return Ok(None);
-        };
-        let Some(session) = registration.factory_session.as_deref() else {
-            return Ok(None);
-        };
-        if SqliteWorkerTaskQueueStore::open(&self.cas_root)
-            .map_err(error)?
-            .get(session, &registration.name)
-            .map_err(error)?
-            .revision
-            == 0
-        {
-            return Ok(None);
-        }
-        if agents
-            .get_lease(id)
-            .map_err(error)?
-            .is_some_and(|lease| lease.status == cas_types::LeaseStatus::Active)
-        {
-            return Ok(None);
-        }
-        self.advance_worker_task_queue(worker, Some(id)).await
+        crate::worker_lifecycle::retire_after_delivery(&self.cas_root, id).map_err(error)?;
+        Ok(None)
     }
 
     /// cas-526e: a release returns work to the pool, so it also leaves the
@@ -627,6 +593,9 @@ impl CasCore {
         let retrying = queue.starting && queue.dispatch_from.as_deref() == predecessor;
         let tasks = self.open_task_store()?;
         let agents = self.open_agent_store()?;
+        if let Some(id) = queue.current_task.as_deref()
+            && tasks.get(id).is_ok_and(|task| task.is_terminal() || task.status == TaskStatus::AwaitingMerge)
+        { return Ok(None); }
         // A returned predecessor can close again while its successor is held.
         // Even an interrupted brief dispatch must keep that execution's slot.
         if queue.current_started
@@ -1035,6 +1004,7 @@ pub(crate) async fn reconcile_worker_task_queues(
     root: &Path,
     session: &str,
 ) -> Result<usize, McpError> {
+    crate::worker_lifecycle::reconcile(root, session).map_err(error)?;
     let core = CasCore::with_daemon(root.to_path_buf(), None, None);
     let agents = core.open_agent_store()?;
     let Some(owner) =

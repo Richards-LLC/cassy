@@ -823,9 +823,6 @@ impl CasCore {
     ) -> Result<String, String> {
         self.ensure_review_assignee(task.review_dispatch_id.as_deref(), Some(assignee))
             .map_err(|error| error.message.to_string())?;
-        if std::env::var("CAS_FACTORY_MODE").is_err() {
-            return Ok(assignee.to_string());
-        }
         let Ok(agent_store) = self.open_agent_store() else {
             return Ok(assignee.to_string());
         };
@@ -845,6 +842,8 @@ impl CasCore {
             ));
             return Ok(assignee.to_string());
         };
+        crate::worker_lifecycle::ensure_assignment(task_store, worker, &task.id)?;
+        if std::env::var("CAS_FACTORY_MODE").is_err() { return Ok(assignee.to_string()); }
         let worker_name = &worker.name;
         if !by_name {
             warnings.push(format!(

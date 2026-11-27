@@ -116,11 +116,31 @@ mod tests {
     }
 
     #[test]
-    fn a_host_cas_dir_means_the_machine_is_configured() {
+    fn a_host_cas_dir_means_configured_except_for_signing_only_state() {
         let temp = tempfile::tempdir().unwrap();
         let host_cas = temp.path().join(".cas");
         std::fs::create_dir_all(&host_cas).unwrap();
         assert!(!machine_is_unconfigured(&host_cas, None));
+
+        let signing_dir = host_cas.join("macos-signing");
+        std::fs::create_dir(&signing_dir).unwrap();
+        assert!(machine_is_unconfigured(&host_cas, None));
+
+        let config = host_cas.join("config.toml");
+        std::fs::write(&config, "").unwrap();
+        assert!(!machine_is_unconfigured(&host_cas, None));
+        std::fs::remove_file(config).unwrap();
+        assert!(!machine_is_unconfigured(&host_cas, Some(&host_cas)));
+
+        #[cfg(unix)]
+        {
+            let linked_host = temp.path().join("linked-host");
+            std::os::unix::fs::symlink(&host_cas, &linked_host).unwrap();
+            assert!(!machine_is_unconfigured(&linked_host, None));
+            std::fs::remove_dir(signing_dir).unwrap();
+            std::os::unix::fs::symlink(temp.path(), host_cas.join("macos-signing")).unwrap();
+            assert!(!machine_is_unconfigured(&host_cas, None));
+        }
     }
 
     #[test]

@@ -41,6 +41,71 @@ tokio::task_local! {
 }
 
 impl ReleaseClose {
+    fn closed_release_qa(&self, task: &Task, shipped: &[(&Task, &str)]) -> Result<bool, String> {
+        use crate::mcp::tools::core::task::{lifecycle::{close_ops, report_proof}, task_owned_by_project};
+        use cas_types::{VerificationDispatchState, VerificationProvenance, VerificationReceipt, VerificationStatus, VerificationType};
+
+        let scope = &self.inventory.scope;
+        let Some(closed_at) = task.closed_at else { return Ok(false); };
+        if !crate::qa_pass::is_no_code(task) || close_ops::has_recorded_code_delivery(task)
+            || task.deliverables.green_merge_commit.is_some()
+            || !task_owned_by_project(task, &self.root, Some(&scope.project_id))
+            || self.inventory.exceptions.iter().any(|issue| issue.task_id == task.id)
+        {
+            return Ok(false);
+        }
+        let Some(reference) = task.external_ref.as_deref().and_then(|reference| reference.strip_prefix("artifact:")) else { return Ok(false); };
+        let report_id = match reference.split_once('/') {
+            Some((owner, id)) if owner == task.id => id,
+            Some(_) => return Ok(false),
+            None => reference,
+        };
+        let conn = read_connection(&self.root)?;
+        let Some(dispatch) = cas_store::get_latest_verification_dispatch_with_conn(&conn, &task.id).map_err(|e| e.to_string())? else { return Ok(false); };
+        let Some(resolved_at) = dispatch.resolved_at else { return Ok(false); };
+        if dispatch.task_id != task.id || dispatch.state != VerificationDispatchState::Resolved
+            || !matches!(dispatch.receipt()?, VerificationReceipt::None)
+            || resolved_at > closed_at
+            || !dispatch.repository.as_ref().is_some_and(|boundary| {
+                boundary.head_commit == scope.reviewed_sha && boundary.anchor_commits.is_empty()
+                    && same_repo(&self.repo, Path::new(&boundary.repository_root))
+            })
+        {
+            return Ok(false);
+        }
+        let Some(verdict) = cas_store::get_verification_for_dispatch_with_conn(&conn, &dispatch.id).map_err(|e| e.to_string())? else { return Ok(false); };
+        let Some(reviewer) = verdict.agent_id.as_deref() else { return Ok(false); };
+        if verdict.task_id != task.id || verdict.dispatch_id.as_deref() != Some(dispatch.id.as_str())
+            || verdict.verification_type != VerificationType::Task
+            || verdict.status != VerificationStatus::Approved || verdict.created_at > closed_at
+            || !matches!(verdict.provenance, VerificationProvenance::TaskVerifier | VerificationProvenance::SupervisorDirect)
+            || !author_is_independent(&self.root, task, &self.repo, reviewer)?
+        {
+            return Ok(false);
+        }
+        let report_gate = report_proof::read_report_verdict(&conn, true, task, task)?;
+        if !report_gate.approves(&dispatch.id, &verdict.id) {
+            return Ok(false);
+        }
+        let existed_at_review = |artifact: &cas_store::PublishedArtifact| {
+            crate::artifacts::proof::validate(artifact, &task.id).is_ok()
+                && artifact.created_at.parse::<chrono::DateTime<chrono::Utc>>().is_ok_and(|created| created <= resolved_at)
+        };
+        if !read_artifact(&self.root, report_id).is_ok_and(|artifact| existed_at_review(&artifact)) {
+            return Ok(false);
+        }
+        let receipts = read_receipts(&self.root, &scope.project_id)?;
+        Ok(receipts.iter().any(|receipt| {
+            receipt.staging_sha == scope.reviewed_sha
+                && receipt.ledger_author_id.is_some()
+                && scope.proof_refs.iter().any(|proof| proof.kind == ReleaseProofKind::Qa && proof_matches(proof, receipt))
+                && shipped.iter().any(|(child, anchor)| receipt.task_heads.get(&child.id).is_some_and(|head| head == anchor))
+                && validate_ledger(&self.root, &receipt.ledger_artifact_id, Path::new(&receipt.ledger_path))
+                    .is_ok_and(|(artifact, _)| existed_at_review(&artifact)
+                        && artifact.sha256 == receipt.ledger_sha256 && artifact.size_bytes == receipt.ledger_size_bytes)
+        }))
+    }
+
     /// Resolve membership afresh before granting any lifecycle authority.
     /// The caller keeps per-delivery exceptions; one bad member does not erase
     /// other shipped facts or make the release appear successfully finalized.
@@ -546,8 +611,21 @@ impl ReleaseClose {
         }
         let leaves: Vec<_> = descendants.iter().filter(|c| c.task_type != cas_types::TaskType::Epic && c.status != cas_types::TaskStatus::Cancelled).collect();
         if leaves.is_empty() { return Err("RELEASE_EMPTY_PARENT: no delivered descendants; operator disposition required".into()); }
-        for child in &leaves {
-            if child.status != cas_types::TaskStatus::Closed || self.delivery(&child.id).is_none() || self.member_error(&child.id).is_some() {
+        let mut shipped = Vec::new();
+        let mut artifact_only = Vec::new();
+        for child in leaves {
+            if child.status != cas_types::TaskStatus::Closed || self.member_error(&child.id).is_some() {
+                return Err(format!("RELEASE_PARENT_MEMBER_HELD: {}", child.id));
+            }
+            if let Some(anchor) = self.delivery(&child.id).and_then(|delivery| delivery.anchor.as_deref()) {
+                shipped.push((child, anchor));
+            } else {
+                artifact_only.push(child);
+            }
+        }
+        if shipped.is_empty() { return Err("RELEASE_EMPTY_PARENT: no shipped descendants; operator disposition required".into()); }
+        for child in artifact_only {
+            if !self.closed_release_qa(child, &shipped)? {
                 return Err(format!("RELEASE_PARENT_MEMBER_HELD: {}", child.id));
             }
         }
@@ -583,11 +661,9 @@ impl ReleaseClose {
         // mapped release tree, including their published-byte checks. No new run.
         let integration = self.clone().scope(async {
             let mut proofs = std::collections::BTreeSet::new();
-            for child in &leaves {
-                let anchor = self.delivery(&child.id).and_then(|d| d.anchor.as_deref());
-                let Some(anchor) = anchor else { return Ok::<_, String>(None); };
+            for (child, anchor) in shipped {
                 let qa = satisfying_receipt(&self.root, child, &self.repo, &self.inventory.scope.final_release_sha, anchor)?;
-                let Some(qa) = qa else { return Ok(None); };
+                let Some(qa) = qa else { return Ok::<_, String>(None); };
                 proofs.insert(qa.ledger_artifact_id);
             }
             Ok(Some(format!("Release QA of the mapped tree: {}", proofs.into_iter().collect::<Vec<_>>().join(", "))))

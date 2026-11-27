@@ -1,0 +1,4 @@
+title: Frozen release closeout preserves approved import assemblies
+statement: A reviewed merge-only assembly with granted imports is recognized only when its landed tree matches the approval and each import survives or has a proven constituent-owned fold.
+tasks: [cas-a0837]
+journeys: [CLI-RELEASE]

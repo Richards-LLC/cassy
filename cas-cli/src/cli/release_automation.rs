@@ -740,11 +740,11 @@ fn is_release_train_task(task: &cas_types::Task) -> bool {
             || task.effective_epic_branch().is_some_and(|lane| lane.starts_with("epic/release-train-")))
 }
 
-fn delivery_is_shipped(repo: &Path, child: &cas_types::Task, tag_sha: &str) -> bool {
+fn delivery_is_shipped(root: &Path, repo: &Path, child: &cas_types::Task, tag_sha: &str) -> bool {
     let Some(anchor) = crate::qa_batch::delivery_anchor(repo, child) else {
         return false;
     };
-    crate::qa_batch::release_tag_ships_delivery(repo, child.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()), &anchor, tag_sha, &child.id)
+    crate::qa_batch::release_tag_ships_delivery(root, repo, child, &anchor, tag_sha)
 }
 
 fn published_later_tags(repo: &Path, tag: &str) -> Result<Vec<(String, String)>> {
@@ -801,13 +801,13 @@ fn preview_shipped_train(root: &Path, train_id: &str, tag: &str) -> Result<Strin
     let children = store.get_subtasks(train_id)?;
     let needs_later_tags = children.iter().any(|child| !child.is_terminal()
         && crate::qa_batch::delivery_anchor(&repo, child).is_some()
-        && !delivery_is_shipped(&repo, child, &tag_sha));
+        && !delivery_is_shipped(root, &repo, child, &tag_sha));
     let later_tags = if needs_later_tags { published_later_tags(&repo, tag)? } else { Vec::new() };
     let shipped_tags: std::collections::BTreeMap<_, _> = children.iter().filter_map(|child| {
-        if delivery_is_shipped(&repo, child, &tag_sha) {
+        if delivery_is_shipped(root, &repo, child, &tag_sha) {
             Some((child.id.clone(), tag.to_string()))
         } else {
-            later_tags.iter().find(|(_, sha)| delivery_is_shipped(&repo, child, sha))
+            later_tags.iter().find(|(_, sha)| delivery_is_shipped(root, &repo, child, sha))
                 .map(|(later_tag, _)| (child.id.clone(), later_tag.clone()))
         }
     }).collect();

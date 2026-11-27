@@ -86,7 +86,7 @@ fn scorecard_explicit_window_uses_recorded_rows_through_the_cli() {
     cas_store::observed_delivery_merges(&root).unwrap();
     for command in [vec!["scorecard"], vec!["ledger", "report"]] {
         let mut cmd = cas_cmd(temp.path());
-        let output = cmd.current_dir(temp.path()).args(command).args([
+        let output = cmd.current_dir(temp.path()).args(&command).args([
             "--since", "2026-11-27T04:00:00Z", "--until", "2026-11-27T05:00:00Z", "--json",
         ]).assert().success().get_output().stdout.clone();
         let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
@@ -94,6 +94,13 @@ fn scorecard_explicit_window_uses_recorded_rows_through_the_cli() {
         assert_eq!(report["events"], 1);
         assert_eq!(report["efficiency"]["issues"]["agent_filed"], 1);
         assert!(report["efficiency"]["issues"]["closed_in_window"]["unknown"].is_string());
+        let text = cas_cmd(temp.path()).current_dir(temp.path()).args(command).args([
+            "--since", "2026-11-27T04:00:00Z", "--until", "2026-11-27T05:00:00Z",
+        ]).assert().success().get_output().stdout.clone();
+        let text = String::from_utf8(text).unwrap();
+        for actor in ["agent-1", "agent-2"] {
+            assert!(text.contains(actor), "missing recorded actor {actor}");
+        }
     }
 }
 

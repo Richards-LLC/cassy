@@ -31,6 +31,7 @@ struct Refusals {
     calls: usize,
     facts: usize,
     by_code: BTreeMap<String, usize>,
+    by_actor: BTreeMap<String, usize>,
     missing_actor: usize,
     missing_harness: usize,
     legacy_facts_without_call_id: usize,
@@ -116,6 +117,7 @@ fn refusals(db: &Connection, since: DateTime<Utc>, until: DateTime<Utc>, merges:
         AND julianday(created_at)>=julianday(?1) AND julianday(created_at)<julianday(?2)")?;
     let mut found = Refusals { observed_merges: merges, ..Default::default() };
     let mut calls = BTreeSet::new();
+    let mut actor_calls = BTreeMap::<String, BTreeSet<String>>::new();
     for row in stmt.query_map([since.to_rfc3339(), until.to_rfc3339()], |r|
         Ok((r.get::<_, i64>(0)?.to_string(), r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))? {
         let (id, code, metadata) = row?;
@@ -125,8 +127,11 @@ fn refusals(db: &Connection, since: DateTime<Utc>, until: DateTime<Utc>, merges:
         found.missing_actor += usize::from(metadata["actor"].as_str().is_none());
         found.missing_harness += usize::from(metadata["harness"].as_str().is_none());
         found.legacy_facts_without_call_id += usize::from(metadata["fact_id"].as_str().is_none());
-        calls.insert(metadata["fact_id"].as_str().unwrap_or(&id).to_owned());
+        let call = metadata["fact_id"].as_str().unwrap_or(&id).to_owned();
+        actor_calls.entry(metadata["actor"].as_str().unwrap_or("unknown").to_owned()).or_default().insert(call.clone());
+        calls.insert(call);
     }
+    found.by_actor = actor_calls.into_iter().map(|(actor, calls)| (actor, calls.len())).collect();
     found.calls = calls.len();
     found.per_observed_merge = (merges > 0).then(|| found.calls as f64 / merges as f64);
     Ok(found)
@@ -183,9 +188,9 @@ pub(super) fn render(efficiency: &Efficiency) -> String {
     let seconds = |n: Option<f64>| n.map_or_else(|| "unknown".into(), |n| format!("{n:.2}"));
     let _ = writeln!(out, "\nRecorded factory window {} (local rows only)", efficiency.interval);
     let _ = writeln!(out, "  Refusals: {}", efficiency.refusals.render(|r| format!(
-        "{} calls / {} observed merges; {} per merge; {} code facts ({:?}); {} without actor, {} without harness, {} legacy facts without a call id",
+        "{} calls / {} observed merges; {} per merge; calls by actor {:?}; {} code facts ({:?}); {} without actor, {} without harness, {} legacy facts without a call id",
         r.calls, r.observed_merges, r.per_observed_merge.map_or_else(|| "unknown".into(), |n| format!("{n:.2}")),
-        r.facts, r.by_code, r.missing_actor, r.missing_harness, r.legacy_facts_without_call_id)));
+        r.by_actor, r.facts, r.by_code, r.missing_actor, r.missing_harness, r.legacy_facts_without_call_id)));
     let _ = writeln!(out, "  Supervisor wake latency: {}", efficiency.supervisor_wakes_by_harness.render(|rows| {
         rows.iter().map(|(h, r)| format!("{h}: {} wakes; injection median/p90 {}/{} s; start median/p90 {}/{} s ({} starts, {} missing, {} invalid)",
             r.wakes, seconds(r.created_to_injected.median_seconds), seconds(r.created_to_injected.p90_seconds),
@@ -203,6 +208,10 @@ pub(super) fn render(efficiency: &Efficiency) -> String {
 mod tests {
     use super::*;
     use cas_store::{AgentStore, SqliteAgentStore};
+    use cas_store::release_reconcile_store::{ReleaseOperation, ReleaseOperationKey};
+    use crate::issue_reconcile::{IssueAction, IssueOutcome};
+    use crate::qa_batch::ReleaseScope;
+    use crate::release_reconcile::ReleaseReconcileReceipt;
     use cas_types::{Agent, AgentRole};
     use clap::Parser;
     use serde_json::json;
@@ -228,6 +237,7 @@ mod tests {
             (since, "G-61", json!({"fact_id":"call-1", "actor":"actor", "harness":"codex"})),
             (since, "G-68", json!({"fact_id":"call-1", "actor":"actor", "harness":"codex"})),
             (since + Duration::minutes(1), "UNCODED", json!({})),
+            (since + Duration::minutes(2), "G-61", json!({"fact_id":"call-2", "actor":"other-actor", "harness":"claude"})),
             (until, "G-61", json!({})),
         ] {
             db.execute("INSERT INTO events(event_type,entity_type,entity_id,summary,metadata,created_at) VALUES ('gate_refused','gate',?1,'',?2,?3)",
@@ -242,8 +252,7 @@ mod tests {
         for (n, at, actor) in [(1, since, Some("actor")), (2, since + Duration::minutes(2), None), (3, until, Some("actor"))] {
             assert!(crate::quality_ledger::issue_filed(root, &format!("https://github.com/org/repo/issues/{n}"), "issue", at, actor));
         }
-        db.execute_batch("CREATE TABLE supervisor_message_wakes (lead_id INTEGER,recipient TEXT,created_at TEXT,injected_at TEXT,started_at TEXT);
-            CREATE TABLE release_reconcile_operations (receipt_json TEXT);").unwrap();
+        db.execute_batch("CREATE TABLE supervisor_message_wakes (lead_id INTEGER,recipient TEXT,created_at TEXT,injected_at TEXT,started_at TEXT);").unwrap();
         for (id, created, injected, started, recipient) in [
             (1, since, since + Duration::seconds(10), Some(since + Duration::seconds(20)), "lead"),
             (2, since, since + Duration::seconds(30), None, "lead"),
@@ -253,14 +262,38 @@ mod tests {
             db.execute("INSERT INTO supervisor_message_wakes VALUES (?1,?2,?3,?4,?5)", rusqlite::params![
                 id, recipient, created.to_rfc3339(), injected.to_rfc3339(), started.map(|t| t.to_rfc3339())]).unwrap();
         }
-        for at in [since, until] {
-            db.execute("INSERT INTO release_reconcile_operations VALUES (?1)", [json!({"updated_at":at.to_rfc3339(),
-                "issue_outcomes":[{"issue":"org/repo/issues/1","action":"closed"},{"issue":"org/repo/issues/2","action":"partial"}]}).to_string()]).unwrap();
+        for (n, at) in [since, until].into_iter().enumerate() {
+            let key = ReleaseOperationKey {
+                project_id: "scorecard-fixture".into(), release_id: format!("v1.0.{n}"), final_release_sha: "a".repeat(40),
+            };
+            let receipt = ReleaseReconcileReceipt {
+                scope: ReleaseScope {
+                    project_id: key.project_id.clone(), repository: "org/repo".into(), release_id: key.release_id.clone(),
+                    reviewed_sha: key.final_release_sha.clone(), final_release_sha: key.final_release_sha.clone(),
+                    promotion_pr: None, release_tag: Some(key.release_id.clone()), constituent_epic_ids: vec![],
+                    included_task_ids: vec![], no_code_members: BTreeMap::new(), proof_refs: vec![],
+                },
+                key: key.clone(), reconciler_version: Some(env!("CARGO_PKG_VERSION").into()), reconciler_stale: false,
+                preview: None, triggers: vec![], members: BTreeMap::new(), close_intents: BTreeMap::new(),
+                issue_outcomes: vec![
+                    IssueOutcome { issue: format!("org/repo/issues/{}", n * 2 + 1), action: IssueAction::Closed,
+                        comment_or_error: String::new(), task_ids: vec![] },
+                    IssueOutcome { issue: "org/repo/issues/2".into(), action: IssueAction::Partial,
+                        comment_or_error: String::new(), task_ids: vec![] },
+                ],
+                parents: BTreeMap::new(), exceptions: vec![], started_at: at.to_rfc3339(), updated_at: at.to_rfc3339(),
+                complete: true, sync_pending: vec![], residuals: vec![], notice_intent: None,
+            };
+            ReleaseOperation::open(root, key).unwrap().save(&serde_json::to_value(receipt).unwrap()).unwrap();
         }
         let report = build(root, since, until, 10).unwrap();
+        assert_eq!(serde_json::to_value(&report).unwrap()["efficiency"]["refusals"]["by_actor"],
+            json!({"actor":1,"other-actor":1,"unknown":1}));
+        let text = render(&report.efficiency);
+        assert!(text.contains("other-actor"));
         let Measure::Known(r) = report.efficiency.refusals else { panic!("refusals unavailable") };
-        assert_eq!((r.calls, r.facts, r.observed_merges), (2, 3, 2));
-        assert_eq!(r.per_observed_merge, Some(1.0));
+        assert_eq!((r.calls, r.facts, r.observed_merges), (3, 4, 2));
+        assert_eq!(r.per_observed_merge, Some(1.5));
         assert_eq!((r.missing_actor, r.missing_harness, r.legacy_facts_without_call_id), (1, 1, 1));
         let Measure::Known(w) = report.efficiency.supervisor_wakes_by_harness else { panic!("wakes unavailable") };
         assert_eq!((w["codex"].wakes, w["codex"].missing_start), (2, 1));

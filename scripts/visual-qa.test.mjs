@@ -24,7 +24,7 @@ test('strict build evidence binds loaded entry bytes and refuses ambiguous or re
   let document, receipt, requests, foreignAllowed;
   const serve = (request, response) => {
     requests.push(request.url);
-    response.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'self' 'unsafe-inline'${foreignAllowed ? ` ${foreign}` : ''}; style-src 'self' 'unsafe-inline'`);
+    response.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'self' 'unsafe-inline'${foreignAllowed ? ` ${foreign}` : ''}; style-src 'self' 'unsafe-inline'; connect-src 'self'`);
     const body = request.url === '/entry.html' ? document : request.url === '/RECEIPT.json' ? JSON.stringify(receipt) :
       request.url === '/main.js' ? main : request.url === '/other.js' ? 'document.body.dataset.other = "loaded";' :
       request.url === '/next.html' ? clean.replace('<body>', '<body data-next>') : null;

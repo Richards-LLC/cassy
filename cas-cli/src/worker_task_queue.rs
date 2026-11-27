@@ -470,7 +470,8 @@ impl CasCore {
             queue = queues.get(session, &worker.name).map_err(error)?;
         }
         let tasks = self.open_task_store()?;
-        Ok(format!("{}{source_notices}", render(&worker, &queue, tasks.as_ref()).map_err(error)?))
+        let agents = self.open_agent_store()?;
+        Ok(format!("{}{source_notices}", render(&worker, &queue, tasks.as_ref(), agents.as_ref()).map_err(error)?))
     }
 
     /// Called after either close or park commits, including immutable receipts.
@@ -997,13 +998,14 @@ pub(crate) fn render(
     worker: &Agent,
     queue: &WorkerTaskQueue,
     tasks: &dyn cas_store::TaskStore,
+    agents: &dyn cas_store::AgentStore,
 ) -> cas_store::Result<String> {
     // The cursor retains held work for dispatch recovery; execution and holds
     // come from current task state, without rewriting that durable position.
     let owns = |task: &cas_types::Task| task.assignee.as_deref()
         .is_some_and(|assignee| assignee == worker.name || assignee == worker.id);
     let current = tasks.list(Some(TaskStatus::InProgress))?.into_iter()
-        .find(|task| owns(task)).map(|task| task.id).unwrap_or_else(|| "none".into());
+        .find(|task| owns(task)).map(|task| task.id);
     let mut held = tasks.list(Some(TaskStatus::Blocked))?.into_iter()
         .filter(|task| owns(task)).map(|task| task.id).collect::<Vec<_>>();
     held.sort();
@@ -1014,15 +1016,27 @@ pub(crate) fn render(
         queue.pending.join(" -> ")
     };
     let mut output = format!(
-        "Task queue for {} (revision {})\nCurrent: {current}\nHeld: {held}\nPending: {pending}",
-        worker.name, queue.revision
+        "Task queue for {} (revision {})\nCurrent: {}\nHeld: {held}\nPending: {pending}",
+        worker.name, queue.revision, current.as_deref().unwrap_or("none")
     );
     if queue.starting && queue.context_reset_from.is_some() {
         output.push_str(&format!("\nContext reset: waiting for fresh conversation (request {})",
             queue.context_reset_request.map(|id| id.to_string()).unwrap_or_else(|| "pending".into())));
     }
     if let Some(note) = queue.notes.last() {
-        output.push_str(&format!("\n{note}"));
+        let deferred = note.strip_prefix("Task queue deferred ")
+            .and_then(|entry| entry.split_once(": "));
+        if let Some((task_id, refusal)) = deferred
+            && refusal.ends_with("\n\n[G-13]")
+            && current.as_deref() == Some(task_id)
+            && agents.get_lease(task_id).is_ok_and(|lease| lease.is_some_and(|lease|
+                lease.agent_id == worker.id && lease.status == cas_types::LeaseStatus::Active
+                    && lease.expires_at > chrono::Utc::now()))
+        {
+            output.push_str(&format!("\nStart history: earlier queue refusal for {task_id} [G-13]"));
+        } else {
+            output.push_str(&format!("\n{note}"));
+        }
     }
     Ok(output)
 }

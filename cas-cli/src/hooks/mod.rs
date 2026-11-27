@@ -352,6 +352,8 @@ mod internal_llm_tests {
         assert!(agents.list(None).expect("agents").is_empty());
         let memories = crate::store::open_store(&cas_root).expect("memory store");
         assert!(memories.list().expect("memories").is_empty());
+        let prompts = crate::store::open_prompt_store(&cas_root).expect("prompt store");
+        assert!(prompts.list_by_session("nested-child-session", 10).unwrap().is_empty());
         let events = crate::store::open_event_store(&cas_root).expect("event store");
         assert!(
             events
@@ -361,8 +363,6 @@ mod internal_llm_tests {
             "nested SessionStart/UserPromptSubmit must emit neither registration nor memory activity"
         );
 
-        // The marker is the boundary, not the prompt shape: a real user turn
-        // still follows the ordinary memory path.
         env.remove(crate::internal_llm::INTERNAL_LLM_ENV);
         env.remove("CAS_AGENT_ROLE");
         env.remove("CAS_AGENT_NAME");
@@ -381,16 +381,19 @@ mod internal_llm_tests {
             },
         )
         .expect("real prompt hook");
-        let stored = memories.list().expect("stored memories");
-        assert_eq!(stored.len(), 1);
-        assert!(stored[0].content.contains("durable user memory capture"));
+        assert!(memories.list().expect("stored memories").is_empty());
+        let attributed = prompts.list_by_session("real-user-session", 10).unwrap();
+        assert_eq!(attributed.len(), 1);
+        assert_eq!(
+            attributed[0].content,
+            "Please implement durable user memory capture for this project."
+        );
         assert!(
             events
                 .list_recent(20)
                 .expect("real activity")
                 .iter()
-                .any(|event| event.summary.contains("Memory stored")),
-            "a real user prompt must retain the ordinary memory/activity path"
+                .all(|event| event.event_type != crate::types::EventType::MemoryStored)
         );
     }
 }

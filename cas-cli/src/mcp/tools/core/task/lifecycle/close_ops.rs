@@ -12630,22 +12630,21 @@ impl CasCore {
             SearchManifestGateOutcome::AppendWarningNote(note) => Some(note),
         };
 
-        // Every non-park transition to Closed owes persisted batch debt,
-        // including ProceedWithNote and paths without an assignee or surface.
         if let Err(message) = crate::qa_batch::ensure_deferred_close(
             &self.cas_root, &task, req.commit_receipt.as_deref(), commit_receipt_window.as_ref(),
         ) {
-            // cas-bc15: a live supervisor's reasoned override (validated
-            // above) answers deferred batch evidence, and the task records it.
-            if !supervisor_override {
+            if task.task_type != TaskType::Epic {
+                close_notes.record(&mut task, &crate::gates::tag("G-83", format!("Advisory: {message}")));
+            } else if !supervisor_override {
                 return Ok(Self::tool_error(crate::gates::tag("G-83", message)));
-            }
-            accepted_override_codes.push("G-83");
-            close_notes.record(&mut task, &format!(
+            } else {
+                accepted_override_codes.push("G-83");
+                close_notes.record(&mut task, &format!(
                 "[{}] ✅ DECISION supervisor_override waived deferred batch evidence ({message}): {}",
                 chrono::Utc::now().format("%Y-%m-%d %H:%M"),
                 req.reason.as_deref().unwrap_or_default().trim(),
-            ));
+                ));
+            }
         }
 
         let owner_train = crate::cloud::peer_mailbox::train_parks::owner_train(&self.cas_root, &task)

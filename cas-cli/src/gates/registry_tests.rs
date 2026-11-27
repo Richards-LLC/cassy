@@ -376,7 +376,7 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
         "name":"task", "arguments":{"action":"show", "id":"cas-does-not-exist"},
     })).unwrap();
     let response = client.call_tool(request).await;
-    assert!(response.as_ref().is_err_or(|answer| answer.is_error == Some(true)));
+    assert!(response.as_ref().map_or(true, |answer| answer.is_error == Some(true)));
     work.wait_idle().await;
     let uncoded = store.list_by_type(cas_types::EventType::GateRefused, 100).unwrap().into_iter()
         .find(|event| event.entity_id == UNCODED && event.metadata.as_ref().is_some_and(|m| m["task_id"] == "cas-does-not-exist"))

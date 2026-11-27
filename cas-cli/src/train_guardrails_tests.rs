@@ -178,13 +178,25 @@ fn production_cut_proposal_requires_pass_for_the_frozen_candidate() {
     tasks.update(&epic).unwrap();
     let recorder = open_agent_store(&cas_dir).unwrap().get("sup-id").unwrap();
     let artifacts = cas_store::SqliteArtifactStore::open(&cas_dir).unwrap();
-    std::fs::write(repo.join("capture.png"), include_bytes!("../../vendor/ghostty/images/icons/icon_16.png")).unwrap();
-    let receive = |head: &str, build: &str, passed: bool| {
+    // A real cas-0304 producer sweep, rebound to each build it is walked on.
+    let capture = include_bytes!("../../scripts/visual-qa-fixtures/batch-park/pass/127-0-0-1-52391-ranking-expanded-light-390x800.png");
+    std::fs::create_dir_all(repo.join("visual-qa")).unwrap();
+    std::fs::write(repo.join("unrelated.png"), capture).unwrap();
+    let sweep = |revision: &str| {
+        let mut report: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../../scripts/visual-qa-fixtures/batch-park/pass/visual-qa.json")).unwrap();
+        report["build"]["revision"] = revision.into();
+        report["generatedAt"] = Utc::now().to_rfc3339().into();
+        let name = report["screenshots"][1]["path"].as_str().unwrap().to_owned();
+        std::fs::write(repo.join("visual-qa").join(&name), capture).unwrap();
+        std::fs::write(repo.join("visual-qa/visual-qa.json"), report.to_string()).unwrap();
+        format!("visual-qa/{name}")
+    };
+    let receive = |head: &str, build: &str, cited: Option<&str>| {
         let ledger = repo.join("LEDGER.md");
-        let (count, row) = if passed {
-            ("PASS=1; NOT EXERCISED=0", "| M01 | browser | page visible (index.html:1) | visible: page | PASS | real-build | capture.png | - |")
-        } else {
-            ("PASS=0; NOT EXERCISED=1", "| M01 | browser | page visible | not run | NOT EXERCISED: browser unavailable | real-build | - | - |")
+        let (count, row) = match cited {
+            Some(capture) => ("PASS=1; NOT EXERCISED=0", format!("| M01 | /ranking/ [expanded] | Ranking visible | visible: Ranking | PASS | real-build | {capture} | - |")),
+            None => ("PASS=0; NOT EXERCISED=1", "| M01 | /ranking/ [expanded] | Ranking visible | not run | NOT EXERCISED: browser unavailable | real-build | - | - |".into()),
         };
         std::fs::write(&ledger, format!("schema: 2\nbuild: {build}\ncovers: cas-a\ncells=1; FAIL=0; {count}\nlabels: real-build=1\n{}\n{row}\n", crate::qa_ledger::HEADER)).unwrap();
         let context = crate::artifacts::PublishContext {
@@ -213,18 +225,25 @@ fn production_cut_proposal_requires_pass_for_the_frozen_candidate() {
     };
     refused();
     assert_eq!(propose(), 0);
-    receive(&stale, &stale, true).unwrap();
+    let walked = sweep(&stale);
+    receive(&stale, &stale, Some(walked.as_str())).unwrap();
     assert_eq!(propose(), 0);
-    assert!(receive(&candidate, &stale, true).unwrap_err().contains("PRODUCTION_BATCH_QA_BUILD_MISMATCH"));
-    assert!(receive(&candidate, &candidate, false).unwrap_err().contains("PRODUCTION_BATCH_QA_BROWSER_PASS_REQUIRED"));
-    receive(&candidate, &candidate, true).unwrap();
+    let browser_refusal = |cited: Option<&str>| receive(&candidate, &candidate, cited).unwrap_err()
+        .split_ascii_whitespace().next().map(str::to_owned);
+    assert!(receive(&candidate, &stale, Some(walked.as_str())).unwrap_err().contains("PRODUCTION_BATCH_QA_BUILD_MISMATCH"));
+    assert_eq!(browser_refusal(Some(walked.as_str())).as_deref(), Some("PRODUCTION_BATCH_QA_BROWSER_PASS_REQUIRED"), "a run of another build");
+    let walked = sweep(&candidate);
+    assert_eq!(browser_refusal(None).as_deref(), Some("PRODUCTION_BATCH_QA_BROWSER_PASS_REQUIRED"));
+    assert_eq!(browser_refusal(Some("unrelated.png")).as_deref(), Some("PRODUCTION_BATCH_QA_BROWSER_PASS_REQUIRED"), "an image outside the run");
+    receive(&candidate, &candidate, Some(walked.as_str())).unwrap();
     assert_eq!(propose(), 1);
     let base = run(repo, &["rev-parse", "main"]);
     let tree = run(repo, &["rev-parse", &format!("{candidate}^{{tree}}")]);
     let candidate_tree = cas_store::ProductionCandidate { base_sha: base.clone(), source_sha: candidate.clone(), tree };
     let synthetic = run(repo, &["commit-tree", &candidate_tree.tree, "-p", &base, "-p", &candidate,
         "-m", &format!("{}fixture", crate::mcp::tools::core::workflow::premerge_verification::CANDIDATE_COMMIT_PREFIX)]);
-    receive(&synthetic, &synthetic, true).unwrap();
+    let walked = sweep(&synthetic);
+    receive(&synthetic, &synthetic, Some(walked.as_str())).unwrap();
     crate::qa_batch::production::admit(&cas_dir, repo, "main", &candidate_tree, Some(&synthetic), None).unwrap();
     crate::qa_batch::production::admit(&cas_dir, repo, "main", &candidate_tree, None, None).unwrap();
     let moved = run(repo, &["commit-tree", &format!("{base}^{{tree}}"), "-p", &base, "-m", "advance production"]);

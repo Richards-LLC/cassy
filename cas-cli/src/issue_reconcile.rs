@@ -1169,8 +1169,8 @@ exit 0
         let actions: BTreeMap<String, IssueAction> = outcomes.iter().map(|o| (o.issue.clone(), o.action.clone())).collect();
         assert_eq!(actions, expected, "{outcomes:?}");
         let db = rusqlite::Connection::open(root.join("cas.db")).unwrap();
-        let observed_closures: u64 = db.query_row("SELECT count(DISTINCT json_extract(payload,'$.issue')) FROM efficiency_observations WHERE kind='issue_closed'", [], |r| r.get(0)).unwrap();
-        assert_eq!(observed_closures, expected.values().filter(|a| **a == IssueAction::Closed).count() as u64);
+        let observed_closures: i64 = db.query_row("SELECT count(DISTINCT json_extract(payload,'$.issue')) FROM efficiency_observations WHERE kind='issue_closed'", [], |r| r.get(0)).unwrap();
+        assert_eq!(observed_closures, expected.values().filter(|a| **a == IssueAction::Closed).count() as i64);
 
         let pending: Vec<&IssueOutcome> = outcomes.iter().filter(|o| o.action == IssueAction::Failed).collect();
         assert_eq!(pending.len(), 1, "exactly the exhausted close is pending: {outcomes:?}");

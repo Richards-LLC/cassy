@@ -396,7 +396,7 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     assert_ne!(response.is_error, Some(true));
     work.wait_idle().await;
     let db = rusqlite::Connection::open(dir.path().join("cas.db")).unwrap();
-    let recoveries: u64 = db.query_row("SELECT count(*) FROM efficiency_observations WHERE kind='refusal_recovered' AND observation_key=?1",
+    let recoveries: i64 = db.query_row("SELECT count(*) FROM efficiency_observations WHERE kind='refusal_recovered' AND observation_key=?1",
         [&refusal_id], |row| row.get(0)).unwrap();
     assert_eq!(recoveries, 1);
 

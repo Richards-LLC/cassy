@@ -310,7 +310,7 @@ pub(super) struct ReleaseContext {
     pub(super) repository: String,
     branch: String,
     integration: String,
-    release_commit: Option<String>,
+    pub(super) release_commit: Option<String>,
     first_child_commit: Option<String>,
     first_child_epoch: Option<i64>,
     landing_reminder: Option<i64>,
@@ -1816,6 +1816,38 @@ pub(super) mod tests {
             let historical = cut_scope(&root, repo, &final_sha, &track.version, Some(&train.id), None).unwrap();
             assert_eq!(&historical.reviewed_sha, stale);
             assert!(historical.proof_refs.iter().any(|proof| proof.receipt_id.as_deref() == Some(historical_verdict.as_str())));
+            let main = git(repo, &["rev-parse", "main"]).unwrap();
+            let wrap = |content: &str| git(repo, &["commit-tree", &format!("{content}^{{tree}}"),
+                "-p", &main, "-p", &final_sha, "-m", "queued release"]).unwrap();
+            let (queued, rewritten) = (wrap(&final_sha), wrap(stale));
+            let published = |checked: &str, tag_sha: &str| {
+                let mut context = new_context(repo, &train).unwrap();
+                context.release_commit = Some(final_sha.clone());
+                context.release_inputs = Some(serde_json::from_value(serde_json::json!({
+                    "checked_sha": checked, "included_task_ids": [child.id] })).unwrap());
+                let scope = super::super::release_adapters::tag_scope(
+                    &root, repo, Some(&context), &train.id, "v9.99.2", tag_sha, None).unwrap();
+                (scope.reviewed_sha, scope.proof_refs.into_iter().filter_map(|proof| proof.receipt_id).collect::<Vec<_>>())
+            };
+            let freeze = |tip: Option<&str>| {
+                let mut row = tasks.get(&train.id).unwrap();
+                row.labels.retain(|label| !label.starts_with("release-train-frozen:"));
+                row.labels.extend(tip.map(|tip| format!("release-train-frozen:1:{tip}")));
+                tasks.update(&row).unwrap();
+            };
+            for tip in [None, Some(stale.as_str())] {
+                freeze(tip);
+                assert_eq!(published(&final_sha, &queued), (final_sha.clone(), vec![]));
+            }
+            freeze(Some(&frozen));
+            for checked in [&final_sha, &frozen] {
+                for tag_sha in [&queued, &final_sha] {
+                    assert_eq!(published(checked, tag_sha), (frozen.clone(), vec![fresh.clone()]));
+                }
+            }
+            assert_eq!(published(stale, &queued), (queued.clone(), vec![]));
+            assert_eq!(published(&final_sha, &rewritten), (rewritten.clone(), vec![]));
+            freeze(None);
             let current = serde_json::to_value(current).unwrap();
             lag_one_column(&root);
             let live = || {

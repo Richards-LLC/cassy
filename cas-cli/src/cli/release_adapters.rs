@@ -123,7 +123,8 @@ pub(crate) fn reconcile_once(
 ) -> Result<String> {
     let tree = release_reconcile::final_tree(repo, &scope.final_release_sha).map_err(anyhow::Error::msg)?;
     let key = operation_key(&scope.project_id, &scope.release_id, &tree);
-    let recorded = reconciler.reusable(root, &key, &trigger)?;
+    let recorded = reconciler.reusable(root, &key, &trigger)?.filter(|receipt| receipt.complete
+        || (receipt.scope.reviewed_sha == scope.reviewed_sha && receipt.scope.proof_refs == scope.proof_refs));
     let reused = recorded.is_some();
     let receipt = match recorded {
         Some(receipt) => receipt,
@@ -239,6 +240,28 @@ fn reviewed_proofs(root: &Path, repo: &Path, project: &str, final_sha: &str, aud
     Ok((reviewed, proofs))
 }
 
+fn audited_candidate(root: &Path, repo: &Path, train_id: &str, release: &str, tag_sha: &str, checked: &str) -> Option<String> {
+    use cas_store::TaskStore;
+    let parents = |sha: &str| git(repo, &["rev-list", "--parents", "-n", "1", sha]).ok()
+        .map(|line| line.split_whitespace().skip(1).map(str::to_owned).collect::<Vec<_>>());
+    let tree = |sha: &str| git(repo, &["rev-parse", &format!("{sha}^{{tree}}")]).ok();
+    let shipped = release == tag_sha || {
+        let merge = parents(tag_sha)?;
+        merge.len() == 2 && merge.iter().any(|parent| parent == release) && tree(tag_sha)? == tree(release)?
+    };
+    let release_parents = parents(release).filter(|_| shipped)?;
+    if checked != release {
+        return (release_parents.first().map(String::as_str) == Some(checked)).then(|| checked.to_string());
+    }
+    let freeze = crate::qa_batch::release_close::read_tasks(root).ok()
+        .and_then(|tasks| tasks.get(train_id).ok())
+        .and_then(|train| crate::mcp::tools::core::workflow::release_freeze::recorded(&train));
+    Some(match release_parents.as_slice() {
+        [parent] if freeze.is_some_and(|freeze| &freeze.tip == parent) => parent.clone(),
+        _ => checked.to_string(),
+    })
+}
+
 /// A published tag's scope: the tracked cut receipt's when present, else the
 /// train, its tracked inputs and the reviewed candidate the tag contains.
 pub(super) fn tag_scope(
@@ -258,10 +281,14 @@ pub(super) fn tag_scope(
             .context("release has no GitHub origin")?,
     };
     let audit = cut_audit.or_else(|| context.and_then(|c| c.release_inputs.as_ref()));
-    let audited_sha = audit.map(|audit| audit.checked_sha.as_str()).filter(|checked| {
-        *checked == tag_sha || git(repo, &["rev-parse", &format!("{tag_sha}^1")]).ok().as_deref() == Some(*checked)
-    });
-    let (reviewed_sha, proof_refs) = reviewed_proofs(root, repo, &project_id, tag_sha, audited_sha)?;
+    let release = context.and_then(|c| c.release_commit.as_deref()).unwrap_or(tag_sha);
+    let (reviewed_sha, proof_refs) = match audit {
+        None => reviewed_proofs(root, repo, &project_id, tag_sha, None)?,
+        Some(audit) => match audited_candidate(root, repo, train_id, release, tag_sha, &audit.checked_sha) {
+            Some(reviewed) => reviewed_proofs(root, repo, &project_id, tag_sha, Some(&reviewed))?,
+            None => (tag_sha.to_string(), Vec::new()),
+        },
+    };
     let included_task_ids = audit
         .map(|inputs| inputs.included_task_ids.clone())
         .unwrap_or_default();
@@ -730,25 +757,23 @@ mod tests {
                 updated_at: String::new(),
                 complete: true,
                 sync_pending: Vec::new(),
-                residuals: vec![ReleaseResidual {
-                    task_id: "cas-0002".into(),
-                    gate: "QA_MISSING".into(),
-                    owner: "owner".into(),
-                    next_action: "record the batch QA receipt".into(),
-                }],
+                residuals: Vec::new(),
             }
         }
     }
 
     impl Reconciler for Recording {
         fn reusable(&self, _: &Path, key: &ReleaseOperationKey, _: &ReconcileTrigger) -> Result<Option<ReleaseReconcileReceipt>> {
-            Ok(self.done.borrow().iter().find(|r| &r.key == key).cloned())
+            let found = self.done.borrow().iter().find(|r| &r.key == key).cloned();
+            assert!(found.as_ref().is_none_or(|r| !r.complete || r.residuals.is_empty()), "unreachable completed release record");
+            Ok(found)
         }
         fn reconcile(&self, root: &Path, scope: &ReleaseScope, _: &ReleaseInventory, trigger: ReconcileTrigger) -> Result<ReleaseReconcileReceipt> {
             let tree = release_reconcile::final_tree(root.parent().unwrap(), &scope.final_release_sha).unwrap();
             let key = operation_key(&scope.project_id, &scope.release_id, &tree);
             self.calls.borrow_mut().push(trigger.clone());
             let receipt = self.receipt(key, scope, trigger);
+            self.done.borrow_mut().retain(|done| done.key != receipt.key);
             self.done.borrow_mut().push(receipt.clone());
             Ok(receipt)
         }
@@ -780,14 +805,13 @@ mod tests {
             reconcile_once(&root, repo, &scope("pr-4396"), promotion.clone(), &reconciler).unwrap();
         }
         reconcile_once(&root, repo, &scope("v9.99.2"), ReconcileTrigger::Installed, &reconciler).unwrap();
-        assert_eq!(*reconciler.calls.borrow(), vec![publish, promotion]);
+        assert_eq!(*reconciler.calls.borrow(), vec![publish.clone(), promotion.clone()]);
 
-        // One notice per release, naming each residual with owner and next action.
+        // One notice per release.
         let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|row| row.target == owner.name
-            && crate::supervisor_notices::is_action_envelope(&row.prompt)
-            && row.prompt.contains("cas-0002")));
+            && crate::supervisor_notices::is_action_envelope(&row.prompt)));
 
         // Replay the captured all-held incident and a mixed operation through
         // the real notice outbox. Counters are protocol data, not prose pins.
@@ -831,6 +855,30 @@ mod tests {
             assert_eq!(payload["context"]["closeout_counts"], expected);
         }
         assert_eq!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().len(), 5);
+
+        let tree = release_reconcile::final_tree(repo, &sha).unwrap();
+        let mut partial = reconciler.receipt(operation_key("release-fixture", "v9.99.3", &tree), &scope("v9.99.3"), publish.clone());
+        partial.members.insert("cas-0002".into(), CassyMergeClose::Held("QA_MISSING".into()));
+        partial.residuals = vec![ReleaseResidual {
+            task_id: "cas-0002".into(), gate: "QA_MISSING".into(),
+            owner: owner.id.clone(), next_action: "record the batch QA receipt".into(),
+        }];
+        partial.complete = false;
+        reconciler.done.borrow_mut().push(partial);
+        let mut rebound = scope("v9.99.3");
+        rebound.proof_refs.push(ReleaseProofRef {
+            kind: ReleaseProofKind::Qa, artifact_id: "art-frozen".into(), sha256: "a".repeat(64),
+            size_bytes: 1, reviewed_sha: sha.clone(), receipt_id: Some("qab-frozen".into()),
+        });
+        let republish = ReconcileTrigger::Publish { tag: "v9.99.3".into() };
+        reconcile_once(&root, repo, &scope("v9.99.3"), republish.clone(), &reconciler).unwrap();
+        assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().iter().any(|row|
+            row.target == owner.name && crate::supervisor_notices::is_action_envelope(&row.prompt)
+                && row.prompt.contains("cas-0002")));
+        for scope in [rebound.clone(), rebound, scope("v9.99.3")] {
+            reconcile_once(&root, repo, &scope, republish.clone(), &reconciler).unwrap();
+        }
+        assert_eq!(*reconciler.calls.borrow(), vec![publish, promotion, republish]);
     }
 
     /// The review ledger scaffold publishes both blocks for its scope, and #2's

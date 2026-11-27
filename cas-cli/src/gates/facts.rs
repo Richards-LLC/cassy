@@ -193,9 +193,6 @@ pub fn observe_refusal(cas_root: &Path, task_id: Option<&str>, text: &str) {
     }
 }
 
-/// Observe the one MCP router result shared by every tool. Only tagged
-/// refusals and tagged accepted overrides are gate facts; ordinary successful
-/// reads may quote historical codes without creating new facts.
 pub fn observe_tool_result(
     cas_root: &Path,
     arguments: Option<&serde_json::Map<String, serde_json::Value>>,

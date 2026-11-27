@@ -20,7 +20,6 @@ mod health;
 #[path = "ledger_window.rs"]
 mod window;
 
-/// `cas scorecard`: the per-release report.
 #[derive(Args)]
 pub struct ScorecardArgs {
     /// Release tag, vX.Y.Z. Omit for work since the last release.
@@ -1428,7 +1427,7 @@ fn render_spend(out: &mut String, report: &LedgerReport) {
 fn render(report: &LedgerReport) -> String {
     use std::fmt::Write;
     let mut out = String::new();
-    let state = if report.published { "" } else { " (in progress)" };
+    let state = if report.published || report.release == "window" { "" } else { " (in progress)" };
     let _ = writeln!(out, "Scorecard: {}{state}", report.release);
     let window = match (report.from, report.to) {
         (Some(from), Some(to)) => format!("{} to {}", when(from), when(to)),

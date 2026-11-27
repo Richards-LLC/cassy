@@ -5570,6 +5570,13 @@ alert during the hold; lifting it alone generates no stale READY backlog.
 
 ### Delivery detail in the scorecard
 
+For nightly measurements, use `cas scorecard --since <RFC3339> --until <RFC3339>`.
+The interval is `[since, until)` and both bounds are required, excluding
+`--release`. This mode reads local recorded rows only, without fetching Cloud or
+GitHub. Text and JSON include refusal calls per observed merge, supervisor wake
+latency per harness and issue-filing provenance. Closure receipts are counted by
+their update observation; actual issue close timestamps remain unknown.
+
 `cas scorecard --release vX.Y.Z` (alias `cas ledger report`) keeps review history per delivery cycle,
 with independent, supervisor-direct or unknown historical provenance. The check
 stage totals retain their release-time window; the dated review rows show the

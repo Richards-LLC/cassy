@@ -123,7 +123,34 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
         }
         let anchor = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-q", "main"]);
-        git(&["merge", "--no-ff", "-qm", "merge delivery", id]);
+        if id == "cas-redrafted" {
+            git(&["checkout", "-qb", "cas-assembly", &base]);
+            git(&["merge", "--no-ff", "-qm", "assemble reviewed source", id]);
+            let assembly = git(&["rev-parse", "HEAD"]);
+            let target = WorkTarget { repo_selector: "project:reverted".into(), target_branch: "main".into() };
+            let mut task = Task::new("cas-assembly".into(), "Reviewed assembly".into());
+            task.origin_project = Some("reverted".into());
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.work_target = Some(target.clone());
+            task.deliverables.factory_branch_anchor = Some(assembly.clone());
+            task.deliverables.factory_branch_start = Some(FactoryBranchStart {
+                work_target: target.clone(), branch: "cas-assembly".into(),
+                assignee: "worker".into(), base_sha: base.clone(),
+            });
+            task.deliverables.authorized_merge_sources.push(cas_types::AuthorizedMergeSource {
+                commit: anchor.clone(), supervisor_id: "supervisor".into(), work_target: target,
+            });
+            task.deliverables.premerge_approval = Some(cas_types::PortablePremergeApproval {
+                verdict_id: "ver-assembly".into(), dispatch_id: "vdispatch-assembly".into(),
+                approved_anchor: assembly.clone(), delivery_cycle: task.deliverables.delivery_cycle,
+            });
+            tasks.add(&task).unwrap();
+            anchors.insert(task.id, assembly);
+            git(&["checkout", "-q", "main"]);
+            git(&["merge", "--no-ff", "-qm", "land assembly", "cas-assembly"]);
+        } else {
+            git(&["merge", "--no-ff", "-qm", "merge delivery", id]);
+        }
         let merge = git(&["rev-parse", "HEAD"]);
         if matches!(id, "cas-doc-evolved" | "cas-doc-reverted" | "cas-doc-only") {
             // v4.28 cas-d725: an unrelated revert touched the generated
@@ -193,6 +220,12 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
             work_target: WorkTarget { repo_selector: "project:reverted".into(), target_branch: "main".into() },
             branch: id.into(), assignee: "worker".into(), base_sha: base,
         });
+        if id == "cas-redrafted" {
+            task.deliverables.premerge_approval = Some(cas_types::PortablePremergeApproval {
+                verdict_id: "ver-source".into(), dispatch_id: "vdispatch-source".into(),
+                approved_anchor: anchor.clone(), delivery_cycle: task.deliverables.delivery_cycle,
+            });
+        }
         tasks.add(&task).unwrap();
         tasks.record_merge_admission(id, &merge, cas_types::MergeCiAdmission::Green).unwrap();
         anchors.insert(id.to_string(), anchor);
@@ -260,6 +293,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     let unbound_inventory = resolve_release_inventory(&root, &repo, &unbound).unwrap();
     assert!(unbound_inventory.deliveries.iter().any(|d| d.task_id == "cas-ledger"));
     let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
+    assert!(inventory.deliveries.iter().any(|delivery| delivery.task_id == "cas-assembly"), "{:?}", inventory.exceptions);
     let preview = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let result = runtime.block_on(crate::release_reconcile::reconcile_release(
@@ -274,7 +308,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     assert_eq!(tasks.get("cas-doc-only").unwrap().status, TaskStatus::AwaitingMerge);
     assert!(matches!(result.members.get("cas-doc-only"), Some(CassyMergeClose::Held(reason))
         if reason == "RELEASE_CONTENT_UNPROVEN"), "{:?}", result.members.get("cas-doc-only"));
-    for id in ["cas-retained", "cas-redrafted", "cas-evolved", "cas-doc-evolved", "cas-superseded"] {
+    for id in ["cas-retained", "cas-redrafted", "cas-assembly", "cas-evolved", "cas-doc-evolved", "cas-superseded"] {
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::Closed, "{id}: {:?}", result.members.get(id));
     }
     for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone", "cas-doc-evolved", "cas-doc-reverted", "cas-doc-only"] {

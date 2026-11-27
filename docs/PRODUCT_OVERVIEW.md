@@ -1264,6 +1264,8 @@ On a Codex supervisor, the typed `/reload-cassy` confirmation keeps its focused 
 
 - **Heavy and taste worker routing** — Heavy defaults to Claude Opus 5.5 at `xhigh`; taste remains on Claude Fable 5.2 at `high`. Explicit recipes accept supported effort levels without changing lane defaults.
 
+On a fresh macOS installation, bare `cas` points the user to `cas setup` even if the installer has already created local signing state. A configured host or project still takes the factory launch path.
+
 ## Authoritative Sources
 
 Delivery checks use observable behavior and stable error or rule identifiers.

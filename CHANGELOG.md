@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.59.1] - 2026-11-27
+
+### Fixed — CLI
+
+- **Fresh macOS installations show setup guidance** — Was: local code signing made bare `cas` try to launch factory mode on an unconfigured machine. Now: signing-only state still shows the first-run setup hint.
+
 ## [4.59.0] - 2026-11-27
 
 ### Fixed — Factory

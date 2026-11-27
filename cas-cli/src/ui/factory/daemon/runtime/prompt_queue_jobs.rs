@@ -258,6 +258,9 @@ impl QueueStamp {
             }
             Self::UndeliveredRelay { notice } => {
                 let Some(original) = queue.queued_prompt(row)? else { return Ok(()); };
+                if queue.suppress_observed_blocker_replay(&original)? {
+                    return Ok(());
+                }
                 // Lifecycle sources are synthetic, so a sender abandonment
                 // notice cannot tell the supervisor. Persist its action first;
                 // a failed write leaves the original pending, and replay after

@@ -102,6 +102,9 @@ async fn resumed_blocker_replay(env: &mut crate::test_support::TestEnvGuard, cas
     } else {
         renewed
     };
+    assert_eq!(cas_types::parse_lifecycle_envelope(&replay.prompt).unwrap().occurrence, occurrence, "{case}");
+    assert_eq!(replay.target, lead.name, "{case}");
+    assert_eq!(replay.factory_session, lead.factory_session, "{case}");
 
     // Resume clears the structured hold. A stale reconciler still holds the
     // old Blocked emission; its fallback event timestamp creates a new key.
@@ -124,9 +127,13 @@ async fn resumed_blocker_replay(env: &mut crate::test_support::TestEnvGuard, cas
             tokio::task::yield_now().await;
         }
     }).await.unwrap();
-    assert_eq!(queue.message_delivery_report(replay.id).unwrap().unwrap().stage, DeliveryStage::Suppressed);
+    let replay_report = queue.message_delivery_report(replay.id).unwrap().unwrap();
+    assert_eq!(replay_report.stage, DeliveryStage::Suppressed);
+    assert_eq!(replay_report.delivered_at, None);
+    assert_eq!(queue.queued_prompt(replay.id).unwrap().unwrap().acked_at, None);
     assert_eq!(queue.recipient_receipt(replay.id, &name).unwrap(), None);
     assert!(queue.list_undelivered_lifecycle_relays(10).unwrap().is_empty());
+    assert_eq!(queue.undelivered_lifecycle_relay_count().unwrap(), 0);
     assert!(queue.peek_all(10).unwrap().iter().all(|row| row.source != "delivery-watchdog"));
     assert_eq!(queue.message_delivery_report(original.id).unwrap().unwrap().stage, DeliveryStage::Confirmed);
 

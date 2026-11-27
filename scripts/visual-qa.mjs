@@ -1322,9 +1322,16 @@ async function openVisualPage(page, url, options) {
     throw new Error('The candidate entry document must be served by the swept origin.');
   }
   const documentHandle = await page.evaluateHandle(() => document);
-  const entry = await page.evaluate(() => [...document.querySelectorAll('script[type="module"][src]')].map(script => script.src));
-  const main = entry.length === 1 && scripts.get(entry[0]);
-  if (!main || new URL(main.url()).origin !== origin) throw new Error('The candidate main module was not loaded from the swept origin.');
+  const entry = await page.evaluate(() => {
+    const modules = [...document.scripts].some(script => script.type.trim().toLowerCase() === 'module');
+    const declarations = modules ? [...document.querySelectorAll('script[type="module"][src]')] :
+      [...document.querySelectorAll('script[src]')].filter(script => !script.type.trim() ||
+        /^(?:(?:application|text)\/(?:x-)?(?:java|ecma)script|text\/(?:javascript1\.[0-5]|jscript|livescript))$/i.test(script.type.trim()));
+    return { modules, urls: declarations.map(script => script.src) };
+  });
+  const loaded = entry.modules ? entry.urls : entry.urls.filter(url => scripts.has(url));
+  const main = loaded.length === 1 && scripts.get(loaded[0]);
+  if (!main || new URL(main.url()).origin !== origin) throw new Error('The candidate entry script was not loaded from the swept origin.');
   const receipt = await page.evaluate(async () => {
     const response = await fetch('/RECEIPT.json', { cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(5000) });
     if (!response.ok) throw new Error('The swept build root did not serve RECEIPT.json.');

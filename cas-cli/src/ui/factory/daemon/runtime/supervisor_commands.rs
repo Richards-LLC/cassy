@@ -446,7 +446,8 @@ pub(super) fn supervisor_transcript(cas_dir: &std::path::Path, session: &str, su
                     .and_then(|file| std::io::BufRead::lines(std::io::BufReader::new(file)).next())
                     .and_then(Result::ok)
                     .and_then(|line| serde_json::from_str::<serde_json::Value>(&line).ok())
-                    .is_some_and(|row| row["type"] == "session_meta" && row["payload"]["id"].as_str() == Some(native)),
+                    .is_some_and(|row| row["type"] == "session_meta"
+                        && row["payload"].get("id").or_else(|| row["payload"].get("session_id")).and_then(serde_json::Value::as_str) == Some(native)),
             );
             if path.is_some() { return path; }
         }

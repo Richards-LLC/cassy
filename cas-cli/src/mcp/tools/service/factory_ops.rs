@@ -3653,6 +3653,7 @@ impl CasService {
                     format!("Failed to queue spawn request: {e}"),
                 )
             })?;
+        super::mutation_receipt::spawn_queued(request_id);
 
         // cas-ea9c (GH #1005): prefetch the issues the pre-assigned task
         // cites while the worker boots. The supervisor holds the GitHub

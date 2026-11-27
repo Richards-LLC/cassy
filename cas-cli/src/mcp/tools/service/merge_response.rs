@@ -1,4 +1,4 @@
-//! A slow merge keeps its execution and its outcome after the MCP reply.
+//! Durable responses for slow factory merges and spawn admissions.
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,19 +12,21 @@ type ToolResult = Result<CallToolResult, rmcp::ErrorData>;
 type Joined = Result<ToolResult, tokio::task::JoinError>;
 
 #[derive(Clone)]
-pub(super) struct MergeReceipt {
+pub(super) struct MutationResponseReceipt {
     id: String,
     path: PathBuf,
     task: Option<String>,
     source: Option<String>,
+    spawn: bool,
 }
 
-impl MergeReceipt {
-    pub(super) fn begin(root: &Path, arguments: Option<&serde_json::Map<String, Value>>) -> std::io::Result<Self> {
+impl MutationResponseReceipt {
+    pub(super) fn begin(root: &Path, arguments: Option<&serde_json::Map<String, Value>>, spawn: bool) -> std::io::Result<Self> {
         let id = uuid::Uuid::new_v4().to_string();
         let get = |key| arguments.and_then(|args| args.get(key)).and_then(Value::as_str).map(str::to_string);
-        let receipt = Self { path: root.join("merge-receipts").join(format!("{id}.json")), id,
-            task: get("task_id"), source: get("id") };
+        let directory = if spawn { "spawn-receipts" } else { "merge-receipts" };
+        let receipt = Self { path: root.join(directory).join(format!("{id}.json")), id,
+            task: get("task_id"), source: get("id"), spawn };
         receipt.save(json!({"state":"preparing", "mutation_outcome":"IN_PROGRESS"}))?;
         Ok(receipt)
     }
@@ -49,6 +51,17 @@ impl MergeReceipt {
             Ok(Err(error)) => json!({"error":error}),
             Err(error) => json!({"handler_error":error.to_string()}),
         };
+        if self.spawn {
+            let request_id = receipt.spawn_request_id.get();
+            let outcome = match (request_id, joined) {
+                (Some(_), _) => "COMMITTED",
+                (None, Ok(Err(_))) => "NOT_ADMITTED",
+                (None, Ok(Ok(result))) if result.is_error == Some(true) => "NOT_ADMITTED",
+                (None, _) => "UNKNOWN",
+            };
+            return self.save(json!({"state":"completed", "result":result,
+                "mutation_outcome":outcome, "request_id":request_id}));
+        }
         self.save(json!({"state":"completed", "result":result, "task_status":task_status,
             "mutation_outcome":if receipt.commit.get().is_some() { "COMMITTED" } else { "NOT_COMMITTED" },
             "commit":receipt.commit.get().map(|commit| &commit.description),
@@ -56,6 +69,19 @@ impl MergeReceipt {
     }
 
     pub(super) fn answer(&self, receipt: &Receipt) -> CallToolResult {
+        if self.spawn {
+            let request_id = receipt.spawn_request_id.get();
+            let (outcome, state, detail) = match request_id {
+                Some(id) => ("COMMITTED", "queued", format!("Spawn request {id} is queued, not confirmed running. Use worker_status to check launch.")),
+                None => ("IN_PROGRESS", "preparing", "Spawn admission is not yet confirmed.".to_owned()),
+            };
+            let mut answer = CallToolResult::success(vec![ContentBlock::text(format!(
+                "{outcome}: {detail} Read receipt {} for the outcome; do not retry.", self.path.display()
+            ))]);
+            answer.structured_content = Some(json!({"mutation_outcome":outcome, "state":state,
+                "receipt_id":self.id, "receipt_path":self.path, "task_id":self.task, "request_id":request_id}));
+            return answer;
+        }
         let committed = receipt.commit.get();
         let outcome = if committed.is_some() { "COMMITTED" } else { "IN_PROGRESS" };
         let state = if committed.is_some() { "merged" } else { "preparing" };
@@ -73,6 +99,15 @@ impl MergeReceipt {
         tokio::spawn(async move {
             let _work = work;
             let joined = handle.await;
+            if self.spawn {
+                if let Err(error) = tokio::task::spawn_blocking(move || self.finish(&joined, &receipt, None))
+                    .await.map_err(|error| error.to_string())
+                    .and_then(|saved| saved.map_err(|error| error.to_string()))
+                {
+                    tracing::warn!(%error, "Spawn outcome receipt could not be updated");
+                }
+                return;
+            }
             let summary = super::server_handler::late_close_summary(&joined);
             let recorded = tokio::task::spawn_blocking(move || -> Result<(), String> {
                 let status = self.task.as_deref().and_then(|task| {

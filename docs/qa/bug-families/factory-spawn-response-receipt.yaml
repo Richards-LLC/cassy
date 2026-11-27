@@ -1,0 +1,4 @@
+title: Slow factory spawn preserves its admission receipt
+statement: A spawn request that outlives the MCP deadline returns a readable receipt. That receipt identifies the original queue admission without adding another request or claiming the worker has registered.
+tasks: [cas-b5f3]
+journeys: [FACTORY-SPAWN]

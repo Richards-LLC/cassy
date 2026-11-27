@@ -757,12 +757,7 @@ mod tests {
                 updated_at: String::new(),
                 complete: true,
                 sync_pending: Vec::new(),
-                residuals: vec![ReleaseResidual {
-                    task_id: "cas-0002".into(),
-                    gate: "QA_MISSING".into(),
-                    owner: "owner".into(),
-                    next_action: "record the batch QA receipt".into(),
-                }],
+                residuals: Vec::new(),
             }
         }
     }
@@ -812,12 +807,11 @@ mod tests {
         reconcile_once(&root, repo, &scope("v9.99.2"), ReconcileTrigger::Installed, &reconciler).unwrap();
         assert_eq!(*reconciler.calls.borrow(), vec![publish.clone(), promotion.clone()]);
 
-        // One notice per release, naming each residual with owner and next action.
+        // One notice per release.
         let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|row| row.target == owner.name
-            && crate::supervisor_notices::is_action_envelope(&row.prompt)
-            && row.prompt.contains("cas-0002")));
+            && crate::supervisor_notices::is_action_envelope(&row.prompt)));
 
         // Replay the captured all-held incident and a mixed operation through
         // the real notice outbox. Counters are protocol data, not prose pins.
@@ -864,6 +858,11 @@ mod tests {
 
         let tree = release_reconcile::final_tree(repo, &sha).unwrap();
         let mut partial = reconciler.receipt(operation_key("release-fixture", "v9.99.3", &tree), &scope("v9.99.3"), publish.clone());
+        partial.members.insert("cas-0002".into(), CassyMergeClose::Held("QA_MISSING".into()));
+        partial.residuals = vec![ReleaseResidual {
+            task_id: "cas-0002".into(), gate: "QA_MISSING".into(),
+            owner: owner.id.clone(), next_action: "record the batch QA receipt".into(),
+        }];
         partial.complete = false;
         reconciler.done.borrow_mut().push(partial);
         let mut rebound = scope("v9.99.3");
@@ -872,7 +871,11 @@ mod tests {
             size_bytes: 1, reviewed_sha: sha.clone(), receipt_id: Some("qab-frozen".into()),
         });
         let republish = ReconcileTrigger::Publish { tag: "v9.99.3".into() };
-        for scope in [scope("v9.99.3"), rebound.clone(), rebound, scope("v9.99.3")] {
+        reconcile_once(&root, repo, &scope("v9.99.3"), republish.clone(), &reconciler).unwrap();
+        assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().iter().any(|row|
+            row.target == owner.name && crate::supervisor_notices::is_action_envelope(&row.prompt)
+                && row.prompt.contains("cas-0002")));
+        for scope in [rebound.clone(), rebound, scope("v9.99.3")] {
             reconcile_once(&root, repo, &scope, republish.clone(), &reconciler).unwrap();
         }
         assert_eq!(*reconciler.calls.borrow(), vec![publish, promotion, republish]);

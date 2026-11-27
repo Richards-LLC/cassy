@@ -706,6 +706,7 @@ async fn processed_shutdown_stops_idle_claude_and_codex_workers_under_a_spent_bu
         daemon.process_pending_spawns().await;
     }
     lock.join().unwrap();
+    for _ in 1..pids.len() { daemon.process_pending_spawns().await; }
 
     for (name, pid) in &pids {
         assert!(

@@ -597,20 +597,15 @@ async fn repeat_review_every_entry_refuses_g172_gh2373() {
 
     let path = receipt.with_file_name("whole-flow-review.md");
     std::fs::write(&path, "| Actor | Operation | Design | Observed |\n| --- | --- | --- | --- |\n| Owner | Abort | Can abort an open run | Unreachable |\n| Queue | Claim | Only current generation | Stale generation admitted |\n\n## Mismatches\n\n- Owner cannot abort an open run.\n- Queue admits a stale generation.\n").unwrap();
-    let review = link_repeat_review_gh2373(&f, id, &path).await;
+    link_repeat_review_gh2373(&f, id, &path).await;
     call(&f.supervisor, request).await;
     assert_eq!(f.task(id).status, TaskStatus::Open);
-    let checkout = f.cas_dir().join("worktrees").join(WORKER);
-    let mut registration = agents.get("nocode-worker-session").unwrap();
-    registration.metadata.insert("clone_path".into(), checkout.display().to_string());
-    agents.update(&registration).unwrap();
     env.set("CAS_AGENT_ROLE", "worker");
-    f.worker.coordination(Parameters(serde_json::from_value(serde_json::json!({
-        "action":"inbox_poll",
-    })).unwrap())).await.unwrap();
-    let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
-    assert_eq!(f.task(id).status, TaskStatus::InProgress);
-    assert!(started.contains(&review));
+    let retired = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"start", "id":id,
+    })).unwrap())).await;
+    assert!(retired.is_err());
+    assert_eq!(f.task(id).status, TaskStatus::Open);
 }
 
 #[tokio::test]

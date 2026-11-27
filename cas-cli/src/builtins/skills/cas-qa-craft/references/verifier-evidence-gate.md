@@ -25,42 +25,19 @@ incomplete receipt and list omitted demos as owed work. Apply Step 0A to this on
 combined matrix, not per child; a cross-child contradiction in the captures is a
 defect. Never rerun QA or substitute the children's ledgers for the batch round.
 
-### Step 0A: Apply the QA evidence gate before any judgment
+### Step 0A: Read delivery evidence
 
-1. Locate the task's `LEDGER.md` (`~/.cas/artifacts/<project-key>/<task-id>/`, or the
-   evidence directory the dispatch names). A close reason never substitutes for
-   the ledger. In `qa.mode=batch`, a missing task ledger is owed to the release batch receipt; record NOT VERIFIED with that owner, never reject. Otherwise, if the file is absent, reject with this exact
-   summary: `QA evidence required: task has a demo_statement but no LEDGER.md`.
-   Record that rejection with `verification action=add` and stop.
-2. Run `cas qa ledger check <path> --task <id> --json` (the parser close also
-   uses). A nonzero exit rejects the ledger before capture judgment: list each
-   returned line, row ID, field and message in the verification summary, record
-   rejection, and stop. Use the candidate revision's command when reviewing a
-   change to the parser itself.
-3. Keep the JSON report. Schema 2 requires cited `path:line` expectations and
-   `visible:`, `terminal:` or `http:` outcomes; DB-only PASSes fail. Legacy receipts remain valid.
+Fixture and integration receipts are sufficient proof of changed behavior.
+Read the available ledger and captures, check cited contracts, and use
+`cas qa ledger check <path> --task <id> --json` when a ledger is supplied.
+A delivery does not require a real-build walk, browser rows or a supervisor
+call for missing captures. Reject an observed behavioral defect or unmet
+acceptance criterion; record missing or misleading evidence honestly.
 
-4. Open every PASS capture and its cited source line. Judge the visible result
-   against that source: database rows, charges or a stored draft cannot prove what
-   the user sees. An unsupported expectation is a spec question. Record misleading
-   PASSes as FAIL with capture path and reason; never edit the worker's ledger.
-   Treat any evidence label weaker than the cell requires as `NOT EXERCISED: <reason>`,
-   never as `PASS`.
-5. `NOT EXERCISED` rows are owed work, not failures. List every row's final
-   verdict, label and capture judgment with the shared-check result.
-6. Only then read the close reason. A capture-downgraded row or a ledger `FAIL`
-   is incomplete evidence whatever the close reason says.
-
-### NOT EXERCISED rows: apply the configured QA owner
-
-Apply Step 0's `qa.mode` policy: in `qa.mode=batch`, record each journey row
-deferred solely to release batch QA by row ID, cell and owner; that approval
-does not claim the journey passed or satisfy the batch receipt. Every other
-`NOT EXERCISED` row (per_task mode, missing captures, unavailable environments,
-unclear ownership, rows you downgraded) needs the supervisor: when the gate
-otherwise passes, record `status=supervisor_call` with a summary starting
-`SUPERVISOR CALL: <n> NOT EXERCISED row(s)` listing each row ID, cell and reason.
-The supervisor answers on the same `dispatch_id`; no re-dispatch is needed.
+List `NOT EXERCISED` rows with their reasons and proof owners in the verdict.
+They do not require a supervisor decision. Release batch QA owns live journey
+walks; the independent review examines available screenshots. Missing
+screenshots warn. Epic release evidence follows the prerequisites above.
 
 ## Measurable claims: same-command baseline and treatment
 

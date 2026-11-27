@@ -362,13 +362,6 @@ pub(crate) fn owners(repo: &Path, head: &str, tests: &[Identity]) -> Result<BTre
     Ok(owners)
 }
 
-pub(in crate::factory_worker_check) fn parameterized_tests(repo: &Path, head: &str, tests: &[Identity]) -> Result<Vec<Test>> {
-    let paths = tests.iter().filter(|test| test.path.ends_with(".rs")).map(|test| test.path.clone())
-        .collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
-    Ok(inventory(repo, head, &paths)?.0.into_iter()
-        .filter(|test| test.parameterized && tests.contains(&test.identity)).collect())
-}
-
 pub(crate) fn changed(repo: &Path, base: &str, head: &str, paths: &[String]) -> Result<Vec<Test>> {
     Discovery::default().changed(repo, base, head, paths)
 }

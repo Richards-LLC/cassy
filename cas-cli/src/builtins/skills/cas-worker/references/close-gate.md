@@ -109,12 +109,9 @@ light/dark). Missing screenshots warn.
 
 ## Conditional evidence
 
-- [Batch QA](details.md#batch-qa) (the default) owns the walk; per-task QA
-  evidence applies only in qa.mode=per_task. There, for a demo, configured
-  user-facing path or a journey the impact names, use `cas-qa-craft` before parking and cite its commit-bound bundle or real-build ledger, run on an
-  exact-tip candidate from `factory action=candidate_request`. Terminal paths
-  also need `cas-cli-craft`'s `terminal-qa: PASS`. Docs/test/CI-only deliveries
-  need no visual QA.
+- [Batch QA](details.md#batch-qa) (the default) owns the walk; delivery evidence is advisory at close. Fixture and integration receipts
+  prove changed behavior; missing live walks and batch receipts warn.
+  Independent review owns available screenshots.
 - Human-facing output: put the `design:` line from
   [DESIGN.md first](../../design-spec/references/design-md-first.md#5-record-it)
   in the close reason.

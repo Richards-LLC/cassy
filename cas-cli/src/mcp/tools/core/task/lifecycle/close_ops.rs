@@ -9857,6 +9857,11 @@ impl CasCore {
                         close_notes.record(&mut task, &note);
                     }
                 }
+                Err(message) if task.task_type != TaskType::Epic
+                    && crate::gates::codes_in(&message).contains(&"G-53") => {
+                    close_notes.record(&mut task, &format!("Advisory: {message}"));
+                    registry_upkeep_notices.push(message);
+                }
                 Err(message) if supervisor_override => {
                     accepted_override_codes.push("G-53");
                     close_notes.record(

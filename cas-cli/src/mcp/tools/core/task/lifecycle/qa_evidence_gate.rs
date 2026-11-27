@@ -798,7 +798,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     if batch_defer {
         cas_store::defer_qa_batch_evidence(cas_root, &task.id, &head)
             .map_err(|e| format!("QA EVIDENCE REJECTED: cannot record batch deferral: {e}"))?;
-        pass.notes.push(format!("QA batch evidence deferred: task={} head={head}; staging receipt required before close", task.id));
+        pass.notes.push(format!("QA batch evidence deferred: task={} head={head}; release QA owns the staging receipt; delivery close continues", task.id));
     }
     if let Some(receipt) = batch_receipt {
         if receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA {

@@ -390,12 +390,12 @@ async fn recovered_close_counts_supervisor_module_receipts_cas_231c() {
 }
 
 #[tokio::test]
-async fn cassy_merge_close_warns_for_missing_worker_receipts_cas_e9d6() {
+async fn cassy_merge_close_warns_for_missing_delivery_evidence_cas_e9d6() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env);
     std::fs::write(
         f.cas_dir().join("config.toml"),
-        format!("[project]\ncanonical_id=\"{PROJECT}\"\n"),
+        format!("[project]\ncanonical_id=\"{PROJECT}\"\n[qa]\nmode=\"batch\"\nevidence_gate=true\n"),
     )
     .unwrap();
     let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
@@ -432,6 +432,7 @@ async fn cassy_merge_close_warns_for_missing_worker_receipts_cas_e9d6() {
     assert_eq!(f.task().status, TaskStatus::Blocked);
     env.set("CAS_AGENT_ROLE", "supervisor");
     let verification = cas_store::get_verification_for_dispatch(&f.cas_dir(), &dispatch.id).unwrap().unwrap();
+    cas_store::defer_qa_batch_evidence(&f.cas_dir(), ID, &tip).unwrap();
     std::fs::remove_dir_all(f.cas_dir().join("worker-checks")).unwrap();
     let mut unproven = f.task();
     unproven.deliverables.test_receipts.clear();
@@ -441,7 +442,9 @@ async fn cassy_merge_close_warns_for_missing_worker_receipts_cas_e9d6() {
     let closed = f.task();
     assert_eq!(closed.status, TaskStatus::Closed);
     assert!(closed.notes.contains("Cassy close authority"), "{}", closed.notes);
-    assert!(crate::gates::codes_in(&closed.notes).contains(&"G-61"));
+    for code in ["G-61", "G-53"] {
+        assert!(crate::gates::codes_in(&closed.notes).contains(&code), "{}", closed.notes);
+    }
 }
 
 #[tokio::test]

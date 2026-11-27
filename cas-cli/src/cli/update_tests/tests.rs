@@ -353,14 +353,16 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
         .map(|name| {
             let project = projects.join(name);
             std::fs::create_dir_all(&project).unwrap();
-            assert!(
-                std::process::Command::new("git")
-                    .args(["init", "--quiet"])
-                    .arg(&project)
-                    .status()
-                    .unwrap()
-                    .success()
+            cas_6718_git(&project, &["init", "-q", "-b", "main"]);
+            cas_6718_git(&project, &["config", "init.defaultBranch", "main"]);
+            cas_6718_git(
+                &project,
+                &[
+                    "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "--allow-empty", "-qm", "project baseline",
+                ],
             );
+            cas_6718_git(&project, &["checkout", "-qb", "repair/violet-proxy"]);
             crate::store::init_cas_dir(&project).unwrap()
         })
         .collect();

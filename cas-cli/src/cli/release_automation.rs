@@ -1743,7 +1743,7 @@ pub(super) mod tests {
             None,
             Some("[factory]\nrelease_train=true\nmax_concurrent_builders=2\n"),
         ] {
-            let (temp, root, train, _owner, track) = fixture();
+            let (temp, root, train, owner, track) = fixture();
             match config {
                 Some(contents) => fs::write(root.join("config.toml"), contents).unwrap(),
                 None => fs::remove_file(root.join("config.toml")).unwrap(),
@@ -1751,41 +1751,70 @@ pub(super) mod tests {
             let identity = crate::cloud::resolve_canonical_id(&root).unwrap();
             let policy = crate::config::Config::load(&root).unwrap().factory();
             let config_before = fs::read(root.join("config.toml")).ok();
+            let repo = temp.path();
+            let _cwd = env.enter_dir(repo);
             let mut child = Task::new("cas-a002".into(), "Child".into());
             child.status = TaskStatus::AwaitingMerge;
+            child.origin_project = Some(identity.clone());
+            child.assignee = Some("implementer".into());
+            child.deliverables.work_target = Some(WorkTarget {
+                repo_selector: "remote:github.com/example/repo".into(),
+                target_branch: train.branch.clone().unwrap(),
+            });
             child.deliverables.factory_branch_anchor = Some(track.commit.clone());
             let tasks = open_task_store(&root).unwrap();
             tasks.add(&child).unwrap();
             tasks.add_dependency(&Dependency::new(child.id.clone(), train.id.clone(), DependencyType::ParentChild)).unwrap();
-            let repo = temp.path();
-            let final_sha = git(repo, &["commit-tree", &format!("{}^{{tree}}", track.commit),
-                "-p", &track.commit, "-m", "release: v9.99.2"]).unwrap();
+            let member_ids = [child.id.clone()];
+            let artifacts = cas_store::SqliteArtifactStore::open(&root).unwrap();
+            let publish = crate::artifacts::PublishContext {
+                store: &artifacts,
+                roots: crate::artifacts::paths::PublishRoots::new(&root, &repo.join("artifacts"), &child.id),
+                task_id: child.id.clone(), cloud: None,
+            };
+            let record = |staging: &str, schema: u32| {
+                let ledger = repo.join(format!("qa-{staging}-{schema}.md"));
+                let capture = format!("staging-{staging}.txt");
+                fs::write(repo.join(&capture), git(repo, &["show", "-s", "--format=%H", staging]).unwrap()).unwrap();
+                fs::write(&ledger, format!(concat!(
+                    "# QA evidence\n\nschema: 2\ncovers: {}\nbuild: {}\nscope: Release delivery\nsurface: Git fixture\nbudget: 1 minute\n",
+                    "cells=1; PASS=1; FAIL=0; NOT EXERCISED=0; NOT A ROUTE=0\nlabels: fixture=1\nsweep: not configured\n\n",
+                    "{}\n| --- | --- | --- | --- | --- | --- | --- | --- |\n",
+                    "| M01 | Delivery | Commit is on staging | Delivery commit is the staging tip | PASS | fixture | {} | - |\n",
+                ), member_ids[0], staging, crate::qa_ledger::HEADER, capture)).unwrap();
+                let artifact = crate::artifacts::publish(&publish, &ledger).unwrap().artifact;
+                let receipt = crate::qa_batch::prepare_receipt(&root, &owner, "independent-reviewer", &member_ids,
+                    staging, &artifact.id, &ledger, schema).unwrap();
+                assert_eq!(receipt.task_heads[&member_ids[0]], staging);
+                cas_store::record_qa_batch_receipt(&root, &receipt).unwrap();
+                receipt.id
+            };
+            let stale = &track.commit;
+            let historical_verdict = record(stale, cas_store::RELEASE_VERDICT_SCHEMA);
+            record(stale, cas_store::QA_BATCH_RECEIPT_SCHEMA);
+            fs::write(repo.join("delivery.txt"), "revised delivery\n").unwrap();
+            git(repo, &["add", "delivery.txt"]).unwrap();
+            git(repo, &["commit", "-m", "revise child delivery"]).unwrap();
+            let frozen = git(repo, &["rev-parse", "HEAD"]).unwrap();
+            child.deliverables.factory_branch_anchor = Some(frozen.clone());
+            tasks.update(&child).unwrap();
+            let final_sha = git(repo, &["commit-tree", &format!("{frozen}^{{tree}}"),
+                "-p", &frozen, "-m", "release: v9.99.2"]).unwrap();
             let inputs = root.join("release-inputs.json");
-            fs::write(&inputs, serde_json::json!({ "checked_sha": track.commit, "included_task_ids": [child.id] }).to_string()).unwrap();
-            let stale = git(repo, &["rev-parse", &format!("{}^1", track.commit)]).unwrap();
-            for (id, staging_sha, schema_version) in [
-                ("qab-stale", stale.clone(), cas_store::RELEASE_VERDICT_SCHEMA),
-                ("qab-current", track.commit.clone(), cas_store::QA_BATCH_RECEIPT_SCHEMA),
-            ] {
-                cas_store::import_qa_batch_receipt(&root, &cas_store::QaBatchReceipt {
-                    id: id.into(), schema_version, project_id: identity.clone(), staging_sha,
-                    ledger_artifact_id: format!("art-{id}"), ledger_path: "/peer/qa.md".into(),
-                    ledger_sha256: "a".repeat(64), ledger_size_bytes: 10,
-                    task_heads: BTreeMap::from([(child.id.clone(), track.commit.clone())]),
-                    recorder_agent_id: "supervisor".into(), recorded_at: "2026-11-11T00:00:00Z".into(),
-                    release_tag: None, ledger_author_id: Some("reviewer".into()), ledger_author_role: Some("sub_agent".into()),
-                    author_overrides: BTreeMap::new(), imported: true,
-                }).unwrap();
-            }
+            fs::write(&inputs, serde_json::json!({ "checked_sha": frozen, "included_task_ids": [child.id] }).to_string()).unwrap();
             let args = PreviewArgs { scope: None, commit: Some(final_sha.clone()),
                 version: Some(track.version.clone()), inputs: Some(inputs), train: Some(train.id.clone()) };
-            let _cwd = env.enter_dir(temp.path());
+            let stale_only = preview_release_close(&args, &root).unwrap();
+            assert_eq!(stale_only.scope.reviewed_sha, frozen);
+            assert!(stale_only.scope.proof_refs.is_empty());
+            let fresh = record(&frozen, cas_store::QA_BATCH_RECEIPT_SCHEMA);
             let current = preview_release_close(&args, &root).unwrap();
             assert_eq!(current.scope.project_id, identity);
-            assert_eq!(current.scope.reviewed_sha, track.commit);
-            assert_eq!(current.scope.proof_refs.iter().map(|proof| proof.receipt_id.as_deref()).collect::<Vec<_>>(), [Some("qab-current")]);
+            assert_eq!(current.scope.reviewed_sha, frozen);
+            assert_eq!(current.scope.proof_refs.iter().map(|proof| proof.receipt_id.as_deref()).collect::<Vec<_>>(), [Some(fresh.as_str())]);
             let historical = cut_scope(&root, repo, &final_sha, &track.version, Some(&train.id), None).unwrap();
-            assert_eq!(historical.reviewed_sha, stale);
+            assert_eq!(&historical.reviewed_sha, stale);
+            assert!(historical.proof_refs.iter().any(|proof| proof.receipt_id.as_deref() == Some(historical_verdict.as_str())));
             let current = serde_json::to_value(current).unwrap();
             lag_one_column(&root);
             let live = || {

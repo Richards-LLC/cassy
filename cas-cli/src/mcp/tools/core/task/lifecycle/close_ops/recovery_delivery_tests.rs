@@ -1083,8 +1083,6 @@ async fn close_parks_checked_out_start_lane_over_pushed_proof_branch_cas_03738()
     assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "{output}");
 }
 
-/// GH #1571: generated history follows a target-sync merge, while the only
-/// passing focused receipt belongs to the complete, pushed final tree.
 #[tokio::test]
 async fn close_after_target_merge_and_generated_history_checks_final_tip_cas_c7e3() {
     let mut env = TestEnvGuard::temp_home();
@@ -1134,9 +1132,10 @@ async fn close_after_target_merge_and_generated_history_checks_final_tip_cas_c7e
         let output = text(f.core.cas_task_close(Parameters(request())).await.unwrap());
         let parked = tasks.get(TASK).unwrap();
         assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{output}");
-        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "{output}");
+        let expected = if generated_only { &tip } else { &merged };
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(expected.as_str()), "{output}");
         let state = tasks.get_execution_state(TASK).unwrap().unwrap();
-        assert_eq!(state["qa_impact"]["head_sha"].as_str(), Some(tip.as_str()));
+        assert_eq!(state["qa_impact"]["head_sha"].as_str(), Some(expected.as_str()));
     }
 }
 

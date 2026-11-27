@@ -8,7 +8,8 @@ cannot be combined with `--release`. Explicit windows make no Cloud or GitHub
 requests, including when `--offline` is omitted. Use `--json` for automation.
 
 The factory section reports distinct recorded refusal calls per observed merge,
-counts by code, supervisor wake injection/start median and nearest-rank p90 per
+distinct calls by recorded actor (including `unknown`), counts by code,
+supervisor wake injection/start median and nearest-rank p90 per
 harness, proven agent filings, unattributed filings and unique closed issues in
 reconcile receipts updated during the window. Historical refusal facts without
 a call id count individually and are identified. Missing actor, harness and wake

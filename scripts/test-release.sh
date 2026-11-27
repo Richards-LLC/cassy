@@ -45,7 +45,9 @@ case "$1 $2" in
   "pr checks") cat "${FAKE_PR_CHECKS_JSON:?}" ;;
   "run view") cat "${FAKE_RUN_LOG:-/dev/null}" ;;
   "run download")
-    if [[ " $* " == *" --name preflight-cli "* ]]; then cp -R "${FAKE_PREFLIGHT_CLI:?}/." "${@: -1}"
+    if [[ " $* " == *" --name preflight-cli "* ]]; then
+        if [[ -e "${@: -1}/cas" ]]; then printf 'preflight artifact destination exists\n' >&2; exit 1; fi
+        cp -R "${FAKE_PREFLIGHT_CLI:?}/." "${@: -1}"
     else cp -R "${FAKE_TRAIN_ARTIFACT:?}/." "${@: -1}"; fi ;;
   "api -X")
     case "$4" in
@@ -654,13 +656,27 @@ PY
     git -C "$fixture" commit --quiet -m 'CODEMAP-only follow-up to green train'
     before="$(git -C "$fixture" rev-parse HEAD)"
     : >"$FAKE_CAS_LOG"
+    : >"$FAKE_GH_LOG"
     run "$fixture" --no-watch --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
     after="$(git -C "$fixture" rev-parse HEAD)"
     [[ "$after" != "$before" && "$(git -C "$fixture" log -1 --format=%B)" == *"Train-CI-Head: $before"* ]] || return 1
     # cas-7971: a green receipt supplies the cut's CLI; no local candidate build.
     ! grep -q '^qa candidate build ' "$FAKE_CAS_LOG" &&
-        grep -q '^preflight-cli release preview ' "$FAKE_CAS_LOG" &&
+        grep -q "^preflight-cli release preview --commit $after " "$FAKE_CAS_LOG" &&
+        [[ "$(grep -c '^run download 456 --name preflight-cli --dir ' "$FAKE_GH_LOG")" == 1 ]] &&
         grep -q '^preflight-cli release track ' "$FAKE_CAS_LOG" || return 1
+    local legacy_dir="$fixture/.git/cas/cut-preview/$after"
+    mkdir -p "$legacy_dir"
+    printf '#!/usr/bin/env bash\nexit 47\n' >"$legacy_dir/cas"
+    chmod +x "$legacy_dir/cas"
+    : >"$FAKE_CAS_LOG"
+    : >"$FAKE_GH_LOG"
+    run "$fixture" --no-watch --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
+    [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" ]] &&
+        cmp -s "$legacy_dir/cas" <(printf '#!/usr/bin/env bash\nexit 47\n') &&
+        ! grep -q '^qa candidate build ' "$FAKE_CAS_LOG" &&
+        grep -q "^preflight-cli release preview --commit $after " "$FAKE_CAS_LOG" &&
+        [[ "$(grep -c '^run download 456 --name preflight-cli --dir ' "$FAKE_GH_LOG")" == 1 ]] || return 1
     # A green receipt whose artifact is gone retries once, then previews with
     # the installed CLI; it still never builds locally.
     : >"$FAKE_CAS_LOG"

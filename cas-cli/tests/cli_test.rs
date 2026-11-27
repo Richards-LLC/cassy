@@ -66,6 +66,30 @@ fn rule_refs_lists_tracked_sites_and_reports_malformed_markers_cas_4f87() {
 }
 
 #[test]
+fn scorecard_explicit_window_uses_recorded_rows_through_the_cli() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join(".cas");
+    std::fs::create_dir(&root).unwrap();
+    let at = chrono::DateTime::parse_from_rfc3339("2026-11-27T04:00:00Z").unwrap().with_timezone(&chrono::Utc);
+    let mut event = cas_store::NewQualityEvent::new("issue-1", cas_store::QualityPayload::Friction {
+        source: cas_store::FrictionSource::Issue, reference: "org/repo/issues/1".into(), severity: None, project: None,
+    });
+    event.occurred_at = at;
+    event.actor = Some("agent-1".into());
+    cas_store::record_quality_event(&root, &event).unwrap();
+    for command in [vec!["scorecard"], vec!["ledger", "report"]] {
+        let mut cmd = cas_cmd(temp.path());
+        let output = cmd.current_dir(temp.path()).args(command).args([
+            "--since", "2026-11-27T04:00:00Z", "--until", "2026-11-27T05:00:00Z", "--json",
+        ]).assert().success().get_output().stdout.clone();
+        let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(report["events"], 1);
+        assert_eq!(report["efficiency"]["issues"]["agent_filed"], 1);
+        assert!(report["efficiency"]["issues"]["closed_in_window"]["unknown"].is_string());
+    }
+}
+
+#[test]
 fn test_version() {
     let temp = TempDir::new().unwrap();
     cas_cmd(temp.path())

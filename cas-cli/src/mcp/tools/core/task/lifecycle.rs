@@ -2701,10 +2701,6 @@ impl CasCore {
             }
         }
         let task_store = self.open_task_store()?;
-        if let Some(worker) = worker.as_ref() {
-            crate::worker_lifecycle::ensure_assignment(task_store.as_ref(), worker, &req.id)
-                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
-        }
 
         if queue_enabled && let Some(worker) = worker.as_ref() {
             // GH #1695: a close saved with its active verification dispatch
@@ -2785,6 +2781,10 @@ impl CasCore {
         } else {
             None
         };
+        if let Some(worker) = worker.as_ref() {
+            crate::worker_lifecycle::ensure_assignment(task_store.as_ref(), worker, &req.id)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        }
         let _queue_lock = if queued_start {
             let worker = worker.as_ref().ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS,
                 crate::gates::tag("G-09", "Queued start requires its registered worker")))?;

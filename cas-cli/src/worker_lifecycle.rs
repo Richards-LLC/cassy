@@ -86,15 +86,16 @@ pub(crate) fn retire_after_delivery(root: &Path, task_id: &str) -> crate::Result
 }
 
 fn lifecycle_pending(root: &Path, worker: &Agent) -> crate::Result<bool> {
-    Ok(crate::store::open_spawn_queue_store(root)?
-        .peek(1000)?
-        .iter()
-        .any(|request| {
-            request.factory_session.as_deref() == worker.factory_session.as_deref()
-                && (request.worker_names.contains(&worker.name)
-                    || request.action == cas_store::SpawnAction::Shutdown
-                        && request.worker_names.is_empty())
-        }))
+    let queue = crate::store::open_spawn_queue_store(root)?;
+    Ok(
+        queue.has_pending_spawn(&worker.name, worker.factory_session.as_deref())?
+            || queue.peek(1000)?.iter().any(|request| {
+                request.action == cas_store::SpawnAction::Shutdown
+                    && request.factory_session.as_deref() == worker.factory_session.as_deref()
+                    && (request.worker_names.contains(&worker.name)
+                        || request.worker_names.is_empty())
+            }),
+    )
 }
 
 fn retire(root: &Path, worker: &Agent, task: &Task) -> crate::Result<()> {
@@ -109,8 +110,14 @@ fn retire(root: &Path, worker: &Agent, task: &Task) -> crate::Result<()> {
         .metadata
         .insert("worker_retired_task".into(), task.id.clone());
     agents.update(&current)?;
-    if !lifecycle_pending(root, worker)? {
-        crate::store::open_spawn_queue_store(root)?.enqueue_shutdown(
+    let queue = crate::store::open_spawn_queue_store(root)?;
+    let pending = queue.peek(1000)?.iter().any(|request| {
+        request.action == cas_store::SpawnAction::Shutdown
+            && request.factory_session.as_deref() == Some(session)
+            && (request.worker_names.contains(&worker.name) || request.worker_names.is_empty())
+    });
+    if !pending {
+        queue.enqueue_shutdown(
             None,
             std::slice::from_ref(&worker.name),
             false,

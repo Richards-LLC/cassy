@@ -129,24 +129,70 @@ fn publish_train_branch(repo: &Path, lane: &str, integration: &str) -> Result<()
         std::process::Command::new("git").arg("-C").arg(repo).args(args).output()
             .map_err(|error| error.to_string())
     };
-    if ref_exists(repo, &format!("origin/{lane}")) {
+    let checked = |args: &[&str]| git_stdout(run(args)?);
+    let lane_ref = format!("refs/heads/{lane}");
+    if ref_exists(repo, &format!("refs/remotes/origin/{lane}")) {
         return Ok(());
     }
-    if !ref_exists(repo, lane) {
+    if !ref_exists(repo, &lane_ref) {
         let base = [format!("origin/{integration}"), integration.to_string()]
             .into_iter().find(|candidate| ref_exists(repo, candidate))
             .ok_or_else(|| format!("no `{integration}` to cut `{lane}` from"))?;
-        let output = run(&["branch", lane, &base])?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-        }
+        checked(&["branch", lane, &base])?;
     }
+    let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+    let tip = git.resolve_commit(&lane_ref).ok_or_else(|| format!("no local `{lane}` tip"))?;
+    let upstream = format!("refs/remotes/origin/{integration}");
+    if !ref_exists(repo, &upstream) || !is_ancestor(repo, &tip, &upstream) {
+        return push_train_ref(repo, &lane_ref, &lane_ref, None);
+    }
+    if git.resolve_commit("HEAD").as_deref() == Some(tip.as_str())
+        && checked(&["status", "--porcelain", "--untracked-files=no"])?.is_empty()
+    {
+        return push_train_ref(repo, &tip, &lane_ref, None);
+    }
+
+    let remote = run(&["ls-remote", "--exit-code", "--refs", "origin", &lane_ref])?;
+    if remote.status.code() != Some(2) {
+        return git_stdout(remote).map(|_| ());
+    }
+    let hooks = checked(&["rev-parse", "--path-format=absolute", "--git-path", "hooks"])?;
+    let common_dir = checked(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+    let scratch = tempfile::Builder::new().prefix("cas-train-push-").tempdir_in(common_dir)
+        .map_err(|error| error.to_string())?;
+    let checkout = scratch.path().join("checkout");
+    let checkout_path = checkout.to_str().ok_or("release train checkout path is not UTF-8")?;
+    checked(&["worktree", "add", "--quiet", "--detach", checkout_path, &tip])?;
+    let pushed = push_train_ref(&checkout, &tip, &lane_ref, Some(&hooks));
+    if let Err(error) = checked(&["worktree", "remove", "--force", checkout_path]) {
+        let path = scratch.keep();
+        let cleanup = format!("could not remove train publication worktree at {}: {error}", path.display());
+        return Err(pushed.err().map_or_else(|| cleanup.clone(), |push_error| format!("{push_error}\n{cleanup}")));
+    }
+    pushed
+}
+
+fn git_stdout(output: std::process::Output) -> Result<String, String> {
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    String::from_utf8(output.stdout).map(|stdout| stdout.trim_end().to_string())
+        .map_err(|error| error.to_string())
+}
+
+fn push_train_ref(repo: &Path, source: &str, destination: &str, hooks: Option<&str>) -> Result<(), String> {
+    let refspec = format!("{source}:{destination}");
     let mut last = String::new();
     for attempt in 0..3 {
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_secs(attempt));
         }
-        let output = run(&["push", "origin", &format!("refs/heads/{lane}:refs/heads/{lane}")])?;
+        let mut command = std::process::Command::new("git");
+        command.arg("-C").arg(repo);
+        if let Some(hooks) = hooks {
+            command.args(["-c", &format!("core.hooksPath={hooks}")]);
+        }
+        let output = command.args(["push", "origin", &refspec]).output().map_err(|error| error.to_string())?;
         if output.status.success() {
             return Ok(());
         }
@@ -1000,6 +1046,14 @@ mod tests {
         assert_eq!(read_git(repo, &["show", ":seed.txt"]), "staged");
         assert_eq!(std::fs::read_to_string(repo.join("seed.txt")).unwrap(), "unstaged\n");
         assert_eq!(read_git(repo, &["worktree", "list", "--porcelain"]), worktrees);
+        assert_eq!(trains().len(), 3);
+
+        let existing = tip("main^");
+        git(bare.path(), &["update-ref", &format!("refs/heads/{lane}"), &existing]);
+        git(repo, &["update-ref", "-d", &format!("refs/remotes/origin/{lane}")]);
+        mark_cut_trains(&cas_root, repo, store.as_ref(), "cas-b222", &base, "main", &[]).unwrap();
+        assert_eq!(successor("cas-b222").as_deref(), Some(opened.as_str()));
+        assert_eq!(read_git(bare.path(), &["rev-parse", lane]), existing);
         assert_eq!(trains().len(), 3);
 
         git(repo, &["branch", "epic/unproved", "epic/cut"]);

@@ -321,7 +321,7 @@ class Announce(unittest.TestCase):
                 if file_block is not None:
                     envelope["file"] = file_block
                 with self.assertRaises(report.AdapterError):
-                    report.file_receipt(envelope)
+                    report.file_receipt(envelope, "PDF", {})
         for split_replies in (
             {},
             {2: ["2.0", "2"], 4: ["4.0", "4.1", "4"]},

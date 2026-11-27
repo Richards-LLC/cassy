@@ -107,42 +107,6 @@ pub fn create_boot_script(cwd: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// Update .gitignore with worktree-specific files
-pub fn update_gitignore(cwd: &Path) -> Result<bool> {
-    let gitignore_path = cwd.join(".gitignore");
-
-    let entries = vec![
-        "# Worktree-specific files (generated per worktree)",
-        ".env.worktree",
-        "# fallow incremental analysis cache (used by the fallow skill)",
-        ".fallow/",
-    ];
-
-    let mut content = if gitignore_path.exists() {
-        std::fs::read_to_string(&gitignore_path)?
-    } else {
-        String::new()
-    };
-
-    let mut modified = false;
-    for entry in entries {
-        if !content.contains(entry) {
-            if !content.is_empty() && !content.ends_with('\n') {
-                content.push('\n');
-            }
-            content.push_str(entry);
-            content.push('\n');
-            modified = true;
-        }
-    }
-
-    if modified {
-        std::fs::write(&gitignore_path, content)?;
-    }
-
-    Ok(modified)
-}
-
 /// Full factory tooling setup
 /// Returns a summary string of what was done
 pub fn setup_factory_tooling(cwd: &Path) -> Result<String> {
@@ -166,10 +130,6 @@ pub(crate) fn setup_factory_tooling_excluding(cwd: &Path, excluded: &[std::path:
 
     if allowed("scripts/worktree-boot.sh") && create_boot_script(cwd)? {
         results.push("scripts/worktree-boot.sh");
-    }
-
-    if allowed(".gitignore") && update_gitignore(cwd)? {
-        results.push(".gitignore updated");
     }
 
     if results.is_empty() {

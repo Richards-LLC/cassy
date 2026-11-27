@@ -210,9 +210,25 @@ fn block<'a>(s: &'a str, begin: &str, end: &str) -> Result<Option<&'a str>> {
     }
 }
 
-fn replace_block(base: &str, replacement: &str, begin: &str, end: &str) -> Result<String> {
+pub(crate) fn prepend_claude_block(base: &str, replacement: &str) -> String {
+    if base.is_empty() {
+        format!("{replacement}\n")
+    } else {
+        format!("{replacement}\n\n{base}")
+    }
+}
+
+fn replace_block(
+    base: &str,
+    replacement: &str,
+    begin: &str,
+    end: &str,
+    prepend: bool,
+) -> Result<String> {
     if let Some(old) = block(base, begin, end)? {
         Ok(base.replacen(old, replacement, 1))
+    } else if prepend {
+        Ok(prepend_claude_block(base, replacement))
     } else if base.is_empty() {
         Ok(format!("{replacement}\n"))
     } else {
@@ -694,7 +710,7 @@ impl Reconcile {
                 let Some(owned) = block(&current, a, b)? else {
                     continue;
                 };
-                replace_block(text(indexed)?, owned, a, b)?.into_bytes()
+                replace_block(text(indexed)?, owned, a, b, *path == "CLAUDE.md")?.into_bytes()
             } else {
                 let Ok(desired) = std::fs::read(temp.path().join(path)) else {
                     continue;
@@ -861,7 +877,13 @@ fn staged_sync_only_from(root: &Path, cas_root: &Path) -> Result<bool> {
             let (a, b) = if path == ".gitignore" { (IGNORE_BEGIN, IGNORE_END) } else { (BEGIN, END) };
             let Some(owned) = block(text(indexed)?, a, b)? else { return Ok(false); };
             let baseline = committed.get(path).map(Vec::as_slice).unwrap_or_default();
-            replace_block(text(baseline)?, owned, a, b)?.into_bytes()
+            let prepend = path == "CLAUDE.md";
+            let expected = replace_block(text(baseline)?, owned, a, b, prepend)?.into_bytes();
+            if prepend && *indexed != expected {
+                replace_block(text(baseline)?, owned, a, b, false)?.into_bytes()
+            } else {
+                expected
+            }
         } else {
             std::fs::read(projected.path().join(path))?
         };

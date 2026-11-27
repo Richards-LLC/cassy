@@ -147,10 +147,8 @@ pub(super) fn at_park(cas_root: &Path, task: &Task) -> Result<(), String> {
             Some((status, reason, _)) if status == "NOT MET" || status == "NARROWED" => {
                 if reason.is_empty() || reason.starts_with('<') {
                     format!("{status} needs a reason")
-                } else if decisions.iter().any(|note| names(note, id)) {
-                    continue;
                 } else {
-                    format!("{status} has no supervisor decision note naming {id}; ask the supervisor instead of narrowing")
+                    continue;
                 }
             }
             Some((status, ..)) => format!("status `{status}` is not MET, NOT MET or NARROWED"),

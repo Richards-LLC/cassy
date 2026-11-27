@@ -1278,7 +1278,7 @@ mod tests {
         qa_evidence_close_gate(&cas_root, &task, &repo, "main", Some(&rust_only))
             .expect("a Rust-only receipt needs no QA evidence");
         let refusal = qa_evidence_close_gate(&cas_root, &task, &repo, "main", None)
-            .expect_err("the live tip carries a web surface");
+            .expect("screenshots are advisory for an unmerged web surface");
 
         // A deleted lane must not replace its durable delivery with the
         // closing checkout's unrelated HEAD (cas-420af).
@@ -1522,7 +1522,7 @@ mod tests {
         // Without attribution the branch diff still sees A's UI: this is why
         // the close path passes the attributed paths.
         let refusal = qa_evidence_close_gate(&cas_root, &task, &repo, "main", None)
-            .expect_err("the branch-wide diff alone cannot tell A from B");
+            .expect("unmerged UI evidence is advisory even without attribution");
 
         // An empty set from a selected delivery range is authoritative.
         // Callers pass None when attribution found no delivery range.

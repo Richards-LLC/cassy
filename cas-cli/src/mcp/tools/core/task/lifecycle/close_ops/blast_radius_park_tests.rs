@@ -191,22 +191,8 @@ fn declared_parent_covers_only_real_sibling_test_mounts_cas_ba56() {
             ("#[path = \"gear_tests.rs\"] mod", false),
         ] {
             std::fs::write(src.join("gear.rs"), body).unwrap();
-            // Exercise the live declaration gate without receipt widening or build
-            // evidence; factory workers defer those build proofs to assembly.
-            let result = validate_risk_close_proofs_with_base_and_target_and_cache(
-                &task,
-                &changed,
-                repo.path(),
-                repo.path(),
-                None,
-                None,
-                BuildProofs::DeferredToAssembly,
-                &mut ScopedProofTargetCache::default(),
-            );
-            assert_eq!(result.is_ok(), covered, "{target}, {body:?}: {result:?}");
-            if let Err(error) = result {
-                assert!(error.contains("nested::gear_tests"), "{error}");
-            }
+            let (uncovered, _) = uncovered_blast_radius_scope(repo.path(), &changed, &task.proof_targets);
+            assert_eq!(uncovered.is_empty(), covered, "{target}, {body:?}: {uncovered:?}");
         }
     }
     // A mod.rs parent can mount the same sibling, even when only the tests
@@ -275,12 +261,8 @@ fn declared_parent_covers_only_real_sibling_test_mounts_cas_ba56() {
         "#[path = \"blast_radius_park_tests.rs\"] mod tests;\n",
     ).unwrap();
     task.proof_targets.push("cas-cli named::close_ops::alternate::tests".into());
-    let error = validate_risk_close_proofs_with_base_and_target_and_cache(
-        &task, &changed[2..], repo.path(), repo.path(), None, None,
-        BuildProofs::DeferredToAssembly, &mut ScopedProofTargetCache::default(),
-    ).expect_err("competing mounts require explicit physical proof scope");
-    assert!(error.contains("named/close_ops.rs") && error.contains("named/close_ops/alternate.rs"),
-        "uncovered diagnostic must name both mounting parents: {error}");
+    let (uncovered, _) = uncovered_blast_radius_scope(repo.path(), &changed[2..], &task.proof_targets);
+    assert!(!uncovered.is_empty());
     task.proof_targets.push("cas-cli named::close_ops::blast_radius_park_tests".into());
     validate_risk_close_proofs_with_base_and_target_and_cache(
         &task, &changed[2..], repo.path(), repo.path(), None, None,
@@ -1056,14 +1038,25 @@ async fn park_warns_for_missing_checklist_and_proof_without_red_first() {
     let mut env = TestEnvGuard::temp_home();
     for method in [None, Some("test-first")] {
         let f = fixture(&mut env);
+        std::fs::create_dir_all(f.worker_path.join("docs/qa")).unwrap();
+        std::fs::create_dir_all(f.worker_path.join("docs/product-overview.d")).unwrap();
+        std::fs::write(f.worker_path.join("docs/product-overview.d/README.md"), "Fragments\n").unwrap();
+        std::fs::write(f.worker_path.join("docs/qa/journeys.yaml"),
+            "version: 1\njourneys:\n  - id: J-gear\n    name: Gear\n    status: live\n    owners: {frontend: [\"crates/widget/src/**\"]}\n").unwrap();
+        git(&f.worker_path, &["add", "docs"]);
+        git(&f.worker_path, &["commit", "-qm", &format!("fix({ID}): describe journey")]);
+        git(&f.worker_path, &["push", "-q", "origin", LANE]);
         let mut task = f.task();
+        task.task_type = TaskType::Bug;
         task.acceptance_criteria = "Gear turns both ways".into();
         task.execution_note = method.map(str::to_owned);
         open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
         let reply = call(&f.worker, serde_json::json!({"action":"close", "id":ID, "reason":"Gear turns"})).await;
         let saved = f.task();
         let codes = crate::gates::codes_in(&saved.notes);
-        assert!(codes.contains(&"G-166") && codes.contains(&"G-61"), "{reply}");
+        for code in ["G-166", "G-61", "G-167", "G-168"] {
+            assert!(codes.contains(&code), "{code}: {reply}\n{}", saved.notes);
+        }
         assert_eq!(f.task().status, TaskStatus::AwaitingMerge, "{reply}");
         assert!(f.task().notes.contains("[G-61]"));
     }

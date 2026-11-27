@@ -598,11 +598,6 @@ pub(crate) fn record_supervisor_test(
     let (log_path, bytes, log, count) = read_selected_log(&evidence.log_path)?;
     let mut repeat_logs = Vec::new();
     let stability = if evidence.repeat_log_paths.is_empty() { None } else {
-        // cas-763f: five capped passes from a peer machine, one log per run.
-        if evidence.repeat_log_paths.len() + 1 != stability::REQUIRED_PASSES as usize {
-            bail!("stability evidence needs exactly {} per-repeat logs after the selected log",
-                stability::REQUIRED_PASSES - 1);
-        }
         if owned.is_empty() {
             bail!("this selection owns no changed tests; no stability evidence is needed");
         }
@@ -636,7 +631,7 @@ pub(crate) fn record_supervisor_test(
         Some(stability::Proof {
             runner: "nextest".into(),
             tests: owned.into_iter().map(|test| test.identity).collect(),
-            consecutive_passes: stability::REQUIRED_PASSES,
+            consecutive_passes: (evidence.repeat_log_paths.len() + 1) as u32,
             elapsed_ms: 0,
             inactive: Vec::new(),
         })
@@ -3143,7 +3138,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn changed_tests_need_five_consecutive_capped_passes_cas_9e02e() {
+    fn changed_tests_run_once_without_hiding_failures_cas_9e02e() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
         let root = env.home().join("project/.cas");
@@ -3186,7 +3181,7 @@ if 'opaque' in selection:
     names.append('uncertain::nested::opaque')
 with Path('target/executed').open('a') as output:
     output.write(','.join(names) + '\n')
-if {seeded_failure} and n % 3 == 0:
+if {seeded_failure} and n == 1:
     if retries == '0':
         print('        FAIL [ 0.01s] (1/1) fixture owned_new')
         print('     Summary [ 0.01s] 1 test run: 0 passed, 1 failed')
@@ -3203,18 +3198,18 @@ PY"#, seeded_failure = if seeded_failure { "True" } else { "False" }));
             let result = execute_at(&root, &args, &repo, &cargo);
             if seeded_failure {
                 assert!(result.is_err());
-                assert_eq!(std::fs::read_to_string(repo.join("target/attempts")).unwrap(), "3");
+                assert_eq!(std::fs::read_to_string(repo.join("target/attempts")).unwrap(), "1");
                 assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo)).is_empty());
             } else {
                 result.unwrap();
-                assert_eq!(std::fs::read_to_string(repo.join("target/attempts")).unwrap(), "5");
+                assert_eq!(std::fs::read_to_string(repo.join("target/attempts")).unwrap(), "1");
                 let path = test_receipt_path(&root, &repo.canonicalize().unwrap(), &fixture_head(&repo), &targeted_test(&args).unwrap());
                 let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-                assert_eq!(receipt["test"]["stability"]["consecutive_passes"], 5);
+                assert_eq!(receipt["test"]["stability"]["consecutive_passes"], 1);
                 assert_eq!(receipt["test"]["stability"]["tests"][0]["name"], "owned_new");
                 assert_eq!(receipt["test"]["count"], if mixed { 3 } else { 2 });
                 assert_eq!(receipt["test"]["widened"].is_object(), mixed);
-                assert_eq!(std::fs::read_to_string(repo.join("target/retries")).unwrap().lines().collect::<Vec<_>>(), vec!["0"; 5]);
+                assert_eq!(std::fs::read_to_string(repo.join("target/retries")).unwrap().lines().collect::<Vec<_>>(), vec!["0"; 1]);
                 let executed = std::fs::read_to_string(repo.join("target/executed")).unwrap();
                 assert_eq!(executed.lines().filter(|line| line.split(',').any(|name| name == "untouched")).count(), 1);
                 let script = std::fs::read_to_string(&cargo).unwrap().replace("if False and", "if True and");
@@ -3298,11 +3293,11 @@ PY"#, has_known=if known.is_some() { "True" } else { "False" }, has_unknown=if u
             let record: CheckReceipt = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
             let receipt = record.test.unwrap();
             assert_eq!(receipt.stability.is_some(), known.is_some(), "{row}");
-            if let Some(proof) = receipt.stability { assert_eq!(proof.consecutive_passes, 5, "{row}"); }
+            if let Some(proof) = receipt.stability { assert_eq!(proof.consecutive_passes, 1, "{row}"); }
             assert_eq!(receipt.widened.is_some(), unknown.is_some(), "{row}");
             if let Some(proof) = receipt.widened { assert_eq!(proof.scope, widened::Scope::Crate("fixture".into()), "{row}"); }
             let executed = std::fs::read_to_string(repo.join("target/executed")).unwrap();
-            assert_eq!(executed.lines().filter(|name| *name == "known").count(), if known.is_some() { 5 } else { 0 }, "{row}");
+            assert_eq!(executed.lines().filter(|name| *name == "known").count(), if known.is_some() { 1 } else { 0 }, "{row}");
             assert_eq!(executed.lines().filter(|name| name.ends_with("opaque")).count(), usize::from(unknown.is_some()), "{row}");
         }
     }

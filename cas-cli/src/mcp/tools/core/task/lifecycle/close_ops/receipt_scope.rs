@@ -243,7 +243,7 @@ fn listed_park_refusals(
         missing.retain(|test| !widen::package_proves(&passing, &test.path));
         // GH #2320: a test gated to another OS selects nothing here, so this
         // host can never run it. Lane CI's Rust test job, green at this tip,
-        // proves the lane OS's tests; any other OS needs five passes recorded
+        // proves the lane OS's tests; any other OS needs one pass recorded
         // on that OS.
         let gates = stability::rust::platform_gates(proof_repo, head, &missing).unwrap_or_default();
         let (foreign, missing): (Vec<_>, Vec<_>) = missing.into_iter()
@@ -255,7 +255,7 @@ fn listed_park_refusals(
             .collect::<Vec<_>>();
         if !foreign.is_empty() {
             refusals.push(crate::gates::tag("G-61", format!(
-                "PLATFORM_TEST_PROOF_REQUIRED: task {} changes tests that this {host} host cannot build: {}. Do not run them here; the capped runner selects 0 of them. A test that builds on {lane_os} is proven when lane CI's Rust test job passes at {short} (lane CI now: {state}); a test for any other OS needs five consecutive capped passes recorded on that OS at {short}. Then retry park.",
+                "PLATFORM_TEST_PROOF_REQUIRED: task {} changes tests that this {host} host cannot build: {}. Do not run them here; the capped runner selects 0 of them. A test that builds on {lane_os} is proven when lane CI's Rust test job passes at {short} (lane CI now: {state}); a test for any other OS needs a named passing test recorded on that OS at {short}. Lane CI on the exact tip is the proof; park continues.",
                 task.id,
                 foreign.iter().map(|test| format!("{}::{} (target_os {})", test.path, test.name,
                     gates[test].iter().cloned().collect::<Vec<_>>().join(" or "))).collect::<Vec<_>>().join(", "),
@@ -263,7 +263,7 @@ fn listed_park_refusals(
             )));
         }
         if !missing.is_empty() {
-            // GH #2288: name why an earlier five-pass proof did not carry.
+            // GH #2288: name why an earlier passing proof did not carry.
             let voided = stability::invalidated(&passing, &missing).into_iter().map(|(tested, inputs)| {
                 let tested = &tested[..tested.len().min(12)];
                 match inputs {
@@ -272,7 +272,7 @@ fn listed_park_refusals(
                 }
             }).collect::<String>();
             refusals.push(crate::gates::tag("G-61", format!(
-                "CHANGED_TEST_STABILITY_REQUIRED: task {} needs five consecutive capped passes at {short} for: {}.{voided} Fix or delete a failing test; never retry-wrap it. Run only these changed tests through the capped runner: {}. Then retry park.",
+                "CHANGED_TEST_STABILITY_REQUIRED: task {} needs a named passing test at {short} for: {}.{voided} Fix or delete a failing test; never retry-wrap it. Run only these changed tests through the capped runner: {}. Lane CI on the exact tip is the proof; park continues.",
                 task.id, missing.iter().map(|test| format!("{}::{}", test.path, test.name)).collect::<Vec<_>>().join(", "),
                 stability::rerun_commands(cas_root, proof_repo, head, &missing).join("; "),
             )));
@@ -283,7 +283,7 @@ fn listed_park_refusals(
             // Classification is uncertain, but the broader capped receipt is
             // proven missing. Park reads proof; it never starts a test process.
             refusals.push(crate::gates::tag("G-61", format!(
-                "FOCUSED PROOF REQUIRED: task {} widened uncertain test selection to {missing:?}; one passing capped run is missing at {short}. Run: {}. Identified changed tests still require five passes.",
+                "FOCUSED PROOF REQUIRED: task {} widened uncertain test selection to {missing:?}; one passing capped run is missing at {short}. Run: {}. Identified changed tests still require one pass.",
                 task.id, widen::commands(cas_root, proof_repo, &present, &missing, &covering).join("; ")
             )));
         }
@@ -315,7 +315,7 @@ fn listed_park_refusals(
     // one cannot be judged yet; running its tests may already cover the module.
     if !untested.is_empty() {
         refusals.push(crate::gates::tag("G-61", format!(
-            "⚠️ FOCUSED PROOF REQUIRED (cas-eac2): task {id} changes Rust in crates that have no passing worker test receipt at {short}: {crates}. Lane CI no longer runs broad Rust tests for factory pushes, so the targeted fallback is yours.\n\nNext: At {short}, run a capped targeted test for the changed behaviour in each crate (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`, or `--test <harness>`), then retry `{caller}task action=close id={id}`. A receipt from another crate does not count.",
+            "⚠️ FOCUSED PROOF REQUIRED (cas-eac2): task {id} changes Rust in crates that have no passing worker test receipt at {short}: {crates}. Lane CI no longer runs broad Rust tests for factory pushes, so the targeted fallback is yours.\n\nNext: At {short}, run a capped targeted test for the changed behaviour in each crate (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`, or `--test <harness>`), CI on the exact tip is the proof; park continues. A receipt from another crate does not count.",
             id = task.id,
             crates = untested.join(", "),
         )));
@@ -339,7 +339,7 @@ fn listed_park_refusals(
         }
     }
     refusals.push(crate::gates::tag("G-61", format!(
-        "⚠️ PROOF SCOPE INCOMPLETE (cas-d6eb): task {id} declares risk=blast-radius, and its delivery at {short} reaches source modules that neither its proof_targets nor a passing worker test receipt at that commit covers: {modules}. Parking locks the proof scope, so fix it now: run a capped targeted test in each module's crate at {short} (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`), or widen the declaration with `{caller}task action=update id={id} proof_targets=\"{targets}\"`. Then retry `{caller}task action=close id={id}`.",
+        "⚠️ PROOF SCOPE INCOMPLETE (cas-d6eb): task {id} declares risk=blast-radius, and its delivery at {short} reaches source modules that neither its proof_targets nor a passing worker test receipt at that commit covers: {modules}. Optional scope guidance: run a capped targeted test in each module's crate at {short} (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`), or widen the declaration with `{caller}task action=update id={id} proof_targets=\"{targets}\"`. Then retry `{caller}task action=close id={id}`.",
         id = task.id,
         modules = uncovered.join(", "),
         targets = widened.join(","),

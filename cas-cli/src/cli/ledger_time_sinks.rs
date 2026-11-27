@@ -173,7 +173,7 @@ fn measured<T>(result: Result<T>) -> Measure<T> {
     result.map_or_else(|error| unknown(error.to_string()), Measure::Known)
 }
 fn minutes((start, end): Span) -> f64 {
-    (end - start).num_milliseconds() as f64 / 60_000.0
+    (end - start).as_seconds_f64() / 60.0
 }
 fn clipped((start, end): Span, (since, until): Span) -> Option<Span> {
     let span = (start.max(since), end.min(until));
@@ -1003,6 +1003,14 @@ pub(super) fn render(out: &mut String, value: &Measure<TimeSinks>) {
         ))
     );
     if let Measure::Known(w) = &s.phase_waterfall {
+        for (phase, t) in &w.tokens_by_phase {
+            let _ = writeln!(
+                out,
+                "    {phase} tokens: {}/{} input/output; {} turns, {} missing",
+                t.input, t.output, t.turns, t.missing
+            );
+        }
+        let _ = writeln!(out, "    {}", w.coverage);
         for p in &w.tasks {
             let _ = writeln!(
                 out,
@@ -1073,8 +1081,13 @@ pub(super) fn render(out: &mut String, value: &Measure<TimeSinks>) {
         out,
         "  Tokens per shipped fix: {}",
         s.tokens_per_shipped_fix.render(|t| format!(
-            "{} fixes; {} with turns; input/output {:?}/{:?}. {}",
-            t.shipped_fixes, t.fixes_with_turns, t.input_per_fix, t.output_per_fix, t.coverage
+            "{} fixes; {} with turns; input/output {}/{}; release membership retained: {}. {}",
+            t.shipped_fixes,
+            t.fixes_with_turns,
+            number(t.input_per_fix),
+            number(t.output_per_fix),
+            t.release_membership_known,
+            t.coverage
         ))
     );
     let _ = writeln!(
@@ -1372,11 +1385,27 @@ mod tests {
         let report = serde_json::to_value(report).unwrap();
         let s = &report["efficiency"]["time_sinks"];
         let w = &s["worker_minutes"]["by_worker"][&worker.id];
-        assert_eq!(w["observed_alive"], 70.0);
-        assert_eq!(w["in_turn"], 16.0);
-        assert_eq!(w["leased_out_of_turn"], 28.0);
-        assert_eq!(w["blocked_or_waiting"], 20.0);
-        assert_eq!(w["unassigned"], 6.0);
+        let near = |value: &Value, expected: f64| {
+            assert!(
+                (value.as_f64().unwrap() - expected).abs() < 1.0 / 60000.0 + 1e-9,
+                "{value} != {expected}"
+            );
+        };
+        near(&w["observed_alive"], 70.0);
+        near(&w["in_turn"], 16.0);
+        near(&w["leased_out_of_turn"], 28.0);
+        near(&w["blocked_or_waiting"], 20.0);
+        near(&w["unassigned"], 6.0);
+        let partition: f64 = [
+            "in_turn",
+            "leased_out_of_turn",
+            "blocked_or_waiting",
+            "unassigned",
+        ]
+        .iter()
+        .map(|key| w[key].as_f64().unwrap())
+        .sum();
+        assert!((partition - w["observed_alive"].as_f64().unwrap()).abs() < 1e-9);
         assert_eq!(
             s["worker_minutes"]["fleet"],
             s["worker_minutes"]["by_worker"][&worker.id]
@@ -1412,11 +1441,11 @@ mod tests {
             .iter()
             .find(|p| p["task_id"] == task.id && p["phase"] == "implementation")
             .unwrap();
-        assert_eq!(implementation["window_minutes"], 15.0);
+        near(&implementation["window_minutes"], 15.0);
         assert_eq!(implementation["tokens"]["input"], 6000);
-        assert_eq!(
-            s["phase_waterfall"]["censored_minutes"]["review_to_park"],
-            45.0
+        near(
+            &s["phase_waterfall"]["censored_minutes"]["review_to_park"],
+            45.0,
         );
         assert!(s["ci"]["unknown"].is_string());
         let ranked = s["top_five"].as_array().unwrap();

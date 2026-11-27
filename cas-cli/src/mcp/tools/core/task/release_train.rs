@@ -397,7 +397,16 @@ fn rollover_children(root: &Path, repo: &Path, store: &dyn cas_store::TaskStore,
         let requires_merge = tip.as_deref().map_or(was_parked, |tip| !is_ancestor(repo, &base, tip));
         let repair_hold = if was_parked && requires_merge {
             match super::repeat_review::admit_repair(root, &child.id) {
-                Ok(_) => { child.status = TaskStatus::Open; None }
+                Ok(_) => {
+                    let note = super::audit::reset_note(
+                        chrono::Utc::now(), child.status, child.assignee.as_deref(), false,
+                        &format!("Release train {} was cut; successor {} ({lane}) requires merging into the source before re-parking.", old.id, next.id),
+                    );
+                    if !child.notes.is_empty() { child.notes.push_str("\n\n"); }
+                    child.notes.push_str(&note);
+                    child.status = TaskStatus::Open;
+                    None
+                }
                 Err(error) => Some(error.message),
             }
         } else { None };
@@ -1100,6 +1109,7 @@ pub(crate) mod tests {
         let refused = publish_train_branch(repo, "epic/unproved", "main").unwrap_err();
         assert!(refused.contains("[C-07]") && refused.contains("[H-38]"), "{refused}");
         assert!(!ref_exists(bare.path(), "refs/heads/epic/unproved"));
+        assert_eq!(store.get(&parked.id).unwrap().notes, rolled.notes);
         (parked, rolled)
     }
 }

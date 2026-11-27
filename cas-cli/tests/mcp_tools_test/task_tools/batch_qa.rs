@@ -710,36 +710,11 @@ impl Fx {
         }))
         .unwrap()
     }
-    /// cas-0304 batch park (G-171): cas-0304's committed producer sweep,
-    /// rebound to the parked fixture commit, with a fixture-labelled ledger row.
-    fn park_visual_evidence(&self, id: &str, head: &str) {
-        macro_rules! sweep {
-            ($file:literal) => { include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/visual-qa-fixtures/batch-park/pass/", $file)) };
-        }
-        let root = self.repo.join(".cas");
-        let configured = cas::config::Config::load(&root).unwrap().factory().artifacts_root;
-        let base = cas::config::resolved_factory_artifacts_root(configured.as_deref());
-        let [dir, _] = cas::config::factory_task_artifact_dirs(&root, &base, id);
-        std::fs::create_dir_all(dir.join("visual-qa")).unwrap();
-        let mut report: serde_json::Value = serde_json::from_slice(sweep!("visual-qa.json")).unwrap();
-        report["build"]["revision"] = head.into();
-        report["generatedAt"] = chrono::Utc::now().to_rfc3339().into();
-        let png = report["screenshots"][1]["path"].as_str().unwrap().to_owned();
-        std::fs::write(dir.join("visual-qa").join(&png), sweep!("127-0-0-1-52391-ranking-expanded-light-390x800.png")).unwrap();
-        std::fs::write(dir.join("visual-qa/visual-qa.json"), report.to_string()).unwrap();
-        std::fs::write(dir.join("LEDGER.md"), format!(
-            "cells=1; PASS=1; FAIL=0; NOT EXERCISED=0\nlabels: fixture=1\n{}\n| M01 | /ranking/ [expanded] | Ranking visible ({id}.css:1) | visible: Ranking | PASS | fixture | visual-qa/{png} | - |\n",
-            cas::qa_ledger::HEADER,
-        )).unwrap();
-    }
     async fn close(&self, id: &str) -> String {
         let task = open_task_store(&self.repo.join(".cas"))
             .unwrap()
             .get(id)
             .unwrap();
-        if let Some(head) = task.deliverables.factory_branch_anchor.as_deref() {
-            self.park_visual_evidence(id, head);
-        }
         let req = TaskCloseRequest {
             no_delivery: None,
             id: id.into(),

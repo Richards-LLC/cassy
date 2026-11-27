@@ -197,39 +197,6 @@ fn handle_user_prompt_submit_capture(
         return Ok(HookOutput::empty());
     }
 
-    // Prompt attribution above retains every user request in the dedicated
-    // prompt store.  The memory store is an injection surface, so it needs a
-    // stricter gate: conversational questions and recursive control-plane
-    // prompts do not earn a durable context entry merely by containing a
-    // question word or being very long.
-    // Machine relay metadata reaches this hook as a typed HookInput field, not
-    // by re-parsing a rendered `CAS provenance:` prefix.  Absence is the
-    // explicit operator case: a factory worker's genuine instruction must be
-    // retained while every relay origin stays out of durable Context.
-    let operator_submitted = matches!(
-        input.submitted_prompt_origin(),
-        cas_core::hooks::types::SubmittedPromptOrigin::Operator
-    );
-    if operator_submitted && is_context_memory_worthy_prompt(prompt_text) {
-        if let Ok(store) = open_store(cas_root) {
-            if let Ok(id) = store.generate_id() {
-                let entry = Entry {
-                    id,
-                    entry_type: EntryType::Context,
-                    content: format!("User request: {prompt_text}"),
-                    tags: vec!["user-prompt".to_string()],
-                    share: Some(cas_types::ShareScope::Private),
-                    session_id: Some(input.session_id.clone()),
-                    importance: 0.6, // User prompts are moderately important
-                    ..Default::default()
-                };
-
-                // Store silently - don't fail the hook if storage fails.
-                let _ = store.add(&entry);
-            }
-        }
-    }
-
     // Check if this prompt expresses a preference/rule that should be remembered
     if is_preference_prompt(prompt_text) {
         // Try to extract and create a rule from the preference
@@ -476,59 +443,6 @@ pub fn is_important_prompt(prompt: &str) -> bool {
     false
 }
 
-/// Whether an otherwise-important prompt deserves a *memory* entry.
-///
-/// Prompt attribution is deliberately broader and keeps every prompt in its
-/// own non-injected store. This gate protects the memory path
-/// from transient chat, recursive prompt-analysis payloads, and a single
-/// oversized request that could consume a whole context budget.
-pub fn is_context_memory_worthy_prompt(prompt: &str) -> bool {
-    const MAX_CONTEXT_MEMORY_PROMPT_BYTES: usize = 12_000;
-    const RECURSIVE_PREFERENCE_ANALYSIS: &str = "analyze this user prompt and determine if it expresses a coding preference or rule that should be remembered";
-
-    if prompt.len() > MAX_CONTEXT_MEMORY_PROMPT_BYTES
-        || prompt
-            .to_lowercase()
-            .contains(RECURSIVE_PREFERENCE_ANALYSIS)
-    {
-        return false;
-    }
-    // cas-9734: Claude submits its own background-task completions
-    // (`<task-notification>`), teammate relays and wakes through
-    // UserPromptSubmit with no factory provenance, so they arrive typed as
-    // operator prompts. They were 43% of the memory corpus and crowded every
-    // real lesson out of memory retrieval. A harness envelope on any line is
-    // never an operator request.
-    if is_harness_prompt(prompt) {
-        return false;
-    }
-
-    let prompt_lower = prompt.to_lowercase();
-    let task_indicators = [
-        "implement",
-        "create",
-        "add",
-        "fix",
-        "update",
-        "refactor",
-        "build",
-        "write",
-        "design",
-        "help me",
-        "i need",
-        "please",
-        "could you",
-        "can you",
-    ];
-    let has_task_indicator = task_indicators
-        .iter()
-        .any(|indicator| prompt_lower.contains(indicator));
-
-    // A short question like "hello, what directory are you working in?" has
-    // no durable recall value. The source prompt remains available for blame.
-    prompt.len() >= 120 || has_task_indicator
-}
-
 /// Detect if a user prompt expresses a preference or rule
 ///
 /// Looks for patterns like:
@@ -697,7 +611,10 @@ mod local_prompt_tests {
         .save_to_cas_dir(temp.path())
         .unwrap();
 
-        let deliberate = Entry::new("deliberate".to_string(), "Retain a chosen lesson".to_string());
+        let deliberate = Entry::new(
+            "deliberate".to_string(),
+            "Retain a chosen lesson".to_string(),
+        );
         local.add(&deliberate).unwrap();
         let prompts = [
             "Please implement a durable local context capture for this project",

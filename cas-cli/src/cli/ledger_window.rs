@@ -201,7 +201,7 @@ pub(super) fn render(efficiency: &Efficiency) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cas_store::{AgentStore, NewQualityEvent, SqliteAgentStore};
+    use cas_store::{AgentStore, SqliteAgentStore};
     use cas_types::{Agent, AgentRole};
     use clap::Parser;
     use serde_json::json;
@@ -237,12 +237,7 @@ mod tests {
         }
         db.execute("UPDATE observed_delivery_merges SET created_at=?1", [since.to_rfc3339()]).unwrap();
         for (n, at, actor) in [(1, since, Some("actor")), (2, since + Duration::minutes(2), None), (3, until, Some("actor"))] {
-            let mut event = NewQualityEvent::new(format!("issue-{n}"), QualityPayload::Friction {
-                source: FrictionSource::Issue, reference: format!("org/repo/issues/{n}"), severity: None, project: None,
-            });
-            event.occurred_at = at;
-            event.actor = actor.map(str::to_owned);
-            cas_store::record_quality_event(root, &event).unwrap();
+            assert!(crate::quality_ledger::issue_filed(root, &format!("https://github.com/org/repo/issues/{n}"), "issue", at, actor));
         }
         db.execute_batch("CREATE TABLE supervisor_message_wakes (lead_id INTEGER,recipient TEXT,created_at TEXT,injected_at TEXT,started_at TEXT);
             CREATE TABLE release_reconcile_operations (receipt_json TEXT);").unwrap();

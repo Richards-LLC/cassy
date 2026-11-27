@@ -504,7 +504,7 @@ pub(crate) fn bug_filed(
 }
 
 /// cas-87a2: an issue filed on the Cassy tracker, from any project, is friction.
-pub(crate) fn issue_filed(cas_root: &Path, url: &str, title: &str, at: DateTime<Utc>) -> bool {
+pub(crate) fn issue_filed(cas_root: &Path, url: &str, title: &str, at: DateTime<Utc>, actor: Option<&str>) -> bool {
     let Some(issue) = crate::github_issue_attach::parse_issue_refs(url, None).into_iter().next()
     else {
         return false;
@@ -520,6 +520,7 @@ pub(crate) fn issue_filed(cas_root: &Path, url: &str, title: &str, at: DateTime<
         },
     );
     event.occurred_at = at;
+    event.actor = actor.map(str::to_owned);
     event.title = Some(title.to_string());
     event.link = Some(url.to_string());
     emit(cas_root, &event)
@@ -566,7 +567,7 @@ pub(crate) fn backfill_friction(
     match list_cassy_issues(gh_program, &repo, since) {
         Ok(issues) => {
             for (url, title, created_at) in issues {
-                found.issues += usize::from(issue_filed(cas_root, &url, &title, created_at));
+                found.issues += usize::from(issue_filed(cas_root, &url, &title, created_at, None));
             }
         }
         Err(reason) => found.issues_skipped = Some(reason),

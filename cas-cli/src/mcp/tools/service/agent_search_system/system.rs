@@ -814,6 +814,7 @@ impl CasService {
             &outcome.url,
             &title,
             chrono::Utc::now(),
+            self.inner.get_registered_agent_id_read_only().ok().as_deref(),
         );
         let degradation = outcome
             .degradation

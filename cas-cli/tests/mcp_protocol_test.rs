@@ -984,6 +984,40 @@ fn test_sandbox_init_and_serve_never_touch_inherited_host_known_repos() {
         )
         .unwrap();
     assert_eq!(host_row, ("HOST-BEFORE".into(), "HOST-BEFORE".into(), 41));
+
+
+    let mut serve = sandbox.command();
+    assert_command_is_sandboxed(&serve, &sandbox);
+    let child = serve
+        .env("HOME", &host_home)
+        .env("XDG_CONFIG_HOME", &host_xdg)
+        .arg("serve").arg("--sandbox").arg(sandbox.path())
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().unwrap();
+    let mut client = McpTestClient::from_child(child, false, None);
+    let initialized = client.initialize();
+    assert!(initialized.error.is_none(), "{initialized:?}");
+    client.child.kill().unwrap();
+    client.child.wait().unwrap();
+    assert!(std::fs::read(&host_db).unwrap() == host_db_before, "QA startup changed inherited registry bytes");
+    assert!(!host_cas.join("last_global_sweep").exists());
+    assert!(!host_cas.join("logs/global-sweep.log").exists());
+    assert_eq!(std::fs::read(&host_config_sentinel).unwrap(), host_config_before);
+
+    let project = sandbox.path().join("qa-init");
+    std::fs::create_dir(&project).unwrap();
+    let init = sandbox.command()
+        .current_dir(&project)
+        .env("HOME", &host_home)
+        .env("XDG_CONFIG_HOME", &host_xdg)
+        .env("CAS_ROOT", project.join(".cas"))
+        .env("CAS_QA_SANDBOX", sandbox.path())
+        .args(["init", "--yes"]).output().unwrap();
+    assert!(init.status.success(), "{}", String::from_utf8_lossy(&init.stderr));
+    assert!(project.join(".cas/cas.db").is_file());
+    assert!(std::fs::read(&host_db).unwrap() == host_db_before, "QA startup changed inherited registry bytes");
+    assert!(!host_cas.join("last_global_sweep").exists());
+    assert!(!host_cas.join("logs/global-sweep.log").exists());
 }
 
 #[test]

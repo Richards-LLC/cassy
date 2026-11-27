@@ -1142,7 +1142,7 @@ pub(crate) use front::serving_state;
 #[cfg(feature = "mcp-proxy")]
 pub(crate) use runtime::{install_proxy_policy, load_proxy_config_for_process, worker_proxy_policy};
 pub use runtime::run_server;
-pub(crate) use runtime::QA_SANDBOX_ENV;
+pub(crate) use runtime::{QA_SANDBOX_ENV, enforce_qa_sandbox, qa_sandbox};
 #[cfg(feature = "mcp-proxy")]
 pub use runtime::{
     ProxySnapshotCache, ProxySnapshotFailure, ProxySnapshotReadError, ProxySnapshotReadErrorKind,

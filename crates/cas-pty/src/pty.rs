@@ -861,7 +861,7 @@ impl PtyConfig {
     /// Literal overrides preserve operator `cs.env_vars` and late pane overrides.
     fn forward_codex_mcp_environment(&mut self) {
         let recipe_fields = ["CAS_FACTORY_WORKER_MODEL", "CAS_FACTORY_WORKER_EFFORT"];
-        for name in std::iter::once("CODEX_HOME")
+        for name in ["CODEX_HOME", "CAS_QA_SANDBOX"].into_iter()
             .chain(TOOL_CACHE_ENV.iter().copied())
             .chain(recipe_fields)
         {
@@ -879,7 +879,11 @@ impl PtyConfig {
                 // worker selector and persist it through future recycles.
                 .or_else(|| {
                     (!recipe_fields.contains(&name))
-                        .then(|| std::env::var(name).ok())
+                        .then(|| match std::env::var(name) {
+                            Ok(value) => Some(value),
+                            Err(std::env::VarError::NotUnicode(_)) if name == "CAS_QA_SANDBOX" => Some(String::new()),
+                            Err(_) => None,
+                        })
                         .flatten()
                 });
             if let Some(value) = value.filter(|value| name != "CODEX_HOME" || !value.is_empty()) {
@@ -4839,14 +4843,12 @@ echo SMOKE_DONE
                 "PWTEST_CACHE_DIR",
                 "PYTEST_DEBUG_TEMPROOT",
                 "V8_COMPILE_CACHE_CACHE_DIR",
+                "CAS_QA_SANDBOX",
             ];
             let values: Vec<_> = keys
                 .iter()
                 .map(|key| format!("/cache space/\"quoted\"/λ/{key}"))
                 .collect();
-            for (key, value) in keys.iter().zip(&values) {
-                env.set(key, value);
-            }
             // A supervisor's inherited recipe must never fill an omitted
             // worker model. Only this spawn's resolved recipe is evidence.
             env.set("CAS_FACTORY_WORKER_MODEL", "inherited-wrong-model");
@@ -4855,12 +4857,19 @@ echo SMOKE_DONE
                 ("CAS_FACTORY_WORKER_MODEL", "gpt-6.1-terra"),
                 ("CAS_FACTORY_WORKER_EFFORT", "high"),
             ];
-            for control in ["present", "removed", "unset"] {
+            for control in ["present", "removed", "unset", "invalid-qa"] {
+                for (key, value) in keys.iter().zip(&values) {
+                    env.set(key, value);
+                }
+                if control == "invalid-qa" {
+                    use std::os::unix::ffi::OsStringExt;
+                    env.set("CAS_QA_SANDBOX", std::ffi::OsString::from_vec(vec![0xff]));
+                }
                 let mut config = PtyConfig::codex(
                     "cache-probe",
                     "worker",
                     temp.path().to_path_buf(),
-                    None,
+                    Some(&temp.path().join(".cas")),
                     None,
                     None,
                     (control != "unset").then_some(recipe[0].1),
@@ -4908,10 +4917,13 @@ echo SMOKE_DONE
                     .map(|arg| std::str::from_utf8(arg).unwrap())
                     .collect();
                 assert!(args.contains(&"mcp_servers.cs.env_vars=[\"OPERATOR_EXTRA\"]"));
+                let root_override = args.iter().find(|arg| arg.starts_with("mcp_servers.cs.env.CAS_ROOT=")).unwrap();
+                let root_toml: toml::Value = toml::from_str(root_override).unwrap();
+                assert_eq!(root_toml["mcp_servers"]["cs"]["env"]["CAS_ROOT"].as_str(), temp.path().join(".cas").to_str());
                 for (key, expected) in recipe {
                     let prefix = format!("mcp_servers.cs.env.{key}=");
                     let forwarded = args.iter().find(|arg| arg.starts_with(&prefix));
-                    if control == "present" {
+                    if control == "present" || control == "invalid-qa" {
                         let parsed: toml::Value = toml::from_str(
                             forwarded.unwrap_or_else(|| panic!("{control}: missing spawn recipe {key}")),
                         ).unwrap();
@@ -4930,7 +4942,7 @@ echo SMOKE_DONE
                             forwarded.unwrap_or_else(|| panic!("{control}: missing {key}")),
                         )
                         .unwrap();
-                        let expected = if index == 2 { explicit } else { &values[index] };
+                        let expected = if control == "invalid-qa" && *key == "CAS_QA_SANDBOX" { "" } else if index == 2 { explicit } else { &values[index] };
                         assert_eq!(
                             parsed["mcp_servers"]["cs"]["env"][key].as_str(),
                             Some(expected)

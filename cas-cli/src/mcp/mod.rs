@@ -52,7 +52,7 @@ pub mod tools;
 pub use server::CasCore;
 pub(crate) use server::AgentIdentitySource;
 pub use server::run_server;
-pub(crate) use server::QA_SANDBOX_ENV;
+pub(crate) use server::{QA_SANDBOX_ENV, enforce_qa_sandbox, qa_sandbox};
 #[cfg(unix)]
 pub(crate) use server::run_backend;
 pub(crate) use server::serving_state;

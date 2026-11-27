@@ -21,9 +21,19 @@ const SLOW_READ: Duration = Duration::from_millis(500);
 
 #[tokio::test]
 async fn resumed_blocker_replay_does_not_claim_its_delivered_notice_was_lost_cas_25e1() {
-    use crate::mcp::tools::core::task::lifecycle::supervisor_push::LifecycleTransition;
-    use cas_types::{Agent, AgentRole, Task, TaskStatus};
     let mut env = crate::test_support::TestEnvGuard::temp_home();
+    for case in ["same", "unseen", "claimed", "handoff", "occurrence", "actor", "status", "recipient", "session", "deadline"] {
+        resumed_blocker_replay(&mut env, case).await;
+    }
+}
+
+async fn resumed_blocker_replay(env: &mut crate::test_support::TestEnvGuard, case: &str) {
+    use crate::mcp::tools::core::task::block_hold::record_blocker_ask;
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+        LifecycleTransition, reconcile_blocked_task_alert,
+    };
+    use cas_store::{DeliveryStage, PendingReason, SurfacingSource};
+    use cas_types::{Agent, AgentRole, Task, TaskStatus};
     let temp = tempfile::tempdir().unwrap();
     let root = crate::store::init_cas_dir(temp.path()).unwrap();
     let mut daemon = super::super::provisioning_tests::daemon(&root);
@@ -43,39 +53,89 @@ async fn resumed_blocker_replay_does_not_claim_its_delivered_notice_was_lost_cas
     task.assignee = Some("worker-id".into());
     task.status = TaskStatus::InProgress;
     tasks.add(&task).unwrap();
-    let start = chrono::Utc::now();
     task.status = TaskStatus::Blocked;
-    tasks.update(&task).unwrap();
+    let start = tasks.update(&task).unwrap();
     tasks.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": {
         "reason": "Waiting for supervisor", "who": "worker-id", "when": start
     }})).unwrap();
-    let push = || core.push_task_lifecycle("cas-25e1-replay", "worker hold", TaskStatus::InProgress,
-        TaskStatus::Blocked, "worker-id", None, LifecycleTransition::Blocked, &start.to_rfc3339());
-    push().unwrap();
+    let push = |actor, old_status, occurrence: chrono::DateTime<chrono::Utc>| {
+        core.push_task_lifecycle(&task.id, &task.title, old_status,
+            TaskStatus::Blocked, actor, None, LifecycleTransition::Blocked, &occurrence.to_rfc3339())
+    };
+    let mut worker = agents.get("worker-id").unwrap();
+    record_blocker_ask(&root, &worker, &task.id, "First question").unwrap();
+    push("worker-id", TaskStatus::InProgress, start).unwrap();
     let queue = crate::store::open_prompt_queue_store(&root).unwrap();
     let original = queue.peek_all(10).unwrap().pop().unwrap();
-    let rendered = crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(Some(&root), &crate::hooks::HookInput {
-        session_id: "supervisor-turn".into(), agent_role: Some("supervisor".into()), ..Default::default()
-    }).expect("the real turn hook injects the lifecycle body");
-    assert!(rendered.contains(&original.prompt)); // Exact producer payload.
-    assert_eq!(queue.recipient_receipt(original.id, &name).unwrap(), Some(cas_store::SurfacingSource::HookSurfaced));
+    match case {
+        "unseen" => {}
+        "claimed" => queue.record_recipient_surfaced(original.id, &name, SurfacingSource::TransportClaimed).unwrap(),
+        "handoff" => queue.record_recipient_transport_delivered(original.id, &name).unwrap(),
+        _ => {
+            let rendered = crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(Some(&root), &crate::hooks::HookInput {
+                session_id: "supervisor-turn".into(), agent_role: Some("supervisor".into()), ..Default::default()
+            }).expect("the real turn hook injects the lifecycle body");
+            assert!(rendered.contains(&original.prompt));
+            assert_eq!(queue.recipient_receipt(original.id, &name).unwrap(), Some(SurfacingSource::HookSurfaced));
+        }
+    }
+
+    record_blocker_ask(&root, &worker, &task.id, "Renewed question").unwrap();
+    let mut lead = agents.get("lead-id").unwrap();
+    if case == "recipient" {
+        lead.name = "successor".into();
+        agents.update(&lead).unwrap();
+    } else if case == "session" {
+        lead.factory_session = Some("successor-session".into());
+        worker.factory_session = lead.factory_session.clone();
+        agents.update(&lead).unwrap();
+        agents.update(&worker).unwrap();
+    }
+    let occurrence = if case == "occurrence" { start + chrono::Duration::seconds(1) } else { start };
+    let actor = if case == "actor" { "worker" } else { "worker-id" };
+    let old_status = if case == "status" { TaskStatus::Open } else { TaskStatus::InProgress };
+    push(actor, old_status, occurrence).unwrap();
+    let renewed = queue.peek_all(10).unwrap().into_iter().find(|row| row.id > original.id).unwrap();
+    let replay = if case == "deadline" {
+        reconcile_blocked_task_alert(&root, &task.id, chrono::Utc::now() + chrono::Duration::minutes(10)).unwrap();
+        queue.peek_all(10).unwrap().into_iter().find(|row| row.id > renewed.id).unwrap()
+    } else {
+        renewed
+    };
+    assert_eq!(cas_types::parse_lifecycle_envelope(&replay.prompt).unwrap().occurrence, occurrence, "{case}");
+    assert_eq!(replay.target, lead.name, "{case}");
+    assert_eq!(replay.factory_session, lead.factory_session, "{case}");
 
     // Resume clears the structured hold. A stale reconciler still holds the
     // old Blocked emission; its fallback event timestamp creates a new key.
     task.status = TaskStatus::Open;
     tasks.update(&task).unwrap();
     tasks.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": null})).unwrap();
-    push().unwrap();
-    let replayed = queue.peek_all(10).unwrap().into_iter().map(|row| row.id).collect::<Vec<_>>();
+    push(actor, old_status, occurrence).unwrap();
+    assert!(queue.peek_all(10).unwrap().iter().all(|row| row.id <= replay.id));
+    if case != "same" {
+        super::super::prompt_queue_jobs::QueueStamp::UndeliveredRelay { notice: "stale blocker".into() }
+            .apply(queue.as_ref(), replay.id, &replay.target).unwrap();
+        assert_eq!(queue.message_delivery_report(replay.id).unwrap().unwrap().pending_reason,
+            Some(PendingReason::UndeliveredLifecycleRelay), "{case}");
+        assert!(queue.peek_all(10).unwrap().iter().any(|row| row.source == "delivery-watchdog" && row.target == replay.target), "{case}");
+        return;
+    }
     tokio::time::timeout(Duration::from_secs(5), async {
-        while replayed.iter().any(|id| queue.queued_prompt(*id).unwrap().unwrap().processed_at.is_none()) {
+        while queue.queued_prompt(replay.id).unwrap().unwrap().processed_at.is_none() {
             daemon.process_prompt_queue().await.unwrap();
             tokio::task::yield_now().await;
         }
     }).await.unwrap();
+    let replay_report = queue.message_delivery_report(replay.id).unwrap().unwrap();
+    assert_eq!(replay_report.stage, DeliveryStage::Suppressed);
+    assert_eq!(replay_report.delivered_at, None);
+    assert_eq!(queue.queued_prompt(replay.id).unwrap().unwrap().acked_at, None);
+    assert_eq!(queue.recipient_receipt(replay.id, &name).unwrap(), None);
     assert!(queue.list_undelivered_lifecycle_relays(10).unwrap().is_empty());
+    assert_eq!(queue.undelivered_lifecycle_relay_count().unwrap(), 0);
     assert!(queue.peek_all(10).unwrap().iter().all(|row| row.source != "delivery-watchdog"));
-    assert_eq!(queue.message_delivery_report(original.id).unwrap().unwrap().stage, cas_store::DeliveryStage::Confirmed);
+    assert_eq!(queue.message_delivery_report(original.id).unwrap().unwrap().stage, DeliveryStage::Confirmed);
 
     // A genuinely new blocked transition still emits its own notice.
     task.status = TaskStatus::Blocked;
@@ -83,7 +143,7 @@ async fn resumed_blocker_replay_does_not_claim_its_delivered_notice_was_lost_cas
     tasks.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": {
         "reason": "A different prerequisite", "who": "worker-id", "when": start + chrono::Duration::seconds(1)
     }})).unwrap();
-    push().unwrap();
+    push("worker-id", TaskStatus::InProgress, start + chrono::Duration::seconds(1)).unwrap();
     assert_eq!(queue.peek_all(10).unwrap().len(), 1);
 }
 

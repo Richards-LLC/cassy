@@ -386,7 +386,7 @@ fn find_lists_names_only(args: &[String]) -> bool {
         "-executable", "-true", "-false", "-nouser", "-nogroup",
     ];
     const VALUED: &[&str] = &[
-        "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-lname", "-type", "-xtype",
+        "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-lname", "-ilname", "-type", "-xtype",
         "-maxdepth", "-mindepth", "-size", "-mtime", "-mmin", "-atime", "-amin", "-ctime",
         "-cmin", "-perm", "-regex", "-iregex", "-regextype", "-user", "-group", "-uid", "-gid",
         "-links", "-inum", "-newer", "-samefile",

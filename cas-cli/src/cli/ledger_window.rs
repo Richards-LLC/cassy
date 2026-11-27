@@ -180,15 +180,16 @@ fn closures(db: &Connection, since: DateTime<Utc>, until: DateTime<Utc>) -> Resu
 
 pub(super) fn render(efficiency: &Efficiency) -> String {
     let mut out = String::new();
+    let seconds = |n: Option<f64>| n.map_or_else(|| "unknown".into(), |n| format!("{n:.2}"));
     let _ = writeln!(out, "\nRecorded factory window {} (local rows only)", efficiency.interval);
     let _ = writeln!(out, "  Refusals: {}", efficiency.refusals.render(|r| format!(
         "{} calls / {} observed merges; {} per merge; {} code facts ({:?}); {} without actor, {} without harness, {} legacy facts without a call id",
         r.calls, r.observed_merges, r.per_observed_merge.map_or_else(|| "unknown".into(), |n| format!("{n:.2}")),
         r.facts, r.by_code, r.missing_actor, r.missing_harness, r.legacy_facts_without_call_id)));
     let _ = writeln!(out, "  Supervisor wake latency: {}", efficiency.supervisor_wakes_by_harness.render(|rows| {
-        rows.iter().map(|(h, r)| format!("{h}: {} wakes; injection median/p90 {:?}/{:?} s; start median/p90 {:?}/{:?} s ({} starts, {} missing, {} invalid)",
-            r.wakes, r.created_to_injected.median_seconds, r.created_to_injected.p90_seconds,
-            r.created_to_started.median_seconds, r.created_to_started.p90_seconds,
+        rows.iter().map(|(h, r)| format!("{h}: {} wakes; injection median/p90 {}/{} s; start median/p90 {}/{} s ({} starts, {} missing, {} invalid)",
+            r.wakes, seconds(r.created_to_injected.median_seconds), seconds(r.created_to_injected.p90_seconds),
+            seconds(r.created_to_started.median_seconds), seconds(r.created_to_started.p90_seconds),
             r.created_to_started.samples, r.missing_start, r.invalid_timestamps)).collect::<Vec<_>>().join("; ")
     }));
     let i = &efficiency.issues;

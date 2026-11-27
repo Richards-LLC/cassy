@@ -383,6 +383,7 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
         .expect("uncoded MCP refusal must be retained");
     let metadata = uncoded.metadata.unwrap();
     assert_eq!(metadata["actor"], "gate-supervisor");
+    assert_eq!(metadata["role"], "supervisor");
     assert_eq!(metadata["harness"], "codex");
     assert_eq!(metadata["tool"], "task");
     assert_eq!(metadata["action"], "show");

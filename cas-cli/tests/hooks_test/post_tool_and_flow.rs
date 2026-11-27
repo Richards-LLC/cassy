@@ -221,56 +221,30 @@ fn test_stop_handles_empty_session() {
 }
 
 #[test]
-fn test_stop_synthesizes_matching_buffered_observations_component() {
+fn test_stop_discards_buffer_without_creating_memories() {
     let temp = TempDir::new().unwrap();
     init_cas_dev_mode(&temp);
-
     let session_id = "summary-session";
-
-    // Seed matching-session observations in the current tracer store. Stop's
-    // production path reads these rows, synthesizes learnings, and clears the
-    // buffer after processing it.
-    seed_buffered_observation(
-        &temp,
-        session_id,
-        "Write",
-        "Write: /src/main.rs",
-        None,
-        false,
-    );
-    seed_buffered_observation(
-        &temp,
-        session_id,
-        "Bash",
-        "Bash: cargo build",
-        Some(0),
-        false,
-    );
-    let before_stop = count_entries(&temp);
-
-    // End session
+    for (tool, content, error) in [
+        ("Write", "Write: /src/main.rs", false),
+        ("Edit", "Edit: /src/a.rs", false),
+        ("Edit", "Edit: /src/b.rs", false),
+        ("Edit", "Edit: /src/c.rs", false),
+        ("Bash", "Bash: cargo build", false),
+        ("Bash", "Bash: cargo test", true),
+    ] {
+        seed_buffered_observation(
+            &temp,
+            session_id,
+            tool,
+            content,
+            Some(i32::from(error)),
+            error,
+        );
+    }
     send_hook(&temp, "Stop", &stop_input(session_id));
-
-    // Stop should synthesize a durable learning from matching rows and clear
-    // only the rows it consumed.
-    let count = count_entries(&temp);
-    assert!(
-        count > before_stop,
-        "Stop should create a session learning. Before: {before_stop}, after: {count}"
-    );
-    assert_eq!(
-        count_buffered_observations(&temp),
-        0,
-        "Stop should clear the matching observation buffer"
-    );
-    let entries = open_entries(&temp);
-    assert!(
-        entries.iter().any(|entry| {
-            entry.session_id.as_deref() == Some(session_id)
-                && entry.tags.iter().any(|tag| tag == "build-success")
-        }),
-        "Stop synthesis should retain the source session"
-    );
+    assert_eq!(count_entries(&temp), 0);
+    assert_eq!(count_buffered_observations(&temp), 0);
 }
 
 // =============================================================================
@@ -350,6 +324,21 @@ fn test_e2e_tool_use_to_entry() {
     let session_id = "e2e-session";
     let other_session_id = "other-e2e-session";
 
+    for prompt in [
+        "Please implement the assigned project feature",
+        "Read the complete worker startup brief and implement the assigned task before returning.",
+    ] {
+        send_hook(&temp, "UserPromptSubmit", &serde_json::json!({
+            "session_id": session_id,
+            "cwd": temp.path(),
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": prompt,
+        }));
+    }
+    for file in ["/src/a.rs", "/src/b.rs", "/src/c.rs"] {
+        send_hook(&temp, "PostToolUse", &edit_tool_input(session_id, file, 5, 20));
+    }
+
     // Simulate session with tool uses
     send_hook(
         &temp,
@@ -410,14 +399,7 @@ fn test_e2e_tool_use_to_entry() {
             }),
         "unrelated session observation should retain its error metadata"
     );
-    let entries = open_entries(&temp);
-    assert!(
-        entries.iter().any(|entry| {
-            entry.session_id.as_deref() == Some(session_id)
-                && entry.tags.iter().any(|tag| tag == "session-errors")
-        }),
-        "E2E Stop should synthesize the failed Bash observation"
-    );
+    assert!(open_entries(&temp).is_empty());
 }
 
 /// GH #875's reproduction: each hook invocation is a separate `cas` process,
@@ -468,9 +450,12 @@ fn test_gh_875_issue_repro_binds_post_tool_rows_to_stop_session() {
 
     let before_stop = buffered_observations_with_sessions(&temp);
     assert_eq!(before_stop.len(), 3);
-    assert!(before_stop.iter().take(2).all(|(session, ..)| {
-        session == session_id
-    }));
+    assert!(
+        before_stop
+            .iter()
+            .take(2)
+            .all(|(session, ..)| { session == session_id })
+    );
     assert_eq!(
         before_stop[2].0, other_session_id,
         "the unrelated row must be distinguishable before Stop consumes the harness rows"
@@ -481,14 +466,7 @@ fn test_gh_875_issue_repro_binds_post_tool_rows_to_stop_session() {
     let after_stop = buffered_observations_with_sessions(&temp);
     assert_eq!(after_stop.len(), 1);
     assert_eq!(after_stop[0].0, other_session_id);
-    assert!(
-        open_entries(&temp).iter().any(|entry| {
-            entry.session_id.as_deref() == Some(session_id)
-                && entry.tags.iter().any(|tag| tag == "session-errors")
-                && entry.content.contains("Bash: cargo test")
-        }),
-        "Stop must synthesize the matching failed Bash observation"
-    );
+    assert!(open_entries(&temp).is_empty());
 }
 
 #[test]
@@ -545,38 +523,6 @@ fn test_e2e_multiple_sessions() {
             .count(),
         1,
         "Session 2 records must remain isolated"
-    );
-}
-
-#[test]
-fn test_e2e_error_observation_captured() {
-    let temp = TempDir::new().unwrap();
-    init_cas_dev_mode(&temp);
-
-    let session_id = "error-session";
-
-    // Send only an error
-    send_hook(
-        &temp,
-        "PostToolUse",
-        &bash_tool_input(session_id, "cargo test", 1),
-    );
-    send_hook(&temp, "Stop", &stop_input(session_id));
-
-    // Stop should consume the matching error row and synthesize a durable
-    // learning with the failed command content.
-    let observations = buffered_observations_with_sessions(&temp);
-    assert!(
-        observations.is_empty(),
-        "Stop should consume the matching error observation"
-    );
-    assert!(
-        open_entries(&temp).iter().any(|entry| {
-            entry.session_id.as_deref() == Some(session_id)
-                && entry.tags.iter().any(|tag| tag == "session-errors")
-                && entry.content.contains("Bash: cargo test")
-        }),
-        "Stop should synthesize the failed Bash observation"
     );
 }
 

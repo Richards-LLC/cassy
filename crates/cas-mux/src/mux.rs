@@ -953,7 +953,6 @@ impl Mux {
         supervisor_name: &str,
         teams: Option<&TeamsSpawnConfig>,
         spec: Option<WorkerSpec>,
-        before_spawn: impl FnOnce(Option<&str>) -> std::io::Result<()>,
     ) -> PtyConfig {
         let effective = self.effective_worker_spec(name, spec);
         let effort_str = effective
@@ -1028,6 +1027,7 @@ impl Mux {
         supervisor_name: &str,
         teams: Option<&TeamsSpawnConfig>,
         spec: Option<WorkerSpec>,
+        before_spawn: impl FnOnce(Option<&str>) -> std::io::Result<()>,
     ) -> Result<PaneId> {
         // Check if pane with this name already exists
         if self.panes.contains_key(name) {

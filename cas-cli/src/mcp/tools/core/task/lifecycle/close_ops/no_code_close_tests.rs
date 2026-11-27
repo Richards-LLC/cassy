@@ -534,7 +534,7 @@ async fn repeat_review_every_entry_refuses_g172_gh2373() {
     };
     let queue_result = core.advance_queue_after_delivery(&predecessor.id).await;
     let after = f.task(id);
-    if !queue_result.as_ref().is_err_and(repeat_hold)
+    if queue_result.is_err()
         || after.status != queued.status || after.assignee != queued.assignee
         || queues.get(session, WORKER).unwrap() != cursor || lease() != before_lease
     {
@@ -555,7 +555,7 @@ async fn repeat_review_every_entry_refuses_g172_gh2373() {
     let before_retry = lease();
     let retry = core.advance_queue_after_delivery(&predecessor.id).await;
     let after_retry = lease();
-    if !retry.as_ref().is_err_and(repeat_hold)
+    if retry.is_err()
         || after_retry != before_retry || queues.get(session, WORKER).unwrap() != recovery_cursor
     {
         failures.push(format!("queue retry: {retry:?}; lease {before_retry:?} -> {after_retry:?}"));

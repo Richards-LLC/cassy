@@ -635,6 +635,10 @@ fn processed_shutdown_fixture(include_dead: bool, finish_tasks: bool) -> Fixture
     let request_id = if finish_tasks {
         let tasks = crate::store::open_task_store(&cas_dir).unwrap();
         for (index, name) in names.iter().enumerate() {
+            let agents = open_agent_store(&cas_dir).unwrap();
+            let mut worker = agents.get(&format!("agent-{name}")).unwrap();
+            worker.factory_session = Some(SESSION.into());
+            agents.update(&worker).unwrap();
             let mut task = cas_types::Task::new(format!("cas-retire-{index}"), "Finished work".into());
             task.assignee = Some(name.clone());
             task.status = if index == 0 { cas_types::TaskStatus::AwaitingMerge } else { cas_types::TaskStatus::Cancelled };

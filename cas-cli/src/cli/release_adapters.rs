@@ -769,7 +769,9 @@ mod tests {
 
     impl Reconciler for Recording {
         fn reusable(&self, _: &Path, key: &ReleaseOperationKey, _: &ReconcileTrigger) -> Result<Option<ReleaseReconcileReceipt>> {
-            Ok(self.done.borrow().iter().find(|r| &r.key == key).cloned())
+            let found = self.done.borrow().iter().find(|r| &r.key == key).cloned();
+            assert!(found.as_ref().is_none_or(|r| !r.complete || r.residuals.is_empty()), "unreachable completed release record");
+            Ok(found)
         }
         fn reconcile(&self, root: &Path, scope: &ReleaseScope, _: &ReleaseInventory, trigger: ReconcileTrigger) -> Result<ReleaseReconcileReceipt> {
             let tree = release_reconcile::final_tree(root.parent().unwrap(), &scope.final_release_sha).unwrap();

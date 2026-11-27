@@ -1,15 +1,14 @@
 //! Release freeze (cas-2f4d): the operator's release request as train state.
 //!
-//! The freeze is one label on the release-train epic, so it reaches a peer
-//! machine through ordinary task sync and that machine's merge gate refuses
-//! too. While a train is frozen, Cassy refuses worktree_merge into it, new
-//! staffing on it and CI retries armed against it. A `release-repair` task is
-//! the one exception, and only while the train is red: a recorded
-//! train-suite red, a cut refusal recorded by `release.sh` (GH #2027), or a
-//! failed GitHub train run at the frozen tip. The freeze ends when a
-//! published release covers its tip, when the operator lifts it in Commander,
-//! or when the train's live supervisor lifts it with an audited reason
-//! (cas-444b). A freeze the operator applied in Commander stays the
+//! The freeze is one label on the release-train epic. It blocks one thing: a
+//! `worktree_merge` into the frozen release branch. Merges into main or any
+//! other branch, staffing, worker spawns and CI retries never read it. A
+//! `release-repair` task is the one exception, and only while the train is
+//! red: a recorded train-suite red, a cut refusal recorded by `release.sh`
+//! (GH #2027), or a failed GitHub train run at the frozen tip. The freeze ends
+//! when a published release covers its tip, when the operator lifts it in
+//! Commander, or when the train's live supervisor lifts it with an audited
+//! reason (cas-444b). A freeze the operator applied in Commander stays the
 //! operator's unless `release.supervisor_lifts_operator_freeze` grants it.
 
 use std::path::{Path, PathBuf};
@@ -179,8 +178,8 @@ pub(crate) fn frozen_since(train: &Task, freeze: &Freeze) -> String {
     format!("{} has been frozen since {} at tip {}", train.id, eastern(freeze.at), short(&freeze.tip))
 }
 
-/// The merge gate: worktree_merge (before and under the target lock) and CI
-/// retry arming. A repair admitted under a red is noted on the train once.
+/// The merge gate: worktree_merge into a frozen release branch (before and
+/// under the target lock). A repair admitted under a red is noted on the train once.
 pub(crate) fn check_merge(root: &Path, target: &str, task_id: Option<&str>) -> Result<(), String> {
     let store = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
     let tasks = store.list(None).map_err(|error| error.to_string())?;
@@ -202,28 +201,6 @@ pub(crate) fn check_merge(root: &Path, target: &str, task_id: Option<&str>) -> R
         store.append_note(&train.id, &line).map_err(|error| error.to_string())?;
     }
     Ok(())
-}
-
-/// The staffing gate: spawning, assigning or starting new work on a frozen
-/// train. Work already under way may resume; repairs may always start.
-pub(crate) fn check_staffing(root: &Path, task_id: &str) -> Result<()> {
-    let store = crate::store::open_task_store(root)?;
-    // An unknown id is the caller's own error to report, not a freeze refusal.
-    let Ok(task) = store.get(task_id) else { return Ok(()) };
-    let (train, subject) = if is_release_train(&task) {
-        (task, "no new workers join it".to_string())
-    } else if task.status == crate::types::TaskStatus::Open && !is_repair(&task) {
-        match store.get_parent_epic(task_id)? {
-            Some(train) => (train, format!("{task_id} starts on the next train, not this one")),
-            None => return Ok(()),
-        }
-    } else {
-        return Ok(());
-    };
-    match active(root, &train) {
-        Some(freeze) => anyhow::bail!(crate::gates::tag("G-06", refusal(&train, &freeze, &subject).replace(" No merge was attempted.", ""))),
-        None => Ok(()),
-    }
 }
 
 /// Median minutes of each release stage still ahead, from the friction
@@ -439,7 +416,7 @@ fn freeze_with_promotion(
     let freeze = Freeze { at: DateTime::from_timestamp(now.timestamp(), 0).unwrap_or(now), tip };
     let train_ci = crate::train_ci::freeze_dispatch(root, &task);
     Ok((format!(
-        "TRAIN FROZEN: {train_id} at {}. {}. Merges, new staffing and CI retries into {lane} are refused on every machine \
+        "TRAIN FROZEN: {train_id} at {}. {}. Merges into {lane} are refused \
          except `{REPAIR_LABEL}` tasks while the train is red; new tasks join the next train. \
          The freeze ends on publication, an operator lift in Commander, or an audited supervisor lift.{ownership}",
         short(&freeze.tip),
@@ -781,7 +758,11 @@ mod tests {
         let peer = crate::store::open_task_store(&root).unwrap().get("cas-tr").unwrap();
         assert!(freeze_of(&peer).is_some());
         let refused = check_merge(&root, lane, Some("cas-feat")).unwrap_err();
-        assert!(refused.contains("train frozen for release, parked for the next train"), "{refused}");
+        assert_eq!(crate::gates::codes_in(&refused), vec!["G-100"], "{refused}");
+        // The freeze holds its own release branch only: other targets and
+        // staffing the train's open work are not refused.
+        check_merge(&root, "main", Some("cas-feat")).unwrap();
+        crate::epic_design_review::ensure_staffing_allowed(&root, "cas-feat").unwrap();
         assert!(check_merge(&root, lane, Some("cas-fix")).is_err(), "repair without a red");
 
         let tip = git(repo, &["rev-parse", lane]);
@@ -800,14 +781,12 @@ mod tests {
         }).to_string()).unwrap();
         check_merge(&root, lane, Some("cas-fix")).unwrap();
         assert!(check_merge(&root, lane, Some("cas-feat")).is_err(), "red admits repairs only");
-        assert!(check_staffing(&root, "cas-feat").is_err());
         let notes = crate::store::open_task_store(&root).unwrap().get("cas-tr").unwrap().notes;
         assert!(notes.contains("cas-fix"), "{notes}");
 
         // Landing on main does not end the freeze; only publication does.
         git(repo, &["merge", "-q", "--no-ff", lane, "-m", "release"]);
         assert!(check_merge(&root, lane, Some("cas-feat")).is_err(), "landed, not published");
-        assert!(check_staffing(&root, "cas-feat").is_err(), "landed, not published");
         // The published-release receipt records a Release event whose tag holds the tip.
         git(repo, &["tag", "v9.9.9"]);
         let mut published = cas_store::NewQualityEvent::new(
@@ -818,13 +797,11 @@ mod tests {
         published.occurred_at = Utc::now();
         cas_store::record_quality_event(&root, &published).unwrap();
         check_merge(&root, lane, Some("cas-feat")).unwrap();
-        check_staffing(&root, "cas-feat").unwrap();
     }
 
     /// GH #1919: G-100 says to retarget parked work to the next train. That
-    /// one proof_scope_fix update now moves the parent too, so the re-park
-    /// start is not refused G-06 by the frozen train. cas-cc3a: the move is
-    /// one transaction with the retarget.
+    /// one proof_scope_fix update now moves the parent too. cas-cc3a: the move
+    /// is one transaction with the retarget.
     #[tokio::test]
     async fn retarget_to_next_train_moves_parent_so_start_is_not_refused_gh_1919() {
         let _env = TestEnvGuard::temp_home();
@@ -870,7 +847,6 @@ mod tests {
         retarget().await.unwrap_or_else(|error| panic!("{}", error.message));
 
         assert_eq!(store.get_parent_epic("cas-feat").unwrap().map(|epic| epic.id).as_deref(), Some("cas-tr2"));
-        check_staffing(&root, "cas-feat").unwrap();
     }
 
     /// The train's live supervisor, registered and calling the real factory tool.

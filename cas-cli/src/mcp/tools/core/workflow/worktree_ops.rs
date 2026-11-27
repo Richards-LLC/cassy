@@ -5096,48 +5096,6 @@ impl CasCore {
         super::train_merge::admit(self, &cwd, &worktree.parent_branch, task_id, train_queue)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
 
-        // Both stored and inferred worktrees pass here. An explicit trunk
-        // override cannot move main around an open train; the release script
-        // publishes the train through its normal PR/merge-queue path instead.
-        let target = worktree.parent_branch.strip_prefix("refs/heads/")
-            .unwrap_or(&worktree.parent_branch);
-        let target = target.strip_prefix("origin/").unwrap_or(target);
-        let integration = Config::configured_epic_base_branch(&cwd)
-            .unwrap_or_else(|| manager.git().detect_default_branch());
-        // gate[G-99 merge-admission integrity]: Release train open (trunk merge refused)
-        if matches!(target, "main" | "master" | "trunk")
-            || target == integration || target == manager.git().detect_default_branch()
-        {
-            let tasks = self.open_task_store()?;
-            let trains = tasks.list(None).map_err(|error| Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Cannot check open release trains before worktree_merge: {error}"),
-            ))?;
-            if let Some(train) = trains.iter().filter(|task| {
-                crate::mcp::tools::core::task::release_train::is_release_train(task)
-                    && !task.is_terminal()
-                    && task.deliverables.work_target.as_ref().is_some_and(|target| {
-                        crate::mcp::tools::core::task::repo_context::repo_answers_to(
-                            &cwd, &target.repo_selector,
-                        )
-                    })
-            }).min_by_key(|task| (
-                crate::mcp::tools::core::task::release_train::is_cut_train(task), task.created_at,
-            )) {
-                let guidance = if crate::mcp::tools::core::task::release_train::is_cut_train(train) {
-                    "This train is cut and accepts no further merges. Wait for it to land or open the next train before merging work."
-                } else {
-                    "Merge work into the train. For a one-item hotfix train, run `scripts/release.sh --hotfix` from its lane; it uses the normal release PR and publication path."
-                };
-                return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-99", format!(
-                    "RELEASE TRAIN OPEN: {} ({}) owns {target}; worktree_merge cannot advance \
-                     trunk while this train is open, including with allow_trunk=true. \
-                     {guidance}",
-                    train.id, train.effective_epic_branch().unwrap_or(&train.title),
-                ))));
-            }
-        }
-
         // Bind this mutation to the task's declared work repository before
         // merge/reachability checks. A cleaned-up source is the sole
         // exception: immutable receipt and target ancestry are authenticated

@@ -1,0 +1,3 @@
+## Core Concepts
+
+- **Nothing owns main** - an open, cut or frozen release train no longer refuses `worktree_merge` into main or any other branch; only a merge into a cut or frozen train's own lane is refused, and a `release-repair` task still merges while the train is red. A freeze is read only by that merge gate: worker spawns, task starts, CI retries and the supervisor's automatic context clear ignore it. The freeze label still syncs with the train's task row, so a peer machine refuses merges into that lane and nothing else. This replaces the earlier statements that an open train refuses direct main/trunk targets and that a freeze refuses staffing and CI retries.

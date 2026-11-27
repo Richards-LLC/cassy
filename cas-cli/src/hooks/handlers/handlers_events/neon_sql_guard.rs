@@ -206,6 +206,37 @@ fn recorded_production_branches(
     out
 }
 
+/// `(tool name, input)` of every call an `mcp_execute` code value dispatches: a JSON object or
+/// array (possibly as a string), or `server.tool({...})` syntax whose unparseable arguments are
+/// judged as SQL text.
+fn dispatched_calls(code: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
+    use serde_json::Value;
+    match code {
+        Value::Array(items) => items.iter().flat_map(dispatched_calls).collect(),
+        Value::Object(call) => {
+            let field = |key: &str| call.get(key).and_then(Value::as_str).unwrap_or_default();
+            let input = ["arguments", "args", "input", "params"]
+                .iter()
+                .find_map(|key| call.get(*key))
+                .cloned()
+                .unwrap_or(Value::Null);
+            vec![(format!("mcp__{}__{}", field("server"), field("tool")), input)]
+        }
+        Value::String(text) => {
+            if let Ok(dispatch) = serde_json::from_str::<Value>(text) {
+                return dispatched_calls(&dispatch);
+            }
+            let Some((server, rest)) = text.trim().split_once('.') else { return Vec::new() };
+            let (tool, arguments) = rest.split_once('(').map_or((rest, ""), |(tool, arguments)| {
+                (tool, arguments.trim_end().trim_end_matches(';').trim_end().trim_end_matches(')'))
+            });
+            let input = serde_json::from_str(arguments).unwrap_or_else(|_| serde_json::json!({ "sql": arguments }));
+            vec![(format!("mcp__{}__{}", server.trim(), tool.trim()), input)]
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// The deny reason for a worker's Neon SQL call that writes to production, or
 /// `None` when the call is allowed (a read, or a write to another branch).
 pub(crate) fn neon_production_write_denial(
@@ -213,6 +244,11 @@ pub(crate) fn neon_production_write_denial(
     tool_input: Option<&serde_json::Value>,
     roots: &[PathBuf],
 ) -> Option<String> {
+    if tool_name.to_ascii_lowercase().ends_with("mcp_execute") {
+        return dispatched_calls(tool_input?.get("code")?)
+            .into_iter()
+            .find_map(|(name, input)| neon_production_write_denial(&name, Some(&input), roots));
+    }
     if !is_neon_sql_tool(tool_name) {
         return None;
     }

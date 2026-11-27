@@ -72,28 +72,59 @@ const WRAPPED_CLIS: &[(&str, &str)] = &[
     ("neonctl", "/usr/local/bin/neonctl projects list"),
 ];
 
-/// A worker running a stock denied CLI through wrappers or a path is flagged
-/// (neonctl, the production-database rail, is refused), with and without a CAS root.
+/// A worker running a stock denied CLI through wrappers or a path is flagged,
+/// with and without a CAS root.
 #[test]
 fn a_worker_is_flagged_for_default_clis_however_wrapped() {
     let (_env, home) = role_env("worker");
     let project = tempfile::tempdir().unwrap();
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
-    for (cli, command) in WRAPPED_CLIS {
+    for (_, command) in WRAPPED_CLIS {
         for root in [Some(cas_root.as_path()), None] {
-            let output = handle_pre_tool_use(&bash(command, home.path()), root).unwrap();
-            if *cli == "neonctl" {
-                let reason = denial(output).unwrap_or_else(|| panic!("{command} was allowed (root {root:?})"));
-                assert!(reason.contains("[H-17]"), "{command}: {reason}");
-            } else {
-                assert!(flagged(output), "{command} was not flagged (root {root:?})");
-            }
+            assert!(flagged(handle_pre_tool_use(&bash(command, home.path()), root).unwrap()), "{command} was not flagged (root {root:?})");
         }
     }
     for command in ["git log --grep vercel", "cat vercel.json", "git log --grep neonctl", "cat .env.cas-db", "npm run build"] {
         let output = handle_pre_tool_use(&bash(command, home.path()), Some(&cas_root)).unwrap();
         assert!(!flagged(output));
     }
+}
+
+/// A worker's neonctl write is the production-database rail (H-17): refused even after an earlier
+/// flagged CLI, through a package runner, with the CLI list emptied, and as Neon SQL dispatched
+/// through mcp_execute.
+#[test]
+fn a_worker_neonctl_write_is_refused_as_the_production_rail() {
+    let (_env, home) = role_env("worker");
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    let refused = |input: HookInput, root: Option<&std::path::Path>| {
+        let reason = denial(handle_pre_tool_use(&input, root).unwrap()).expect("refused");
+        crate::gates::codes_in(&reason)
+    };
+    for command in [
+        "neonctl branches reset production",
+        "vercel ls; neonctl branches delete br-demo",
+        "npx -y neonctl@latest projects delete demo",
+        "sh -c 'neonctl connection-string main'",
+    ] {
+        assert!(refused(bash(command, home.path()), Some(&cas_root)).contains(&"H-17"), "{command}");
+    }
+    let mut config = Config::load(&cas_root).unwrap_or_default();
+    config.set("factory.worker_denied_clis", "").unwrap();
+    config.save(&cas_root).unwrap();
+    assert!(refused(bash("neonctl branches reset production", home.path()), Some(&cas_root)).contains(&"H-17"));
+    let output = handle_pre_tool_use(&bash("neonctl projects list", home.path()), Some(&cas_root)).unwrap();
+    assert!(denial(output).is_none(), "a neonctl read is not the rail");
+    for code in [
+        json!({"server": "neon", "tool": "run_sql", "arguments": {"sql": "DELETE FROM users"}}),
+        json!("neon.run_sql({\"sql\": \"UPDATE users SET admin = true\"})"),
+    ] {
+        let call = input("mcp__cas__mcp_execute", json!({ "code": code }), home.path());
+        assert!(refused(call, Some(&cas_root)).contains(&"H-17"), "{code}");
+    }
+    let read = input("mcp__cas__mcp_execute", json!({"code": {"server": "neon", "tool": "run_sql", "arguments": {"sql": "SELECT 1"}}}), home.path());
+    assert!(denial(handle_pre_tool_use(&read, Some(&cas_root)).unwrap()).is_none());
 }
 
 /// Supervisors and non-factory sessions are unaffected.

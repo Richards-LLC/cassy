@@ -3,7 +3,7 @@
 use crate::hooks::handlers::handle_pre_tool_use;
 use crate::test_support::TestEnvGuard;
 use cas_core::hooks::types::{HookInput, HookOutput};
-use cas_store::EventStore;
+use cas_store::{EventStore, RuleStore};
 use cas_types::{EventType, Task, TaskStatus};
 use serde_json::{Value, json};
 
@@ -104,6 +104,9 @@ fn kept_guards_still_deny_over_real_hook_json() {
         (bash(&format!("{unparseable}; cat ~/.config/neonctl/credentials.json"), project), "H-09"),
         (bash(&format!("{unparseable}; echo x > /etc/cas-demo-outside"), project), "H-29"),
         (bash("cat .env", project), "H-33"),
+        (bash("printf '%s' \"$(cat .env)\"", project), "H-33"),
+        (bash("printf '%s' \"`cat .env`\"", project), "H-33"),
+        (bash(&format!("{unparseable}; cd /etc; printf x > cas-demo-outside"), project), "H-29"),
         (bash(&format!("{unparseable}; cat .env"), project), "H-33"),
         (bash(&format!("echo hi # <<'X'\ntouch /etc/cas-demo-outside\nX\n{unparseable}"), project), "H-29"),
         (bash(&format!("echo \"$(touch /etc/cas-demo-outside)\"; {unparseable}"), project), "H-29"),
@@ -150,4 +153,33 @@ fn only_gitignored_test_env_files_pass_while_other_env_files_stay_protected() {
     ] {
         assert!(worker.denied_by(&write(path.clone())).contains(&"H-33"), "{path:?}");
     }
+}
+
+#[test]
+fn secret_reads_follow_the_statement_directory_and_home() {
+    let worker = worker();
+    let project = worker.project.path();
+    std::fs::create_dir_all(project.join("only")).unwrap();
+    std::fs::write(project.join("only/.env"), "K=v").unwrap();
+    std::fs::write(std::path::Path::new(&std::env::var("HOME").unwrap()).join(".env"), "K=v").unwrap();
+    worker.proceeds(&bash("cat .env", project));
+    for command in ["cd only && cat .env", "cat ~/.env", "(cd only; cat .env)"] {
+        assert!(worker.denied_by(&bash(command, project)).contains(&"H-33"), "{command}");
+    }
+}
+
+#[test]
+fn secret_reads_are_refused_on_every_entry_path() {
+    let worker = worker();
+    let project = worker.project.path();
+    std::fs::write(project.join(".env"), "K=v").unwrap();
+    let rootless = handle_pre_tool_use(&hook_input("Read", json!({"file_path": project.join(".env")}), project), None).unwrap();
+    assert!(crate::test_support::pretool_blocked(&rootless), "no Cassy root");
+    let mut rule = cas_types::Rule::new("rule-demo-read".into(), "Reads are approved".into());
+    rule.status = cas_types::RuleStatus::Proven;
+    rule.auto_approve_tools = Some("Read".into());
+    rule.auto_approve_paths = Some("**".into());
+    assert!(rule.can_auto_approve());
+    crate::store::open_rule_store(&worker.cas_root).unwrap().add(&rule).unwrap();
+    assert!(worker.denied_by(&hook_input("Read", json!({"file_path": project.join(".env")}), project)).contains(&"H-33"));
 }

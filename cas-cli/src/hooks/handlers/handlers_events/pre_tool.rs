@@ -552,16 +552,27 @@ fn is_env_fixture(path: &str) -> bool {
         })
 }
 
-/// Whether a path names a protected secret file by the default patterns.
-fn secret_path_hit(path: &str, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
+fn env_path_hit(path: &str, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
     protection.files.iter().any(|pattern| (path.ends_with(pattern.as_str()) || path.contains(&format!("/{pattern}"))) && !is_env_fixture(path))
-        || protection.patterns.iter().any(|pattern| path.ends_with(pattern.as_str()) || path.contains(pattern.as_str()))
+}
+
+fn credential_path_hit(path: &str, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
+    protection.patterns.iter().any(|pattern| path.ends_with(pattern.as_str()) || path.contains(pattern.as_str()))
+}
+
+fn secret_path_hit(path: &str, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
+    env_path_hit(path, protection) || credential_path_hit(path, protection)
 }
 
 /// A word that is an existing real secret file once resolved: `.env` and its non-template
 /// variants, credential and key files by basename. Templates and gitignored test files are not secrets.
-fn real_secret_word(word: &str, cwd: &Path, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
-    let path = cwd.join(word);
+fn real_secret_word(word: &str, directory: &Path, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let path = match (word, word.strip_prefix("~/").or_else(|| word.strip_prefix("$HOME/")), &home) {
+        ("~" | "$HOME", _, Some(home)) => home.clone(),
+        (_, Some(rest), Some(home)) => home.join(rest),
+        _ => directory.join(word),
+    };
     if !path.exists() {
         return false;
     }
@@ -576,18 +587,59 @@ fn real_secret_word(word: &str, cwd: &Path, protection: &crate::config::PreToolU
     }) || protection.patterns.iter().any(|pattern| name.ends_with(pattern.as_str()))
 }
 
-/// Whether a Bash command names a real secret file as a word; quoted text with spaces is data.
+/// Whether a Bash command names an existing real secret file, in any statement, substitution
+/// or payload, resolved against that statement's own directory.
 fn command_reads_real_secret(command: &str, cwd: &Path, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
-    let words: Vec<String> = if shell_effects::collect(command, cwd).is_ok() {
-        shell_statement_words(command).into_iter().flatten().collect()
-    } else {
-        command
-            .split(|c: char| c.is_whitespace() || "\"'`();|&<>=,{}[]".contains(c))
-            .filter(|word| !word.is_empty())
-            .map(str::to_string)
-            .collect()
+    let Some(contexts) = shell_read_contexts(command, cwd) else {
+        let mut texts = vec![command.to_string()];
+        texts.extend(raw_substitution_bodies(command));
+        return texts.iter().any(|text| {
+            text.split(|c: char| c.is_whitespace() || "\"'`();|&<>=,{}[]".contains(c))
+                .filter(|word| !word.is_empty())
+                .any(|word| real_secret_word(word, cwd, protection))
+        });
     };
-    words.iter().any(|word| !word.contains(char::is_whitespace) && real_secret_word(word, cwd, protection))
+    let unknown = std::ffi::OsStr::new(UNKNOWN_DIRECTORY);
+    contexts.iter().any(|context| {
+        let directories: Vec<PathBuf> = context
+            .directories
+            .iter()
+            .map(|directory| match directory {
+                Some(directory) if !directory.components().any(|part| part.as_os_str() == unknown) => directory.clone(),
+                _ => cwd.to_path_buf(),
+            })
+            .collect();
+        let words: Vec<String> = shell_statement_words(&context.command).into_iter().flatten().collect();
+        directories.iter().any(|directory| words.iter().any(|word| real_secret_word(word, directory, protection)))
+    })
+}
+
+/// The H-33 refusal for a call judged without any store: default protection patterns and the
+/// operator-store exemption, for every entry path that has no stores to load.
+fn secret_denial_without_stores(input: &HookInput) -> Option<String> {
+    let tool = input.tool_name.as_deref()?;
+    let protection = crate::config::PreToolUseProtectionConfig::default();
+    let operator_store = (!crate::harness_policy::is_factory_agent(input) || crate::harness_policy::is_supervisor(input))
+        && super::operator_credentials::references_store(input, tool);
+    let cwd = Path::new(&input.cwd);
+    let command = input
+        .tool_input
+        .as_ref()
+        .and_then(|tool_input| tool_input.get("command").and_then(|command| command.as_str()))
+        .filter(|_| tool == "Bash");
+    let targets: Vec<String> = command
+        .map(|command| literal_targets(command, cwd, bash_write_targets, place_path))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|target| cwd.join(target).to_string_lossy().into_owned())
+        .collect();
+    let file_path = input.tool_input.as_ref().and_then(|tool_input| tool_input.get("file_path")).and_then(|path| path.as_str());
+    let hit = file_path
+        .into_iter()
+        .chain(targets.iter().map(String::as_str))
+        .any(|path| env_path_hit(path, &protection) || (!operator_store && credential_path_hit(path, &protection)))
+        || (!operator_store && command.is_some_and(|command| command_reads_real_secret(command, cwd, &protection)));
+    hit.then(|| crate::gates::tag("H-33", "Protected file: may contain secrets or credentials"))
 }
 
 /// Whether any word of the text names a protected secret file.
@@ -648,24 +700,92 @@ fn raw_substitution_bodies(text: &str) -> Vec<String> {
     bodies
 }
 
-/// For a command the recognizer cannot resolve: every line of it and of every substitution
-/// body is a command line, whatever its quotes or heredoc markers claim.
-fn lexical_literals<T>(command: &str, direct: fn(&str) -> Vec<T>) -> Vec<T> {
+/// The statements of a command text, split at newlines, `;`, `&&` and `||`.
+fn statement_pieces(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '\n' || ch == ';' || ((ch == '&' || ch == '|') && chars.get(index + 1) == Some(&ch)) {
+            pieces.push(std::mem::take(&mut current));
+            index += usize::from(ch == '&' || ch == '|');
+        } else {
+            current.push(ch);
+        }
+        index += 1;
+    }
+    pieces.push(current);
+    pieces
+}
+
+/// The directory after a statement: a literal `cd` moves it, an unresolvable one leaves it unknown.
+fn directory_after(piece: &str, directory: Option<PathBuf>) -> Option<PathBuf> {
+    let words: Vec<&str> = piece.trim().trim_start_matches(['(', '{']).split_whitespace().collect();
+    match words.first().copied() {
+        Some("cd") => {
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let target = words[1..]
+                .iter()
+                .map(|word| word.trim_matches(['\'', '"']))
+                .find(|word| !matches!(*word, "-P" | "-L" | "--"));
+            match target {
+                None | Some("~") => home,
+                Some(word) if word.contains(['$', '`', '*', '?', '[']) || word.starts_with('-') => None,
+                Some(word) => match word.strip_prefix("~/") {
+                    Some(rest) => home.map(|home| home.join(rest)),
+                    None if word.starts_with('/') => Some(PathBuf::from(word)),
+                    None => directory.map(|directory| directory.join(word)),
+                },
+            }
+        }
+        Some("pushd" | "popd") => None,
+        _ => directory,
+    }
+}
+
+fn place_path(directory: Option<&Path>, target: String) -> Option<String> {
+    if target.starts_with(['/', '~', '$']) {
+        return Some(target);
+    }
+    directory.map(|directory| directory.join(&target).to_string_lossy().into_owned())
+}
+
+fn place_delete(directory: Option<&Path>, (target, recursive): (String, bool)) -> Option<(String, bool)> {
+    place_path(directory, target).map(|target| (target, recursive))
+}
+
+/// For a command the recognizer cannot resolve: every statement of it and of every substitution
+/// body is a command, whatever its quotes or heredoc markers claim, run in the directory the
+/// literal `cd`s before it left.
+fn lexical_literals<T>(
+    command: &str,
+    cwd: &Path,
+    direct: fn(&str) -> Vec<T>,
+    place: fn(Option<&Path>, T) -> Option<T>,
+) -> Vec<T> {
     let mut found = with_substitutions(command, direct);
     let mut texts = vec![command.to_string()];
     texts.extend(raw_substitution_bodies(command));
-    for line in texts.iter().flat_map(|text| text.lines()) {
-        found.extend(direct(line));
-        found.extend(direct(&line.replace(['\'', '"'], " ")));
+    for text in &texts {
+        let mut directory = Some(cwd.to_path_buf());
+        for piece in statement_pieces(text) {
+            let unquoted = piece.replace(['\'', '"'], " ");
+            for target in direct(&piece).into_iter().chain(direct(&unquoted)) {
+                found.extend(place(directory.as_deref(), target));
+            }
+            directory = directory_after(&piece, directory);
+        }
     }
     found
 }
 
-fn literal_targets<T>(command: &str, cwd: &Path, direct: fn(&str) -> Vec<T>) -> Vec<T> {
+fn literal_targets<T>(command: &str, cwd: &Path, direct: fn(&str) -> Vec<T>, place: fn(Option<&Path>, T) -> Option<T>) -> Vec<T> {
     if shell_effects::collect(command, cwd).is_ok() {
         with_substitutions(command, direct)
     } else {
-        lexical_literals(command, direct)
+        lexical_literals(command, cwd, direct, place)
     }
 }
 
@@ -715,36 +835,10 @@ pub(crate) fn record_demoted(input: Option<&HookInput>, cas_root: &Path, reason:
     }
 }
 
-/// The native entry's fail-open answer when the hook cannot run with its stores: the
-/// guards that need none, then the default secret-file patterns.
+/// The native entry's fail-open answer when the hook cannot run with its stores: the guards
+/// that need none, including the secret-file check.
 pub(crate) fn pre_tool_without_stores(input: &HookInput) -> HookOutput {
-    let output = handle_pre_tool_use(input, None).unwrap_or_else(|_| HookOutput::empty());
-    if crate::gates::facts::hook_denial(&output).is_some() {
-        return output;
-    }
-    let protection = crate::config::PreToolUseProtectionConfig::default();
-    let shell_targets: Vec<String> = input
-        .tool_input
-        .as_ref()
-        .and_then(|tool_input| tool_input.get("command").and_then(|command| command.as_str()))
-        .filter(|_| input.tool_name.as_deref() == Some("Bash"))
-        .map(|command| lexical_literals(command, bash_write_targets))
-        .unwrap_or_default()
-        .into_iter()
-        .map(|target| Path::new(&input.cwd).join(target).to_string_lossy().into_owned())
-        .collect();
-    let file_path = input.tool_input.as_ref().and_then(|tool_input| tool_input.get("file_path")).and_then(|path| path.as_str());
-    let command = input
-        .tool_input
-        .as_ref()
-        .and_then(|tool_input| tool_input.get("command").and_then(|command| command.as_str()))
-        .filter(|_| input.tool_name.as_deref() == Some("Bash"));
-    let names_secret = file_path.into_iter().chain(shell_targets.iter().map(String::as_str)).any(|path| secret_path_hit(path, &protection))
-        || command.is_some_and(text_names_secret_path);
-    if names_secret {
-        return HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-33", "Protected file: may contain secrets or credentials"));
-    }
-    output
+    handle_pre_tool_use(input, None).unwrap_or_else(|_| HookOutput::empty())
 }
 
 /// Pure admission selection; safe before logging, DB discovery or telemetry.
@@ -1241,6 +1335,12 @@ fn handle_pre_tool_use_checked(
         return Ok(denial);
     }
 
+    if cas_root.is_none()
+        && let Some(reason) = secret_denial_without_stores(input)
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+    }
+
     // ========================================================================
     // FACTORY WORKSPACE CONTRACT — ROOT-INDEPENDENT FALLBACK
     //
@@ -1666,51 +1766,6 @@ fn handle_pre_tool_use_checked(
         .as_ref()
         .and_then(|ti| ti.get("file_path").and_then(|v| v.as_str()));
 
-    // Load proven rules with auto-approve configuration
-    let rule_store = stores.rules()?;
-    let rules = rule_store.list_proven()?;
-
-    // Check if any rule auto-approves this tool call
-    for rule in &rules {
-        if !rule.can_auto_approve() {
-            continue;
-        }
-
-        // Check if this tool is in the rule's auto-approve list
-        if !rule.auto_approves_tool(tool_name) {
-            continue;
-        }
-
-        // If rule has path patterns, check if the file matches
-        if let Some(path) = file_path {
-            if rule.matches_auto_approve_path(path) {
-                eprintln!(
-                    "cas: PreToolUse auto-approved {} on {} via rule {}",
-                    tool_name, path, &rule.id
-                );
-                return Ok(HookOutput::with_pre_tool_permission(
-                    "allow",
-                    &format!("Auto-approved by rule {}: {}", rule.id, rule.preview(50)),
-                ));
-            }
-        } else {
-            // No file path - auto-approve if tool is in safe list and rule allows it
-            if Rule::SAFE_AUTO_APPROVE_TOOLS
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case(tool_name))
-            {
-                eprintln!(
-                    "cas: PreToolUse auto-approved {} (safe tool) via rule {}",
-                    tool_name, &rule.id
-                );
-                return Ok(HookOutput::with_pre_tool_permission(
-                    "allow",
-                    &format!("Auto-approved safe tool by rule {}", rule.id),
-                ));
-            }
-        }
-    }
-
     // Check for protected paths that should be blocked (configurable)
     let protection = &stores.config().hooks().pre_tool_use.protection;
     // gate[H-33 pre-tool]: Protection files/patterns (.env, keys)
@@ -1737,7 +1792,7 @@ fn handle_pre_tool_use_checked(
                 .tool_input
                 .as_ref()
                 .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
-                .map(|command| literal_targets(command, Path::new(&input.cwd), bash_write_targets))
+                .map(|command| literal_targets(command, Path::new(&input.cwd), bash_write_targets, place_path))
                 .unwrap_or_default()
                 .into_iter()
                 .map(|target| {
@@ -1790,6 +1845,51 @@ fn handle_pre_tool_use_checked(
                 "deny",
                 &crate::gates::tag("H-33", "Protected file: a Bash command names a secret file"),
             ));
+        }
+    }
+
+    // Load proven rules with auto-approve configuration
+    let rule_store = stores.rules()?;
+    let rules = rule_store.list_proven()?;
+
+    // Check if any rule auto-approves this tool call
+    for rule in &rules {
+        if !rule.can_auto_approve() {
+            continue;
+        }
+
+        // Check if this tool is in the rule's auto-approve list
+        if !rule.auto_approves_tool(tool_name) {
+            continue;
+        }
+
+        // If rule has path patterns, check if the file matches
+        if let Some(path) = file_path {
+            if rule.matches_auto_approve_path(path) {
+                eprintln!(
+                    "cas: PreToolUse auto-approved {} on {} via rule {}",
+                    tool_name, path, &rule.id
+                );
+                return Ok(HookOutput::with_pre_tool_permission(
+                    "allow",
+                    &format!("Auto-approved by rule {}: {}", rule.id, rule.preview(50)),
+                ));
+            }
+        } else {
+            // No file path - auto-approve if tool is in safe list and rule allows it
+            if Rule::SAFE_AUTO_APPROVE_TOOLS
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(tool_name))
+            {
+                eprintln!(
+                    "cas: PreToolUse auto-approved {} (safe tool) via rule {}",
+                    tool_name, &rule.id
+                );
+                return Ok(HookOutput::with_pre_tool_permission(
+                    "allow",
+                    &format!("Auto-approved safe tool by rule {}", rule.id),
+                ));
+            }
         }
     }
 
@@ -6247,8 +6347,10 @@ fn factory_write_decision(
         let command = tool_input.get("command").and_then(|value| value.as_str()).unwrap_or("");
         shell_effects::collect(command, &cwd).unwrap_or_else(|_| {
             let mut literal = shell_effects::ShellEffects::default();
-            literal.writes = lexical_literals(command, bash_write_targets).into_iter().map(|path| (path, None)).collect();
-            literal.deletes = lexical_literals(command, bash_delete_targets);
+            literal.writes = lexical_literals(command, &cwd, bash_write_targets, place_path).into_iter().map(|path| (path, None)).collect();
+            literal.deletes = lexical_literals(command, &cwd, bash_delete_targets, place_delete);
+            literal.edits = lexical_literals(command, &cwd, bash_in_place_edit_targets, place_path);
+            literal.links = bash_link_creations(command, &cwd).into_iter().map(|link| (link, cwd.clone())).collect();
             literal
         })
     } else {
@@ -6510,10 +6612,10 @@ fn cas_config_file_write_denial(input: &HookInput) -> Option<String> {
             .unwrap_or_default(),
         "Bash" => {
             let command = tool_input.get("command").and_then(|value| value.as_str())?;
-            literal_targets(command, Path::new(&input.cwd), bash_write_targets)
+            literal_targets(command, Path::new(&input.cwd), bash_write_targets, place_path)
                 .into_iter()
                 .chain(bash_in_place_edit_targets(command))
-                .chain(literal_targets(command, Path::new(&input.cwd), bash_delete_targets).into_iter().map(|(path, _)| path))
+                .chain(literal_targets(command, Path::new(&input.cwd), bash_delete_targets, place_delete).into_iter().map(|(path, _)| path))
                 // cas-7d68: `ln -sf forged.toml .cas/config.toml` replaces it.
                 .chain(
                     bash_link_creations(command, Path::new(&input.cwd))

@@ -78,9 +78,11 @@ pub(super) fn denial(input: &HookInput, tool: &str, cas_root: Option<&Path>) -> 
     let tool_input = input.tool_input.as_ref();
     if tool == "Bash" {
         let command = tool_input?.get("command")?.as_str()?;
-        return denied_cli(&policy, command).map(|cli| {
-            (cli.eq_ignore_ascii_case("neonctl"), cli_refusal(&cli))
-        });
+        let invocations = super::pre_tool::shell_invocations(command);
+        if invocations.iter().any(|(name, args)| neon_cli_writes(name, args)) {
+            return Some((true, cli_refusal("neonctl")));
+        }
+        return denied_cli(&policy, &invocations).map(|cli| (false, cli_refusal(&cli)));
     }
     denied_mcp_tool(&policy, tool, tool_input).map(|(name, pattern)| (false, tool_refusal(&name, &pattern)))
 }
@@ -134,18 +136,36 @@ fn worker_policy(cas_root: Option<&Path>) -> WorkerDenials {
         .unwrap_or_default()
 }
 
-/// The first denied CLI a shell command runs. Package runners count:
-/// `npx vercel`, `bunx vercel`, `pnpm dlx vercel`, `yarn exec vercel` run it.
-fn denied_cli(policy: &WorkerDenials, command: &str) -> Option<String> {
-    super::pre_tool::shell_invocations(command)
-        .into_iter()
-        .find_map(|(name, args)| {
-            let runs = package_runner_target(&name, &args).unwrap_or(name.as_str());
-            let runs = runs.rsplit('/').next().unwrap_or(runs);
-            // `npx vercel@latest`
-            let runs = runs.split('@').next().filter(|cli| !cli.is_empty()).unwrap_or(runs);
-            policy.denies_cli(runs).then(|| runs.to_string())
-        })
+/// The CLI an invocation runs. Package runners count: `npx vercel`, `bunx vercel`,
+/// `pnpm dlx vercel`, `yarn exec vercel` run it.
+fn runs_cli(name: &str, args: &[String]) -> String {
+    let runs = package_runner_target(name, args).unwrap_or(name);
+    let runs = runs.rsplit('/').next().unwrap_or(runs);
+    // `npx vercel@latest`
+    runs.split('@').next().filter(|cli| !cli.is_empty()).unwrap_or(runs).to_string()
+}
+
+/// The first denied CLI among the invocations a shell command runs.
+fn denied_cli(policy: &WorkerDenials, invocations: &[(String, Vec<String>)]) -> Option<String> {
+    invocations
+        .iter()
+        .map(|(name, args)| runs_cli(name, args))
+        .find(|runs| policy.denies_cli(runs))
+}
+
+/// A `neonctl` invocation that is not a plain read: the production-database rail, whatever the
+/// configured denied-CLI list says.
+fn neon_cli_writes(name: &str, args: &[String]) -> bool {
+    if !runs_cli(name, args).eq_ignore_ascii_case("neonctl") {
+        return false;
+    }
+    let words: Vec<&str> = args.iter().map(String::as_str).filter(|arg| !arg.starts_with('-')).collect();
+    let words = match words.iter().position(|word| word.split('@').next().is_some_and(|word| word.rsplit('/').next() == Some("neonctl"))) {
+        Some(at) => &words[at + 1..],
+        None => &words[..],
+    };
+    let help = args.iter().any(|arg| matches!(arg.as_str(), "--help" | "-h" | "--version" | "-v"));
+    !(help || words.is_empty() || words.get(1).is_some_and(|verb| matches!(*verb, "list" | "ls" | "get" | "show")))
 }
 
 /// The command a package runner executes, if `name` is one.
@@ -277,7 +297,7 @@ mod tests {
             "yarn exec vercel ls",
             "git status; vercel ls | head",
         ] {
-            assert_eq!(denied_cli(&policy, command).as_deref(), Some("vercel"), "{command}");
+            assert_eq!(denied_cli(&policy, &super::super::pre_tool::shell_invocations(command)).as_deref(), Some("vercel"), "{command}");
         }
         for command in [
             "git log --grep vercel",
@@ -287,7 +307,7 @@ mod tests {
             "npm run build",
             "cas config get factory.worker_denied_clis",
         ] {
-            assert_eq!(denied_cli(&policy, command), None, "{command}");
+            assert_eq!(denied_cli(&policy, &super::super::pre_tool::shell_invocations(command)), None, "{command}");
         }
     }
 

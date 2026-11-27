@@ -9830,6 +9830,8 @@ mod cas_6b42_peer_delivery_tests {
         std::fs::create_dir_all(&repo).unwrap();
         git(dir.path(), &["init", "-q", "--bare", origin.to_str().unwrap()]);
         git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Cassy Test"]);
+        git(&repo, &["config", "user.email", "cas-test@example.invalid"]);
         std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
         git(&repo, &["add", ".gitignore"]);
         git(&repo, &["commit", "-qm", "seed"]);

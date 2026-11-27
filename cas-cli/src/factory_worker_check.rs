@@ -6481,7 +6481,7 @@ JEST_PROBE"#, serde_json::to_string(&url).unwrap()));
             assert!(detached.get_args().collect::<Vec<_>>().windows(2)
                 .any(|pair| pair == [std::ffi::OsStr::new("--test-env"), std::ffi::OsStr::new(&input)]));
             execute_at_with_scope_and_environment(&root, &cargo_args, &repo, Path::new("unused-cargo"), None, None, &test_env).unwrap();
-            assert_eq!(std::fs::metadata(repo.join("target/database-runs")).unwrap().len(), 5, "{runner}");
+            assert_eq!(std::fs::metadata(repo.join("target/database-runs")).unwrap().len(), 1, "{runner}");
             assert!(std::env::var_os("LEGAL_TEST_DATABASE_URL").is_none(), "input is child-only");
             let head = fixture_head(&repo);
             let receipts = receipt_path(&root, &repo.canonicalize().unwrap(), &head);

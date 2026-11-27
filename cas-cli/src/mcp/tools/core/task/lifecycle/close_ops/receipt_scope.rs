@@ -263,7 +263,6 @@ fn listed_park_refusals(
             )));
         }
         if !missing.is_empty() {
-            // GH #2288: name why an earlier passing proof did not carry.
             let voided = stability::invalidated(&passing, &missing).into_iter().map(|(tested, inputs)| {
                 let tested = &tested[..tested.len().min(12)];
                 match inputs {

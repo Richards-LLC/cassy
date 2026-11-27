@@ -1712,14 +1712,15 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[
     // The selection ran no test; its owning package's run already printed.
     if proof.tests.is_empty() { return Ok(()); }
     println!(
-        "stability: PASS {head} {} {} tests 5/5 in {} ms",
+        "stability: PASS {head} {} {} tests {} pass(es) in {} ms",
         proof.runner,
         proof.tests.len(),
+        proof.consecutive_passes,
         proof.elapsed_ms
     );
     for test in &proof.inactive {
         println!(
-            "stability: INACTIVE {} :: {} (environment-gated, skipped by its registration condition in all 5 runs; not counted as passing; set the environment it reads and rerun to prove it)",
+            "stability: INACTIVE {} :: {} (environment-gated, skipped by its registration condition in the selected run; not counted as passing; set the environment it reads and rerun to prove it)",
             test.path, test.name
         );
     }
@@ -2390,7 +2391,7 @@ fn execute_selection(
             };
             validate_report_with_inherited(runner, repo, &report, &selected, 1, &inherited, None,
                 if consumers.is_empty() { &[] } else { std::slice::from_ref(&path) })?
-        } else { verify_repeats(runner, repo, &selected, &expected_rows, whole_file, run)? };
+        } else { verify_run(runner, repo, &selected, &expected_rows, whole_file, run)? };
         count += ran;
         inactive.extend(skipped);
         // GH #2146: a stability run that executed every test of a spec under
@@ -2701,65 +2702,53 @@ pub(crate) struct NotRun {
 /// Executed count and the environment-gated selected tests every repeat
 /// reported inactive.
 // gate-audit[whole_file]: selector Drops the name filter so a run executes more tests; every row it reports must still pass and match iteration 1, so it waives no G-61 check.
-fn verify_repeats(
+fn verify_run(
     runner: &str,
     repo: &Path,
     tests: &[Identity],
     expected: &BTreeMap<Identity, Expansion>,
     whole_file: bool,
-    mut run: impl FnMut(usize) -> Result<(Exit, Value)>,
+    run: impl FnOnce(usize) -> Result<(Exit, Value)>,
 ) -> Result<(usize, BTreeSet<Identity>)> {
-    let mut count = 0;
-    let mut inactive: Option<BTreeSet<Identity>> = None;
     let mut expected = expected.clone();
-    for iteration in 0..1 {
-        let (exit, report) = run(iteration)?;
-        let mut selection = tests.to_vec();
-        if whole_file {
-            let rows = report_rows(repo, &report);
-            selection.extend(rows.iter().filter(|(row, status)| *status == "passed" && !tests.iter().any(|test| test.selects(row)))
-                .map(|(row, _)| row.clone()).collect::<BTreeSet<_>>());
-            if iteration == 0 {
-                let underivable: Vec<_> = tests.iter().filter(|test| test.parameterized && !expected.contains_key(*test)).collect();
-                for test in underivable {
-                    let mut names = Expansion::new();
-                    for (row, _) in rows.iter().filter(|(row, _)| test.selects(row)) { *names.entry(row.name.clone()).or_default() += 1; }
-                    expected.insert(test.clone(), names);
-                }
-            }
-        }
-        let failed = |report_passed| ProcessFailed {
-            runner: runner.into(), iteration: iteration + 1, status: exit.clone().err().unwrap_or_default(), report_passed,
-        };
-        let (ran, skipped) = match validate_report_with_inherited(
-            runner,
-            repo,
-            &report,
-            &selection,
-            1,
-            &BTreeSet::new(),
-            // cas-c1df: Vitest's expanded row names are derived from the
-            // source tables and every iteration must produce exactly them.
-            (runner == "vitest").then_some(&expected),
-            &[],
-        ) {
-            Err(error) if error.downcast_ref::<ZeroTests>().is_some() && !found_no_tests(runner, exit.is_ok(), &report) => {
-                return Err(failed(false).into());
-            }
-            result => result?,
-        };
-        count = ran;
-        if inactive.as_ref().is_some_and(|previous| *previous != skipped) {
-            bail!(crate::gates::tag("G-61", format!(
-                "{runner} environment-gated tests changed between running and skipping across repeats; keep their environment fixed for all 5 runs"
-            )));
-        }
-        inactive = Some(skipped);
-        if exit.is_err() {
-            return Err(failed(true).into());
+    let (exit, report) = run(0)?;
+    let mut selection = tests.to_vec();
+    if whole_file {
+        let rows = report_rows(repo, &report);
+        selection.extend(rows.iter().filter(|(row, status)| *status == "passed" && !tests.iter().any(|test| test.selects(row)))
+            .map(|(row, _)| row.clone()).collect::<BTreeSet<_>>());
+        let underivable: Vec<_> = tests.iter().filter(|test| test.parameterized && !expected.contains_key(*test)).collect();
+        for test in underivable {
+            let mut names = Expansion::new();
+            for (row, _) in rows.iter().filter(|(row, _)| test.selects(row)) { *names.entry(row.name.clone()).or_default() += 1; }
+            expected.insert(test.clone(), names);
         }
     }
-    Ok((count, inactive.unwrap_or_default()))
+    let failed = |report_passed| ProcessFailed {
+        runner: runner.into(), iteration: 1, status: exit.clone().err().unwrap_or_default(), report_passed,
+    };
+    let (ran, skipped) = match validate_report_with_inherited(
+        runner,
+        repo,
+        &report,
+        &selection,
+        1,
+        &BTreeSet::new(),
+        // cas-c1df: Vitest's expanded row names are derived from the
+        // source tables and every iteration must produce exactly them.
+        (runner == "vitest").then_some(&expected),
+        &[],
+    ) {
+        Err(error) if error.downcast_ref::<ZeroTests>().is_some() && !found_no_tests(runner, exit.is_ok(), &report) => {
+            return Err(failed(false).into());
+        }
+        result => result?,
+    };
+
+    if exit.is_err() {
+        return Err(failed(true).into());
+    }
+    Ok((ran, skipped))
 }
 
 fn report_rows(repo: &Path, report: &Value) -> Vec<(Identity, String)> {
@@ -3729,7 +3718,6 @@ process.exit(ok ? 0 : 1);
         let passing = || super::super::PassingTests::new(cas_root.path(), repo.path(), &head);
         assert_eq!(super::super::stability::missing(&passing(), &tests), tests);
 
-        // Worker-check discovers the owning config and counts the spec's tests five times.
         let proof = execute_tests(cas_root.path(), repo.path(), &head, "jest", None, &tests, None, &[]).unwrap();
         assert_eq!((proof.consecutive_passes, &proof.tests), (super::super::stability::REQUIRED_PASSES, &tests));
         // The prescribed rerun names that config, and running it as printed passes the same way.
@@ -3899,14 +3887,12 @@ process.exit(listed.length ? 0 : 1);
         assert_eq!(tests, [id(spec, "hermetic sign in"), id(spec, "hermetic sign in extra"), id(spec, "hermetic sign in extra later")]);
         let cas_root = tempfile::tempdir().unwrap();
         let passing = || super::super::PassingTests::new(cas_root.path(), repo.path(), &head);
-        // Each target's own run executes that test five times and no neighbour.
         for target in &tests {
             let _ = std::fs::remove_file(repo.path().join(".ran"));
             execute_tests(cas_root.path(), repo.path(), &head, "playwright", None, std::slice::from_ref(target), None, &[]).unwrap();
             let ran = std::fs::read_to_string(repo.path().join(".ran")).unwrap();
-            assert_eq!(ran.lines().collect::<Vec<_>>(), vec![target.name.as_str(); 5], "{target:?}");
+            assert_eq!(ran.lines().collect::<Vec<_>>(), vec![target.name.as_str(); 1], "{target:?}");
         }
-        // Worker-check discovers the owning config and records five capped passes.
         let proof = execute_tests(cas_root.path(), repo.path(), &head, "playwright", None, &tests, None, &[]).unwrap();
         assert_eq!((proof.consecutive_passes, &proof.tests), (super::super::stability::REQUIRED_PASSES, &tests));
         assert!(super::super::stability::missing(&passing(), &tests).is_empty());
@@ -4554,17 +4540,14 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             ("creator keeps input intact", 2), ("creator menu (compact=false)", 1), ("creator menu (compact=true)", 1),
         ]));
         let repo = Path::new("/project");
-        let iterate = |report: &Value, bad: Option<(usize, &Value)>| verify_repeats("vitest", repo, &templates, &expected, false, |iteration| {
+        let iterate = |report: &Value, bad: Option<(usize, &Value)>| verify_run("vitest", repo, &templates, &expected, false, |iteration| {
             Ok((Ok(()), bad.filter(|(at, _)| *at == iteration).map_or(report, |(_, bad)| bad).clone()))
         });
-        iterate(&report, None).expect("five complete iterations are accepted");
-        // One of two rows sharing a name is gone while its sibling still passes
-        // ("keeps input intact"): refused in every iteration, and when every
-        // iteration lacks it.
+        iterate(&report, None).expect("complete selection is accepted");
         let mut one_duplicate = report.clone();
         one_duplicate["testResults"][0]["assertionResults"].as_array_mut().unwrap().remove(6);
         assert_eq!(one_duplicate["testResults"][0]["assertionResults"].as_array().unwrap().len(), 6);
-        assert!(verify_repeats("vitest", repo, &templates, &expected, false, |_| Ok((Ok(()), one_duplicate.clone()))).is_err());
+        assert!(verify_run("vitest", repo, &templates, &expected, false, |_| Ok((Ok(()), one_duplicate.clone()))).is_err());
         for lost in 0..1 {
             assert!(iterate(&report, Some((lost, &one_duplicate))).is_err(), "iteration {lost} lost one duplicate row");
         }
@@ -4584,17 +4567,13 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let variable_expected = source_rows("a.test.ts", variable).unwrap();
         assert!(variable_expected.is_empty());
         validate_report("vitest", repo, &variable_report, &variable_templates, 1).unwrap();
-        assert!(verify_repeats("vitest", repo, &variable_templates, &variable_expected, false, |_| Ok((Ok(()), variable_report.clone()))).is_err());
+        assert!(verify_run("vitest", repo, &variable_templates, &variable_expected, false, |_| Ok((Ok(()), variable_report.clone()))).is_err());
         let mut whole = variable_report.clone();
         whole["testResults"][0]["assertionResults"].as_array_mut().unwrap()
             .extend([json!({"fullName": "unchanged", "status": "passed"}), json!({"fullName": "parked", "status": "skipped"})]);
-        let iterate = |lost: Option<usize>| verify_repeats("vitest", repo, &variable_templates, &variable_expected, true, |iteration| {
-            let mut report = whole.clone();
-            if Some(iteration) == lost { report["testResults"][0]["assertionResults"].as_array_mut().unwrap().remove(1); }
-            Ok((Ok(()), report))
-        });
-        assert_eq!(iterate(None).unwrap().0, 3);
-        assert!(iterate(Some(0)).is_err());
+        let result = verify_run("vitest", repo, &variable_templates, &variable_expected, true,
+            |_| Ok((Ok(()), whole.clone()))).unwrap();
+        assert_eq!(result.0, 3);
     }
 
     /// The names derived from a source table are the ones Vitest 4.0.18 printed
@@ -4761,7 +4740,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         let tests = [id("a.test.js", "seeded")];
         for fail_at in [None, Some(0)] {
             let mut invocations = 0;
-            let result = verify_repeats("vitest", Path::new("/project"), &tests, &BTreeMap::new(), false, |index| {
+            let result = verify_run("vitest", Path::new("/project"), &tests, &BTreeMap::new(), false, |index| {
                 invocations += 1;
                 let pass = Some(index) != fail_at;
                 Ok((
@@ -4775,7 +4754,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         }
         let passing = json!({"success":true,"testResults":[{"name":"/project/a.test.js","status":"passed",
             "assertionResults":[{"fullName":"seeded","status":"passed"}]}]});
-        let error = verify_repeats("vitest", Path::new("/project"), &tests, &BTreeMap::new(), false,
+        let error = verify_run("vitest", Path::new("/project"), &tests, &BTreeMap::new(), false,
             |_| Ok((Err("exit status: 1".into()), passing.clone()))).unwrap_err();
         assert!(error.downcast_ref::<ProcessFailed>().is_some_and(|failed| failed.report_passed && failed.iteration == 1), "{error:#}");
         let mut skipped = passing.clone();

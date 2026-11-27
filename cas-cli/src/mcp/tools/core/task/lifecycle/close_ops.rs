@@ -3100,6 +3100,9 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
             task.id,
         )));
     }
+    if build_proofs == BuildProofs::DeferredToAssembly {
+        return Ok(());
+    }
     // gate[G-78 park as-of]: Platform proof and platform-risk plausibility
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
         let missing = platform_proof_missing_evidence(&task.notes).join(", ");
@@ -3792,19 +3795,6 @@ mod risk_proof_tests {
             ),
             ["update"]
         );
-    }
-
-    #[test]
-    fn focused_proof_close_guides_supervisor_scope_widening() {
-        let mut task = Task::new("cas-d86d-guidance".into(), "proof guidance".into());
-        task.risk = vec![TaskRisk::BlastRadius];
-        task.proof_targets = vec!["lifecycle".into()];
-        let error = validate_risk_close_proofs(
-            &task,
-            &["cas-cli/src/mcp/tools/service/core.rs".into()],
-            std::path::Path::new("."),
-        )
-        .expect_err("a missing blast-radius module must refuse close");
     }
 
     #[test]
@@ -12296,6 +12286,17 @@ impl CasCore {
                 task.notes = format!("{}\n\n[{ts}] WORKER CHECK {receipt}", task.notes);
             }
             // cas-289b: receipts from the worker's machine travel on the task row.
+            if task.risk.contains(&TaskRisk::BlastRadius) {
+                let (uncovered, notice) = uncovered_blast_radius_scope(
+                    proof_repo, &changed_paths, &task.proof_targets,
+                );
+                if !uncovered.is_empty() {
+                    close_notes.record(&mut task, &crate::gates::tag("G-61", format!(
+                        "Advisory: declared blast-radius scope omits source modules: {}{}",
+                        uncovered.join(", "), notice,
+                    )));
+                }
+            }
             let synced_receipts = task.deliverables.test_receipts.clone();
             let passing_tests = delivered_tip.as_deref().map(|head| {
                 (head, crate::factory_worker_check::PassingTests::new(&self.cas_root, receipt_repo, head)

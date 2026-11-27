@@ -5006,7 +5006,7 @@ mod related_recall_response_tests {
         let temp = TempDir::new().expect("temporary project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
         for risk in [None, Some("blast-radius")] {
-            let mut request = plain_task_request("Advisory risk");
+            let mut request = plain_task_request(if risk.is_none() { "Repair gear rotation" } else { "Index document storage" });
             request.risk = risk.map(str::to_owned);
             core.cas_task_create(Parameters(request)).await.unwrap();
         }

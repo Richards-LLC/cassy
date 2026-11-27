@@ -763,7 +763,7 @@ fn apply_migration(conn: &Connection, migration: &Migration) -> Result<()> {
     }
 
     if migration.id == 303 {
-        migrations::m303_entries_purge_session_noise::purge_queue(conn)?;
+        migrations::purge_session_noise_queue(conn)?;
     }
 
     // Record that migration was applied

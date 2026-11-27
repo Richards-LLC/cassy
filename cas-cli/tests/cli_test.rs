@@ -66,6 +66,45 @@ fn rule_refs_lists_tracked_sites_and_reports_malformed_markers_cas_4f87() {
 }
 
 #[test]
+fn scorecard_explicit_window_uses_recorded_rows_through_the_cli() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join(".cas");
+    std::fs::create_dir(&root).unwrap();
+    let at = chrono::DateTime::parse_from_rfc3339("2026-11-27T04:00:00Z").unwrap().with_timezone(&chrono::Utc);
+    let mut event = cas_store::NewQualityEvent::new("issue-1", cas_store::QualityPayload::Friction {
+        source: cas_store::FrictionSource::Issue, reference: "org/repo/issues/1".into(), severity: None, project: None,
+    });
+    event.occurred_at = at;
+    event.actor = Some("agent-1".into());
+    cas_store::record_quality_event(&root, &event).unwrap();
+    cas::store::open_event_store(&root).unwrap().init().unwrap();
+    let db = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+    for (code, actor) in [("G-61", Some("agent-1")), ("G-68", Some("agent-2")), ("UNCODED", None)] {
+        db.execute("INSERT INTO events(event_type,entity_type,entity_id,summary,metadata,created_at) VALUES ('gate_refused','gate',?1,'',?2,?3)",
+            rusqlite::params![code, serde_json::json!({"actor":actor}).to_string(), at.to_rfc3339()]).unwrap();
+    }
+    cas_store::observed_delivery_merges(&root).unwrap();
+    for command in [vec!["scorecard"], vec!["ledger", "report"]] {
+        let mut cmd = cas_cmd(temp.path());
+        let output = cmd.current_dir(temp.path()).args(&command).args([
+            "--since", "2026-11-27T04:00:00Z", "--until", "2026-11-27T05:00:00Z", "--json",
+        ]).assert().success().get_output().stdout.clone();
+        let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(report["efficiency"]["refusals"]["by_actor"], serde_json::json!({"agent-1":1,"agent-2":1,"unknown":1}));
+        assert_eq!(report["events"], 1);
+        assert_eq!(report["efficiency"]["issues"]["agent_filed"], 1);
+        assert!(report["efficiency"]["issues"]["closed_in_window"]["unknown"].is_string());
+        let text = cas_cmd(temp.path()).current_dir(temp.path()).args(command).args([
+            "--since", "2026-11-27T04:00:00Z", "--until", "2026-11-27T05:00:00Z",
+        ]).assert().success().get_output().stdout.clone();
+        let text = String::from_utf8(text).unwrap();
+        for actor in ["agent-1", "agent-2"] {
+            assert!(text.contains(actor), "missing recorded actor {actor}");
+        }
+    }
+}
+
+#[test]
 fn test_version() {
     let temp = TempDir::new().unwrap();
     cas_cmd(temp.path())

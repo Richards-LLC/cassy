@@ -232,12 +232,17 @@ impl ServerHandler for CasService {
             let handler = tracing::Instrument::instrument(
                 async move {
                     let arguments = request.arguments.clone();
+                    let tool = request.name.to_string();
+                    let actor = service.inner.get_registered_agent_id_read_only().ok()
+                        .and_then(|id| service.inner.open_agent_store().ok()?.get(&id).ok())
+                        .map(|agent| crate::agent_model::AgentModel::from_agent(&agent));
                     let tcc = rmcp::handler::server::tool::ToolCallContext::new(
                         &service, request, context,
                     );
                     let result = dispatch_tool(&service, tcc).await;
-                    crate::gates::facts::observe_tool_result(
+                    crate::gates::facts::observe_tool_result_as(
                         &service.inner.cas_root, arguments.as_ref(), &result,
+                        actor.as_ref(), Some(&tool),
                     );
                     result
                 },

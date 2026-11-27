@@ -17,13 +17,20 @@ mod scorers;
 mod sensors;
 #[path = "ledger_health.rs"]
 mod health;
+#[path = "ledger_window.rs"]
+mod window;
 
-/// `cas scorecard`: the per-release report.
 #[derive(Args)]
 pub struct ScorecardArgs {
     /// Release tag, vX.Y.Z. Omit for work since the last release.
     #[arg(long)]
     release: Option<String>,
+    /// Start of a recorded-row window (inclusive, RFC3339).
+    #[arg(long, requires = "until", conflicts_with = "release")]
+    since: Option<DateTime<Utc>>,
+    /// End of a recorded-row window (exclusive, RFC3339).
+    #[arg(long, requires = "since", conflicts_with = "release")]
+    until: Option<DateTime<Utc>>,
     /// Read local rows only; do not pull from Cloud first
     #[arg(long)]
     offline: bool,
@@ -78,6 +85,15 @@ enum LedgerCommand {
 }
 
 pub fn execute_scorecard(args: &ScorecardArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
+    if let (Some(since), Some(until)) = (args.since, args.until) {
+        let report = window::build(cas_root, since, until, args.park_visibility_minutes)?;
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print!("{}{}", render(&report.ledger), window::render(&report.efficiency));
+        }
+        return Ok(());
+    }
     if !args.offline {
         pull_before_report(cas_root);
     }
@@ -1411,7 +1427,7 @@ fn render_spend(out: &mut String, report: &LedgerReport) {
 fn render(report: &LedgerReport) -> String {
     use std::fmt::Write;
     let mut out = String::new();
-    let state = if report.published { "" } else { " (in progress)" };
+    let state = if report.published || report.release == "window" { "" } else { " (in progress)" };
     let _ = writeln!(out, "Scorecard: {}{state}", report.release);
     let window = match (report.from, report.to) {
         (Some(from), Some(to)) => format!("{} to {}", when(from), when(to)),
@@ -1801,14 +1817,14 @@ mod tests {
             *supersedes = Some(original_id);
         }
         crate::quality_ledger::emit_checked(dir.path(), &legacy_detail).unwrap();
-        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake).unwrap(), (true, false));
-        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake).unwrap(), (false, false));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake, &[]).unwrap(), (true, false));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake, &[]).unwrap(), (false, false));
         let mut missing_stamp = wake.clone();
         if let QualityPayload::Turn { notice_kind, .. } = &mut missing_stamp.payload { *notice_kind = None; }
-        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &missing_stamp).unwrap(), (false, false));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &missing_stamp, &[]).unwrap(), (false, false));
         // A new completed turn remains one new wake.
         wake.natural_key = "fresh-wake".into();
-        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake).unwrap(), (true, true));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake, &[]).unwrap(), (true, true));
         let mut untyped = wake.clone();
         untyped.natural_key = "untyped-wake".into();
         if let QualityPayload::Turn { notice_kind, .. } = &mut untyped.payload { *notice_kind = None; }
@@ -1821,8 +1837,8 @@ mod tests {
             *supersedes = Some(original_id);
         }
         crate::quality_ledger::emit_checked(dir.path(), &legacy_detail).unwrap();
-        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped).unwrap(), (false, false));
-        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped).unwrap(), (false, false));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped, &[]).unwrap(), (false, false));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped, &[]).unwrap(), (false, false));
         events.extend(cas_store::quality_events_between(dir.path(), None, None).unwrap());
         let report = aggregate("v9.99.0".into(), true, None, None, &events);
         let json = serde_json::to_value(report).unwrap();

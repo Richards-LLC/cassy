@@ -90,9 +90,17 @@ pub(crate) fn emit_checked(cas_root: &Path, event: &NewQualityEvent) -> cas_stor
 }
 
 /// Append notice detail for an old turn without counting it as another wake.
-pub(crate) fn emit_turn_checked(root: &Path, original: &NewQualityEvent) -> cas_store::Result<(bool, bool)> {
+pub(crate) fn emit_turn_checked(root: &Path, original: &NewQualityEvent, aliases: &[String]) -> cas_store::Result<(bool, bool)> {
     let mut event = original.clone();
     event.scope = project_scope(root);
+    for alias in aliases {
+        let mut legacy = event.clone();
+        legacy.natural_key = alias.clone();
+        if cas_store::quality_event_by_id(root, &legacy.id())?.is_some() {
+            event.natural_key = alias.clone();
+            break;
+        }
+    }
     if cas_store::record_quality_event(root, &event)? { return Ok((true, true)) }
     if matches!(&event.payload, QualityPayload::Turn { notice_kind: Some(_), .. })
         && let Some(old) = cas_store::quality_event_by_id(root, &event.id())?
@@ -504,7 +512,7 @@ pub(crate) fn bug_filed(
 }
 
 /// cas-87a2: an issue filed on the Cassy tracker, from any project, is friction.
-pub(crate) fn issue_filed(cas_root: &Path, url: &str, title: &str, at: DateTime<Utc>) -> bool {
+pub(crate) fn issue_filed(cas_root: &Path, url: &str, title: &str, at: DateTime<Utc>, actor: Option<&str>) -> bool {
     let Some(issue) = crate::github_issue_attach::parse_issue_refs(url, None).into_iter().next()
     else {
         return false;
@@ -520,6 +528,7 @@ pub(crate) fn issue_filed(cas_root: &Path, url: &str, title: &str, at: DateTime<
         },
     );
     event.occurred_at = at;
+    event.actor = actor.map(str::to_owned);
     event.title = Some(title.to_string());
     event.link = Some(url.to_string());
     emit(cas_root, &event)
@@ -566,7 +575,7 @@ pub(crate) fn backfill_friction(
     match list_cassy_issues(gh_program, &repo, since) {
         Ok(issues) => {
             for (url, title, created_at) in issues {
-                found.issues += usize::from(issue_filed(cas_root, &url, &title, created_at));
+                found.issues += usize::from(issue_filed(cas_root, &url, &title, created_at, None));
             }
         }
         Err(reason) => found.issues_skipped = Some(reason),

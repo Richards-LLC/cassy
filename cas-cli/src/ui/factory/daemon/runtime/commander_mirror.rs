@@ -1616,6 +1616,69 @@ mod tests {
     }
 
     #[test]
+    fn native_turn_reregistration_does_not_duplicate_usage() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
+            for legacy in [false, true] {
+                let mut f = TurnFixture::new(cli);
+                if legacy {
+                    let mut event = cas_store::NewQualityEvent::new("turn|turn-agent|native-ledger-session|first", cas_store::QualityPayload::Turn {
+                        supersedes: None, notice_kind: Some("terminal_input".into()), woken_by: cas_store::WakeChannel::Terminal,
+                        no_op: true, actions: vec![], input_tokens: None, output_tokens: None, minutes: Some(1.0 / 60.0), spend: None,
+                    });
+                    event.actor = Some(f.agents[0].id.clone());
+                    event.occurred_at = DateTime::parse_from_rfc3339("2026-11-02T12:00:01Z").unwrap().with_timezone(&Utc);
+                    crate::quality_ledger::emit_checked(&f.root, &event).unwrap();
+                }
+                f.append(&f.input("first", "input", 0));
+                f.append(&f.end("first", "Finished.", 1));
+                f.scan();
+                assert_eq!(f.rows().len(), 1);
+                let bytes = f.state.turns.bytes_read();
+                f.agents.push(f.agents[0].clone());
+                f.agents[0].id = "replacement-agent".into();
+                f.agents[0].registered_at += chrono::Duration::seconds(1);
+                f.scan();
+                assert_eq!(f.rows().len(), 1, "{cli:?}");
+                assert_eq!(f.state.turns.bytes_read(), bytes);
+                f.append(&f.input("second", "input", 2));
+                f.append(&f.end("second", "Finished.", 3));
+                f.scan();
+                assert_eq!(f.rows().len(), 2, "{cli:?}");
+                f.state = MirrorScanState::default();
+                f.scan();
+                assert_eq!(f.rows().len(), 2, "{cli:?} legacy={legacy}");
+            }
+        }
+    }
+
+    #[test]
+    fn native_turn_scanner_records_wake_start_before_completion() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
+            let mut f = TurnFixture::new(cli);
+            let agent = &mut f.agents[0];
+            agent.role = AgentRole::Supervisor;
+            for suffix in ["cli", "account_dir"] {
+                let value = agent.metadata.remove(&format!("worker_{suffix}")).unwrap();
+                agent.metadata.insert(format!("supervisor_{suffix}"), value);
+            }
+            let id = f.queue.enqueue_urgent_with_outcome("director", &agent.name, "input", Some("factory-1"),
+                None, None, false, Some(&cas_store::QueueOrigin::Daemon)).unwrap().id();
+            let started = DateTime::parse_from_rfc3339("2026-11-02T12:00:00Z").unwrap().with_timezone(&Utc);
+            crate::supervisor_message_wakes::record(&f.root, id, &agent.name, &[], started, started).unwrap();
+            let prompt = format!("Message from director: [cas #{id} agent-authored 0s first]\ninput");
+            f.append(&f.input("first", &prompt, 0));
+            f.scan();
+            assert!(f.rows().is_empty());
+            let conn = rusqlite::Connection::open(f.root.join("cas.db")).unwrap();
+            let at: Option<String> = conn.query_row("SELECT started_at FROM supervisor_message_wakes WHERE lead_id=?1",
+                [id], |row| row.get(0)).unwrap();
+            assert_eq!(at.and_then(|at| DateTime::parse_from_rfc3339(&at).ok()).map(|at| at.with_timezone(&Utc)), Some(started), "{cli:?}");
+        }
+    }
+
+    #[test]
     fn a_new_native_turn_discards_an_unfinished_pending_turn() {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {

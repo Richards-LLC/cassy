@@ -4,7 +4,7 @@
 
 use clap::{Parser, Subcommand};
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::hooks::{HookInput, handle_hook};
@@ -747,8 +747,9 @@ fn execute_status(cli: &Cli) -> anyhow::Result<()> {
 /// Configure Cassy hooks, injecting an explicit home directory for the global-settings
 /// check. Pass `None` for production (uses `dirs::home_dir()`); pass `Some(path)` in
 /// tests to avoid reading the real `~/.claude/settings.json` (cas-1888).
-pub(crate) fn configure_claude_hooks_with_home(
+pub(crate) fn configure_claude_hooks_from(
     project_root: &Path,
+    cas_root: &Path,
     force: bool,
     home_dir: Option<&Path>,
 ) -> anyhow::Result<bool> {
@@ -767,7 +768,17 @@ pub(crate) fn configure_claude_hooks_with_home(
         }
     }
 
-    configure_claude_hooks_with_config_dirs(project_root, force, &config_dirs)
+    migrate_claude_statuslines(&config_dirs, |warning| eprintln!("{warning}"));
+    configure_claude_hooks_at(project_root, force, project_root, cas_root, cas_root)
+}
+
+#[cfg(test)]
+fn configure_claude_hooks_with_home(
+    project_root: &Path,
+    force: bool,
+    home_dir: Option<&Path>,
+) -> anyhow::Result<bool> {
+    configure_claude_hooks_from(project_root, &project_root.join(".cas"), force, home_dir)
 }
 
 /// Configure Cassy hooks against an explicit list of Claude config dirs.
@@ -776,6 +787,7 @@ pub(crate) fn configure_claude_hooks_with_home(
 /// `config_dirs` already has Cassy hooks — otherwise a session launched under a
 /// hookless config dir (e.g. `CLAUDE_CONFIG_DIR=~/.claude-alt`) would end up
 /// with no Cassy hooks at all (cas-5b96).
+#[cfg(test)]
 pub(crate) fn configure_claude_hooks_with_config_dirs(
     project_root: &Path,
     force: bool,
@@ -784,26 +796,33 @@ pub(crate) fn configure_claude_hooks_with_config_dirs(
     configure_claude_hooks_with_warnings(project_root, force, config_dirs, |warning| eprintln!("{warning}"))
 }
 
+#[cfg(test)]
 fn configure_claude_hooks_with_warnings(
     project_root: &Path,
     force: bool,
     config_dirs: &[std::path::PathBuf],
-    mut warning: impl FnMut(String),
+    warning: impl FnMut(String),
 ) -> anyhow::Result<bool> {
+    migrate_claude_statuslines(config_dirs, warning);
+    let cas_root = project_root.join(".cas");
+    configure_claude_hooks_at(project_root, force, project_root, &cas_root, &cas_root)
+}
+
+fn migrate_claude_statuslines(config_dirs: &[PathBuf], mut warning: impl FnMut(String)) {
     for dir in config_dirs {
         if let Err(error) = config_gen::migrate_claude_statusline(dir) {
             warning(format!("Warning: {error:#}\n  Repair this profile settings file, then run `cas hook configure` again."));
         }
     }
-    configure_claude_hooks_at(project_root, force, config_dirs, project_root)
 }
 
 /// Render an index-side settings file with the real project's permission paths.
 pub(crate) fn configure_claude_hooks_for_index(
     target: &Path,
     project: &Path,
+    cas_root: &Path,
 ) -> anyhow::Result<bool> {
-    configure_claude_hooks_at(target, false, &[], project)
+    configure_claude_hooks_at(target, false, project, &target.join(".cas"), cas_root)
 }
 
 // gate-audit[force]: selector Replaces hook configuration instead of merging it; generated hook permissions remain enforced.
@@ -811,28 +830,20 @@ pub(crate) fn configure_claude_hooks_for_index(
 fn configure_claude_hooks_at(
     project_root: &Path,
     force: bool,
-    _config_dirs: &[std::path::PathBuf],
     permission_root: &Path,
+    config_dir: &Path,
+    notice_root: &Path,
 ) -> anyhow::Result<bool> {
     let claude_dir = project_root.join(".claude");
     let settings_path = claude_dir.join("settings.json");
-    let cas_dir = project_root.join(".cas");
 
     // Create .claude directory if needed
     if !claude_dir.exists() {
         std::fs::create_dir_all(&claude_dir)?;
     }
 
-    // Load hook config from .cas/config.toml (or defaults)
-    let hook_config = if cas_dir.exists() {
-        Config::load_with_notice_root(&cas_dir, &permission_root.join(".cas"))
-            .map(|c| c.hooks())
-            .unwrap_or_default()
-    } else {
-        crate::config::HookConfig::default()
-    };
-
-    let cas_hooks = get_cas_hooks_config(&hook_config);
+    let config = Config::load_with_notice_root(config_dir, notice_root).unwrap_or_default();
+    let cas_hooks = get_cas_hooks_config(&config.hooks());
 
     let created = if settings_path.exists() && !force {
         // Merge with existing settings
@@ -895,7 +906,7 @@ fn configure_claude_hooks_at(
         }
 
         // Add worktree directory to additionalDirectories if worktrees are enabled
-        merge_worktree_permissions(permission_root, settings_obj);
+        merge_worktree_permissions(permission_root, &config, settings_obj);
 
         // Write back
         let output = canonical_json_pretty(&settings)?;
@@ -909,7 +920,7 @@ fn configure_claude_hooks_at(
 
         // Add worktree directory if worktrees are enabled
         if let Some(settings_obj) = settings.as_object_mut() {
-            merge_worktree_permissions(permission_root, settings_obj);
+            merge_worktree_permissions(permission_root, &config, settings_obj);
         }
 
         let output = canonical_json_pretty(&settings)?;
@@ -922,56 +933,55 @@ fn configure_claude_hooks_at(
 
 /// Public API: configure Cassy Claude hooks for a project.
 ///
-/// Delegates to [`configure_claude_hooks_with_home`] with `home_dir = None`
+/// Delegates to [`configure_claude_hooks_from`] with `home_dir = None`
 /// (uses `dirs::home_dir()` to locate global settings). Call sites in
 /// production (`init`, `update`, `hook configure`) use this wrapper.
 /// Tests use `configure_claude_hooks_with_home` directly to inject an isolated
 /// home directory (cas-1888).
 pub fn configure_claude_hooks(project_root: &Path, force: bool) -> anyhow::Result<bool> {
-    configure_claude_hooks_with_home(project_root, force, None)
+    configure_claude_hooks_from(project_root, &project_root.join(".cas"), force, None)
 }
 
 /// Merge worktree additionalDirectories into settings permissions if enabled.
 fn merge_worktree_permissions(
     project_root: &Path,
+    config: &Config,
     settings_obj: &mut serde_json::Map<String, serde_json::Value>,
 ) {
-    let cas_root = project_root.join(".cas");
-    if let Ok(config) = Config::load(&cas_root) {
-        let worktrees_config = config.worktrees();
-        if worktrees_config.enabled {
-            let base = worktrees_config.base_path.replace(
-                "{project}",
-                project_root
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("project"),
-            );
+    let worktrees_config = config.worktrees();
+    if !worktrees_config.enabled {
+        return;
+    }
+    let base = worktrees_config.base_path.replace(
+        "{project}",
+        project_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project"),
+    );
 
-            let worktree_path = if base.starts_with('/') {
-                base
-            } else {
-                project_root
-                    .parent()
-                    .unwrap_or(project_root)
-                    .join(&base)
-                    .to_string_lossy()
-                    .to_string()
-            };
+    let worktree_path = if base.starts_with('/') {
+        base
+    } else {
+        project_root
+            .parent()
+            .unwrap_or(project_root)
+            .join(&base)
+            .to_string_lossy()
+            .to_string()
+    };
 
-            let permissions = settings_obj
-                .entry("permissions")
-                .or_insert_with(|| serde_json::json!({}));
-            if let Some(permissions_obj) = permissions.as_object_mut() {
-                let additional_dirs = permissions_obj
-                    .entry("additionalDirectories")
-                    .or_insert_with(|| serde_json::json!([]));
-                if let Some(dirs_arr) = additional_dirs.as_array_mut() {
-                    let path_value = serde_json::Value::String(worktree_path.clone());
-                    if !dirs_arr.contains(&path_value) {
-                        dirs_arr.push(path_value);
-                    }
-                }
+    let permissions = settings_obj
+        .entry("permissions")
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(permissions_obj) = permissions.as_object_mut() {
+        let additional_dirs = permissions_obj
+            .entry("additionalDirectories")
+            .or_insert_with(|| serde_json::json!([]));
+        if let Some(dirs_arr) = additional_dirs.as_array_mut() {
+            let path_value = serde_json::Value::String(worktree_path);
+            if !dirs_arr.contains(&path_value) {
+                dirs_arr.push(path_value);
             }
         }
     }

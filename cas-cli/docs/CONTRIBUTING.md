@@ -881,6 +881,16 @@ Linux workers and supervisors are not sandboxed. The corpus test
 runs only when a named capped run passes `CAS_SRT_BIN=<sandbox-runtime srt>`;
 otherwise it skips with a reason.
 
+If the macOS worker sandbox refuses a required fixture, use the [bounded
+supervisor proof and receipt route](#worker-checks-targeted-tests-and-merge-queue-integration)
+at the clean delivery tip. If pre-push fast rows hit the sandbox, resolve the
+push base from the authoritative task-bound branch and live remote ref. The
+registered supervisor runs `bash scripts/release-gate.sh --fast-rows --base <base>`
+at that exact clean tip in the same Git common directory. Confirm the real
+receipt matches the tip and base and any required web proof exists. The worker
+then pushes its own ref explicitly with `git push origin <owned-branch>` (no
+`-u`). Do not copy receipts, bypass checks or weaken the sandbox.
+
 Use `cas config set factory.claude.remote_control true` to opt in, and
 `cas config set factory.claude.fallback_model sonnet` to choose a fallback.
 An empty fallback value clears it. Explicitly requested unsupported flags

@@ -4933,9 +4933,20 @@ impl CasCore {
         } else {
             None
         };
+        let can_prepare_remote_source = receipt_resume.is_none()
+            && (system_a.is_none()
+                || (transactional_delivery.is_none()
+                    && scoped_task.as_deref().is_some_and(|task| {
+                        task.status == cas_types::TaskStatus::AwaitingMerge
+                            && task.delivery_mode == cas_types::DeliveryMode::PushBranch
+                            && task.deliverables.work_target.is_some()
+                    })
+                    && system_a.as_ref().is_some_and(|worktree| {
+                        worktree.branch.starts_with("factory/") && !is_git_worktree(&worktree.path)
+                    })));
         let task_source = if active_source.is_some() {
             active_source
-        } else if system_a.is_none() && receipt_resume.is_none()
+        } else if can_prepare_remote_source
             && (transactional_delivery.is_none()
                 || scoped_task.as_deref().is_some_and(|task| task.deliverables.parked_branch.is_some()))
         {
@@ -4967,7 +4978,7 @@ impl CasCore {
                 data: None,
             });
         }
-        let remote_source = if system_a.is_none() && receipt_resume.is_none() {
+        let remote_source = if can_prepare_remote_source {
             self.prepare_remote_merge_source(
                 &manager, scoped_task.as_deref(), id, cleanup, task_source.as_ref(),
             )?
@@ -5003,7 +5014,7 @@ impl CasCore {
         }
 
         let (mut worktree, is_system_b, source_worktree_live, target_reason, trunk_fallback) =
-            match system_a {
+            match system_a.filter(|_| remote_source.is_none()) {
                 Some(mut wt) => {
                     if let Some(source) = task_source.as_ref() {
                         wt.branch = source.branch.clone();
@@ -9819,6 +9830,8 @@ mod cas_6b42_peer_delivery_tests {
         std::fs::create_dir_all(&repo).unwrap();
         git(dir.path(), &["init", "-q", "--bare", origin.to_str().unwrap()]);
         git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Cassy Test"]);
+        git(&repo, &["config", "user.email", "cas-test@example.invalid"]);
         std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
         git(&repo, &["add", ".gitignore"]);
         git(&repo, &["commit", "-qm", "seed"]);
@@ -9838,7 +9851,10 @@ mod cas_6b42_peer_delivery_tests {
 
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
         env.set("CAS_ROOT", &cas_dir);
-        std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id='cas-src'\n").unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[project]\ncanonical_id='cas-src'\n[verification]\nenabled=false\n[qa]\nindependent_pass=false\n",
+        ).unwrap();
         let agents = crate::store::open_agent_store(&cas_dir).unwrap();
         agents.register(&cas_types::Agent::new_with_role(
             "sup-soundwave".into(), "calm-koala-86".into(), cas_types::AgentRole::Supervisor,
@@ -9997,6 +10013,42 @@ mod cas_6b42_peer_delivery_tests {
         assert!(refused.message.contains("[G-96]"));
         assert_eq!(git(&repo, &["rev-parse", branch]), local);
         assert_eq!(git(&repo, &["rev-parse", &format!("origin/{branch}")]), peer);
+
+        if !team {
+            let checkout = dir.path().join("worker-checkout");
+            let worktrees = crate::store::open_worktree_store(&cas_dir).unwrap();
+            worktrees.add(&cas_types::Worktree::new(
+                "peer-row".into(), branch.into(), "main".into(), checkout.clone(),
+            )).unwrap();
+            let merge = || core.worktree_merge(branch, false, Some(&task.id), false, None, false, None);
+            let target_before = git(&repo, &["rev-parse", "main"]);
+            git(&repo, &["worktree", "add", "-q", checkout.to_str().unwrap(), branch]);
+            let private = merge().await.expect_err("a live checkout with unpublished work must refuse");
+            assert!(private.message.contains("[G-97]"), "{private:?}");
+            assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), local);
+            git(&repo, &["worktree", "remove", checkout.to_str().unwrap()]);
+            git(&repo, &["branch", "-D", branch]);
+
+            std::fs::write(publisher.join("startup.rs"), "unparked remote change\n").unwrap();
+            git(&publisher, &["commit", "-qam", "unparked remote change"]);
+            git(&publisher, &["push", "-q", "origin", branch]);
+            let moved = merge().await.expect_err("a moved origin ref must refuse");
+            git(&publisher, &["push", "-q", "origin", "--delete", branch]);
+            let missing = merge().await.expect_err("a missing origin ref must refuse");
+            assert_eq!(git(&repo, &["rev-parse", "main"]), target_before);
+            assert_eq!(git(&origin, &["rev-parse", "main"]), target_before);
+            assert_eq!(git(&repo, &["branch", "--list", branch]), "");
+            assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(peer.as_str()));
+
+            git(&publisher, &["push", "-q", "origin", &format!("{peer}:refs/heads/{branch}")]);
+            merge().await.expect("the stale row must not hide the exact parked origin delivery");
+            assert_eq!(git(&origin, &["merge-base", "main", &peer]), peer);
+            git(&origin, &["diff", "--exit-code", &peer, "main"]);
+            assert!(!checkout.exists());
+            assert_eq!(worktrees.get("peer-row").unwrap().status, cas_types::WorktreeStatus::Active);
+            assert!(moved.message.contains("[G-96]"), "{moved:?}");
+            assert!(missing.message.contains("[G-96]"), "{missing:?}");
+        }
         }
     }
 

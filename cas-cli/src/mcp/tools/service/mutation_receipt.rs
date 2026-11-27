@@ -13,6 +13,7 @@ pub(crate) struct Receipt {
     action: String,
     task_id: Option<String>,
     pub commit: OnceLock<Commit>,
+    pub spawn_request_id: OnceLock<i64>,
     /// cas-b1dd: when the request's own terminal mutation committed (a
     /// task's Closed write, a note append). An intermediate write (a gate
     /// note, a parked anchor) sets `commit` but never this, so an early
@@ -38,6 +39,7 @@ impl Receipt {
             action: action.into(),
             task_id: task_id.map(str::to_string),
             commit: OnceLock::new(),
+            spawn_request_id: OnceLock::new(),
             terminal: OnceLock::new(),
             close_gate_deadline: OnceLock::new(),
             close_gate_timeout: OnceLock::new(),
@@ -124,6 +126,15 @@ where
         Some(receipt) => CURRENT.sync_scope(receipt, work),
         None => work(),
     })
+}
+
+pub(crate) fn spawn_queued(request_id: i64) {
+    if let Some(receipt) = current()
+        && receipt.tool == "factory" && receipt.action == "spawn_workers"
+    {
+        let _ = receipt.spawn_request_id.set(request_id);
+        let _ = receipt.terminal.set(std::time::Instant::now());
+    }
 }
 
 pub(crate) fn message_committed(id: i64) {

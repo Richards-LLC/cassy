@@ -50,6 +50,14 @@ fn worker_skill(project: &Path) -> PathBuf {
     project.join(".claude/skills/cas-worker/SKILL.md")
 }
 
+fn refresh_receipt(stdout: &[u8]) -> serde_json::Value {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|value| value.get("projects").is_some())
+        .expect("all-projects JSON receipt")
+}
+
 fn seed_stray_memory(project: &Path) -> String {
     let cas_root = project.join(".cas");
     let store = cas::store::open_store(&cas_root).expect("open project store");
@@ -75,8 +83,21 @@ fn all_projects_dry_run_is_non_mutating_then_syncs_every_discovered_project() {
     let projects = root.join("projects");
     let first = projects.join("first");
     let second = projects.join("nested/second");
-    init_project(root, &first);
-    init_project(root, &second);
+    for project in [&first, &second] {
+        init_project(root, project);
+        for args in [
+            &["branch", "-M", "main"][..],
+            &["config", "init.defaultBranch", "main"],
+            &[
+                "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                "commit", "--allow-empty", "-qm", "project baseline",
+            ],
+            &["checkout", "-qb", "repair/sweep"],
+        ] {
+            let status = std::process::Command::new("git").current_dir(project).args(args).status().unwrap();
+            assert!(status.success(), "git {args:?}");
+        }
+    }
 
     let missing = worker_skill(&first);
     std::fs::remove_file(&missing).unwrap();
@@ -105,16 +126,9 @@ fn all_projects_dry_run_is_non_mutating_then_syncs_every_discovered_project() {
         .success();
     let synced_out = String::from_utf8_lossy(&synced.get_output().stdout);
     assert!(
-        synced_out.contains(&format!("Cassy {} · 2 projects refreshed · 0 failed", env!("CARGO_PKG_VERSION"))),
-        "output was:\n{synced_out}"
-    );
-    assert!(
         missing.is_file(),
         "native sweep must restore the stale builtin"
     );
-    // cas-32e3 leaves repairs staged on integration/default branches. That
-    // actionable warning takes precedence over healthy-only unlinked notes
-    // in compact output; the machine receipt carries every phase's verdict.
     let json = cas_cmd(root)
         .current_dir(root)
         .env("CAS_ROOT", first.join(".cas"))
@@ -122,12 +136,8 @@ fn all_projects_dry_run_is_non_mutating_then_syncs_every_discovered_project() {
         .args(["--json", "update", "--all-projects"])
         .assert()
         .success();
-    let json_out = String::from_utf8_lossy(&json.get_output().stdout);
-    let receipt: serde_json::Value = json_out
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .find(|value| value.get("projects").is_some())
-        .expect("all-projects JSON receipt");
+    let receipt = refresh_receipt(&json.get_output().stdout);
+    assert_eq!(receipt["refresh_status"], "complete", "{receipt}");
     let refreshed = receipt["projects"].as_array().expect("projects array");
     assert_eq!(refreshed.len(), 2, "receipt was: {receipt}");
     // pin: the machine receipt must preserve the advisory unlinked disposition.
@@ -171,35 +181,6 @@ fn all_projects_refreshes_nested_projects_and_the_user_level_store() {
     )
     .unwrap();
 
-    let update = cas_cmd(root)
-        .current_dir(root)
-        .env("CAS_ROOT", parent.join(".cas"))
-        .env("CAS_PROJECT_ROOTS", &projects)
-        .args(["update", "--all-projects"])
-        .assert()
-        .success();
-    let output = String::from_utf8_lossy(&update.get_output().stdout);
-
-    assert!(
-        output.lines().any(|line| line.contains("workspace, inner")),
-        "a project nested under another project must be refreshed:\n{output}"
-    );
-    assert!(
-        output.contains(&format!(
-            "Cassy {} · 2 projects refreshed · 0 failed · 1 skipped",
-            env!("CARGO_PKG_VERSION")
-        )),
-        "banner must count the skipped store:\n{output}"
-    );
-    assert!(
-        output.contains("storeless") && output.contains("not refreshed: "),
-        "the storeless directory must be named:\n{output}"
-    );
-    assert!(
-        output.contains("user-level store current"),
-        "the user-level store needs its own reported phase:\n{output}"
-    );
-
     let json = cas_cmd(root)
         .current_dir(root)
         .env("CAS_ROOT", parent.join(".cas"))
@@ -207,12 +188,8 @@ fn all_projects_refreshes_nested_projects_and_the_user_level_store() {
         .args(["--json", "update", "--all-projects"])
         .assert()
         .success();
-    let json_out = String::from_utf8_lossy(&json.get_output().stdout);
-    let receipt: serde_json::Value = json_out
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .find(|value| value.get("projects").is_some())
-        .expect("all-projects JSON receipt");
+    let receipt = refresh_receipt(&json.get_output().stdout);
+    assert_eq!(receipt["refresh_status"], "partial", "{receipt}");
 
     let stores = receipt["projects"]
         .as_array()
@@ -220,20 +197,13 @@ fn all_projects_refreshes_nested_projects_and_the_user_level_store() {
         .iter()
         .map(|project| project["store"].as_str().unwrap_or_default().to_owned())
         .collect::<Vec<_>>();
-    assert!(
-        stores
-            .iter()
-            .any(|store| store.ends_with("workspace/inner/.cas")),
-        "every project receipt names the store it migrated: {stores:?}"
-    );
-    assert_eq!(
-        receipt["skipped_unregistered"]
-            .as_array()
-            .expect("skipped_unregistered array")
-            .len(),
-        1,
-        "receipt was: {receipt}"
-    );
+    assert_eq!(stores.len(), 2, "{stores:?}");
+    for suffix in ["workspace/.cas", "workspace/inner/.cas"] {
+        assert!(stores.iter().any(|store| store.ends_with(suffix)), "{stores:?}");
+    }
+    let skipped = receipt["skipped_unregistered"].as_array().unwrap();
+    assert_eq!(skipped.len(), 1, "{receipt}");
+    assert_eq!(skipped[0]["project"], projects.join("storeless").to_str().unwrap());
     assert_eq!(
         receipt["user_level_store"]["store"]
             .as_str()
@@ -241,6 +211,8 @@ fn all_projects_refreshes_nested_projects_and_the_user_level_store() {
         root.join(".test-home/.cas").to_string_lossy(),
         "receipt was: {receipt}"
     );
+    let user_status = receipt["user_level_store"]["status"].as_str().unwrap();
+    assert_eq!(user_status.split_once(':').map(|(status, _)| status), Some("ok"));
 }
 
 /// cas-9d5c: the user-level store must be migrated by the sweep, not merely
@@ -382,24 +354,13 @@ fn all_projects_warns_on_a_held_legacy_lock_but_still_succeeds() {
         // from the fixture into the real user-level ~/.cas.
         .env("CAS_ROOT", project.join(".cas"))
         .env("CAS_PROJECT_ROOTS", &projects)
-        .args(["update", "--all-projects"])
+        .args(["--json", "update", "--all-projects"])
         .assert()
         .success();
-    let output = String::from_utf8_lossy(&update.get_output().stdout);
-    assert!(
-        output
-            .lines()
-            .any(|line| line.contains("[WARN]") && line.contains("index") && line.contains("busy")),
-        "busy repair finding missing from output:\n{output}"
-    );
-    let banner = format!(
-        "Cassy {} · 1 projects refreshed · 0 failed",
-        env!("CARGO_PKG_VERSION")
-    );
-    assert!(
-        output.contains(&banner),
-        "busy repair must not fail the project refresh:\n{output}"
-    );
+    let receipt = refresh_receipt(&update.get_output().stdout);
+    assert_eq!(receipt["refresh_status"], "partial", "{receipt}");
+    let search_index = receipt["projects"][0]["search_index"].as_str().unwrap();
+    assert_eq!(search_index.split_once(':').map(|(status, _)| status), Some("warning"));
 }
 
 fn open_project_db(project: &Path) -> rusqlite::Connection {

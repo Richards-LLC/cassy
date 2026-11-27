@@ -749,6 +749,7 @@ mod tests {
             let key = operation_key(&scope.project_id, &scope.release_id, &tree);
             self.calls.borrow_mut().push(trigger.clone());
             let receipt = self.receipt(key, scope, trigger);
+            self.done.borrow_mut().retain(|done| done.key != receipt.key);
             self.done.borrow_mut().push(receipt.clone());
             Ok(receipt)
         }
@@ -780,7 +781,7 @@ mod tests {
             reconcile_once(&root, repo, &scope("pr-4396"), promotion.clone(), &reconciler).unwrap();
         }
         reconcile_once(&root, repo, &scope("v9.99.2"), ReconcileTrigger::Installed, &reconciler).unwrap();
-        assert_eq!(*reconciler.calls.borrow(), vec![publish, promotion]);
+        assert_eq!(*reconciler.calls.borrow(), vec![publish.clone(), promotion.clone()]);
 
         // One notice per release, naming each residual with owner and next action.
         let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
@@ -831,6 +832,23 @@ mod tests {
             assert_eq!(payload["context"]["closeout_counts"], expected);
         }
         assert_eq!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().len(), 5);
+
+        // GH #2569: a settled partial resumes once when its review or proof
+        // binding changes; an unchanged or complete operation stays a no-op.
+        let tree = release_reconcile::final_tree(repo, &sha).unwrap();
+        let mut partial = reconciler.receipt(operation_key("release-fixture", "v9.99.3", &tree), &scope("v9.99.3"), publish.clone());
+        partial.complete = false;
+        reconciler.done.borrow_mut().push(partial);
+        let mut rebound = scope("v9.99.3");
+        rebound.proof_refs.push(ReleaseProofRef {
+            kind: ReleaseProofKind::Qa, artifact_id: "art-frozen".into(), sha256: "a".repeat(64),
+            size_bytes: 1, reviewed_sha: sha.clone(), receipt_id: Some("qab-frozen".into()),
+        });
+        let republish = ReconcileTrigger::Publish { tag: "v9.99.3".into() };
+        for scope in [scope("v9.99.3"), rebound.clone(), rebound, scope("v9.99.3")] {
+            reconcile_once(&root, repo, &scope, republish.clone(), &reconciler).unwrap();
+        }
+        assert_eq!(*reconciler.calls.borrow(), vec![publish, promotion, republish]);
     }
 
     /// The review ledger scaffold publishes both blocks for its scope, and #2's

@@ -663,7 +663,7 @@ impl ReleaseClose {
             let mut proofs = std::collections::BTreeSet::new();
             for (child, anchor) in shipped {
                 let qa = satisfying_receipt(&self.root, child, &self.repo, &self.inventory.scope.final_release_sha, anchor)?;
-                let Some(qa) = qa else { return Ok(None); };
+                let Some(qa) = qa else { return Ok::<_, String>(None); };
                 proofs.insert(qa.ledger_artifact_id);
             }
             Ok(Some(format!("Release QA of the mapped tree: {}", proofs.into_iter().collect::<Vec<_>>().join(", "))))

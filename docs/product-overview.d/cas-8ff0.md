@@ -1,3 +1,5 @@
+## Core Concepts
+
 ### Codex supervisor delivery and continuity
 
 Codex supervisors receive queued messages in one turn-start context block and

@@ -10,6 +10,8 @@ pub(super) struct ShellReadContext {
     /// Literal values the command binds to its variables (GH #2171), so a
     /// `$VAR` operand is judged at its value rather than as a relative path.
     pub values: std::collections::HashMap<String, Vec<String>>,
+    /// A statement of a shell payload, `eval` or substitution the command runs.
+    pub nested: bool,
 }
 
 /// Not a valid file name, so no real directory entry has this spelling.
@@ -2960,343 +2962,194 @@ fn git_subcommand_index(git_words: &[String]) -> Option<usize> {
     git_words.get(operation_index).map(|_| operation_index)
 }
 
-#[derive(Clone, Copy)]
-struct WorkerPathWord {
-    literal: Option<bool>,
-    quoted: bool,
-    raw_syntax_word: bool,
-}
-
-/// Only constants and whole, previously bound variables are known here. Never
-/// execute substitutions or infer a value from an argument that looks like an
-/// assignment. Mixed quoting of the same spelling remains uncertain.
-// gate-audit[allow_variables]: input Controls shell-variable parsing in a path validator; workspace policy is applied after parsing.
-fn worker_path_value(
-    value: &str, word: WorkerPathWord,
-    bindings: &std::collections::HashMap<String, String>, allow_variables: bool,
-) -> Option<String> {
-    if word.literal == Some(true) {
-        return Some(value.to_string());
-    }
-    if !value.contains(['$', '`', '*', '?', '[']) {
-        return Some(value.to_string());
-    }
-    if !allow_variables || word.literal != Some(false) {
-        return None;
-    }
-    let name = value.strip_prefix("${").and_then(|v| v.strip_suffix('}'))
-        .or_else(|| value.strip_prefix('$'))?;
-    if !is_shell_variable_name(name) { return None; }
-    let value = bindings.get(name)?;
-    if value.is_empty() || (!word.quoted && value.chars().any(|ch| ch.is_whitespace() || "*?[".contains(ch))) {
-        return None;
-    }
-    Some(value.clone())
-}
-
-/// Extract every history-changing git invocation's repository target from a
-/// shell command. Git's `-C`, `--git-dir`, and `--work-tree` options are
-/// parsed before the operation so a linked worktree is checked instead of the
-/// hook's cwd. Explicit `cd` statements are carried forward across `&&`, `;`,
-/// and `|` statements because the hook receives the whole shell command.
-/// Shell command strings inherit cwd; only eval changes the enclosing cwd.
+/// Every history-changing git invocation's repository target. Statements,
+/// their directory alternatives and their bindings come from the shared shell
+/// projection, which already follows `cd`, `pushd`/`popd`, `cd -`, subshells,
+/// shell payloads, `eval` and substitutions. Git's `-C`, `--git-dir` and
+/// `--work-tree` options are parsed before the operation so a linked worktree
+/// is checked instead of the hook's cwd.
 fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
     let default_target = GitCommandTarget::from_cwd(cwd);
     let mut targets = Vec::new();
-    let mut shell_cwd = Some(default_target.cwd.clone());
-    collect_git_write_targets(&default_target, &mut shell_cwd, command, 0, &mut targets);
+    collect_git_write_targets(&default_target, &default_target.cwd.clone(), command, 0, &mut targets);
     targets
 }
 
 fn collect_git_write_targets(
     default_target: &GitCommandTarget,
-    shell_cwd: &mut Option<std::path::PathBuf>,
+    cwd: &std::path::Path,
     command: &str,
     depth: usize,
     targets: &mut Vec<GitCommandTarget>,
 ) {
-    if depth > 6 {
-        let mut target = default_target.clone();
-        target.uncertain_scope = true;
-        targets.push(target);
+    let uncertain = || GitCommandTarget { uncertain_scope: true, ..default_target.clone() };
+    let mentions_git = command.contains("git");
+    let Some(contexts) = (depth <= 6).then(|| shell_read_contexts(command, cwd)).flatten() else {
+        if mentions_git {
+            targets.push(uncertain());
+        }
         return;
-    }
-    let projected = shell_command_without_heredoc_bodies(command);
-    let lexed = factory_shell_lex(&projected, false, 0);
-    let mut path_words = std::collections::HashMap::<String, WorkerPathWord>::new();
-    let mut previous_end = 0;
-    for ((token, literal), end) in lexed.tokens.iter().zip(&lexed.literals).zip(&lexed.ends) {
-        let raw = projected[previous_end..*end].trim();
-        previous_end = *end;
-        if let ShellToken::Word(value) = token {
-            let quoted = raw.starts_with('"') && raw.ends_with('"');
-            // Syntax-check allowances use the raw spelling, never cooked
-            // words that can hide quoting, escaping or shell expansion.
-            let raw_syntax_word = raw == value.as_str() && !raw.is_empty()
-                && raw.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte));
-            path_words.entry(value.clone()).and_modify(|prior| {
-                if prior.literal != Some(*literal) { prior.literal = None; }
-                prior.quoted &= quoted;
-                prior.raw_syntax_word &= raw_syntax_word;
-            }).or_insert(WorkerPathWord { literal: Some(*literal), quoted, raw_syntax_word });
-        }
-    }
-    let path_word = |word: &str| path_words.get(word).copied()
-        .unwrap_or(WorkerPathWord { literal: None, quoted: false, raw_syntax_word: false });
-    let allow_variables = lexed.unresolved_at.is_none() && !lexed.tokens.iter().enumerate().any(|(index, token)| match token {
-        ShellToken::Operator('(' | ')' | '|') => true,
-        ShellToken::Operator('&') => lexed.tokens.get(index.wrapping_sub(1)) != Some(&ShellToken::Operator('&'))
-            && lexed.tokens.get(index + 1) != Some(&ShellToken::Operator('&')),
-        ShellToken::Word(word) => matches!(word.as_str(), "if" | "then" | "else" | "elif" | "fi" | "for" | "while" | "until" | "case" | "esac" | "do" | "done"),
-        _ => false,
-    });
-    let conditional = lexed.tokens.iter().any(|token| matches!(token, ShellToken::Operator('&')));
-    let mut prefix_bindings = true;
-    let mut bindings = std::collections::HashMap::new();
-    if let Ok(value) = std::env::var("CAS_CLONE_PATH") {
-        bindings.insert("CAS_CLONE_PATH".to_string(), value);
-    }
-
-    // Heredoc bodies are data; only substitutions (including those in
-    // expanding bodies) execute. They share the shell_invocations scanner.
-    let substitutions = shell_substitutions(command);
-    if substitutions.unresolved() {
-        let mut target = default_target.clone();
-        target.uncertain_scope = true;
-        targets.push(target);
-    }
-    // A substitution runs before its statement, in that statement's cwd.
-    let mut visited_cwds = Vec::new();
-    let mut pending_statements = std::collections::VecDeque::from(shell_statement_words(command));
-    loop {
-        if !visited_cwds.contains(shell_cwd) {
-            visited_cwds.push(shell_cwd.clone());
-        }
-        let Some(words) = pending_statements.pop_front() else { break };
-        let standalone_assignments = !words.is_empty() && words.iter().all(|word| {
-            word.split_once('=').is_some_and(|(name, _)| is_shell_variable_name(name))
-        });
-        if standalone_assignments {
-            for word in &words {
-                let (name, value) = word.split_once('=').expect("assignment checked");
-                let mut provenance = path_word(word);
-                // Assignment RHSs do not undergo word splitting or globbing.
-                provenance.quoted = true;
-                let value = (!conditional || prefix_bindings).then(|| {
-                    worker_path_value(value, provenance, &bindings, allow_variables)
-                }).flatten();
-                if let Some(value) = value { bindings.insert(name.into(), value); }
-                else { bindings.remove(name); }
+    };
+    let unknown = std::ffi::OsStr::new(UNKNOWN_DIRECTORY);
+    let mut sourced = false;
+    for context in contexts {
+        let directories: Vec<Option<std::path::PathBuf>> = context.directories.iter()
+            .map(|directory| directory.clone().filter(|directory| !directory.components().any(|part| part.as_os_str() == unknown)))
+            .collect();
+        let lexed = factory_shell_lex(&shell_command_without_heredoc_bodies(&context.command), false, 0);
+        let mut literal_words = std::collections::HashMap::<String, bool>::new();
+        for (token, literal) in lexed.tokens.iter().zip(&lexed.literals) {
+            if let ShellToken::Word(word) = token {
+                *literal_words.entry(word.clone()).or_insert(*literal) &= *literal;
             }
-            continue;
         }
-        // Array/append assignment forms are not literal bindings.
-        bindings.retain(|name, _| !words.iter().any(|word| {
-            word.starts_with(&format!("{name}+=")) || word.starts_with(&format!("{name}["))
-        }));
-        let Some(command_index) = unwrapped_command_index(&words) else {
-            continue;
+        let literal = |word: &String| literal_words.get(word).copied().unwrap_or(false)
+            && !word.starts_with('~') && !word.contains(['*', '?', '[', '{']);
+        let arguments = shell_statement_arguments(&context.command);
+        let statements = shell_statement_words(&context.command);
+        let paired = arguments.len() == statements.len();
+        let mut pending: std::collections::VecDeque<(Vec<String>, Option<Vec<String>>, bool)> = statements.into_iter()
+            .enumerate()
+            .map(|(at, words)| (words, paired.then(|| arguments[at].clone()), false))
+            .collect();
+        let resolve = |mut words: Vec<String>| {
+            for _ in 0..16 {
+                let Some(index) = unwrapped_command_index(&words) else { break };
+                if !words[index].contains(['$', '`']) || literal_words.get(&words[index]) == Some(&true) {
+                    break;
+                }
+                let [value] = expand_factory_shell_word(&words[index], &context.values).try_into().ok()?;
+                if value == words[index] {
+                    return None;
+                }
+                words.splice(index..=index, value.split_whitespace().map(String::from));
+            }
+            Some(words)
         };
-        prefix_bindings = false;
-        let name = shell_word_basename(&words[command_index]);
-        let args = &words[command_index + 1..];
-        if name == "eval" {
-            let args = if args.first().is_some_and(|arg| arg == "--") {
-                &args[1..]
-            } else {
-                args
+        while let Some((words, argv, from_find)) = pending.pop_front() {
+            let (Some(words), argv) = (resolve(words), argv.map(resolve)) else {
+                if mentions_git {
+                    targets.push(uncertain());
+                }
+                continue;
             };
-            bindings.clear();
-            // eval runs in this shell: its cd also affects following commands.
-            collect_git_write_targets(default_target, shell_cwd, &args.join(" "), depth + 1, targets);
-            continue;
-        }
-        if matches!(
-            name,
-            "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser"
-        ) {
-            // Only these exact forms have an unambiguous command string.
-            // Do not interpret shell option bundles or their operands.
-            let args = if args.first().is_some_and(|arg| matches!(arg.as_str(), "-l" | "--login")) {
-                &args[1..]
-            } else {
-                args
-            };
-            // A literal script file is opaque, just like executing it directly.
-            // Its remaining arguments are script data, not shell options.
-            let literal_script = |script: &String| {
-                !script.is_empty()
-                    && !script.starts_with(['-', '+'])
-                    && path_word(script).literal == Some(true)
-            };
-            // Syntax checks require exact raw noexec flags followed by raw
-            // script paths matching [A-Za-z0-9._/][A-Za-z0-9._/-]*. Its own
-            // argument projection must match; another statement's redirect
-            // does not change this invocation's mode or operands.
-            let syntax_check = command_index == 0
-                && shell_statement_arguments(command).iter().any(|statement| {
-                    if statement != &words { return false; }
-                    let flags = statement[1..].iter()
-                        .take_while(|flag| matches!(flag.as_str(), "-n" | "--noexec")
-                            && path_word(flag).raw_syntax_word)
-                        .count();
-                    flags > 0 && statement.len() > flags + 1
-                        && statement[flags + 1..].iter().all(|script| {
-                            literal_script(script) && path_word(script).raw_syntax_word
-                        })
-                });
-            if matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh")
-                && (args.first().is_some_and(literal_script) || syntax_check)
-            {
+            let argv = argv.flatten();
+            let Some(command_index) = unwrapped_command_index(&words) else { continue };
+            let name = shell_word_basename(&words[command_index]);
+            if matches!(name, "source" | ".") {
+                sourced = true;
                 continue;
             }
-            let payload = match args {
-                [flag, separator, payload, ..] if flag == "-c" && separator == "--" => Some(payload),
-                [flag, payload, ..] if flag == "-c"
-                    && !payload.starts_with('-') && !payload.starts_with('+') => Some(payload),
-                _ => None,
+            if matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh") {
+                let argv = argv.unwrap_or_else(|| words.clone());
+                let Some(index) = unwrapped_command_index(&argv) else { continue };
+                let args = &argv[index + 1..];
+                match shell_effects::shell_source(name, args) {
+                    Ok(shell_effects::ShellSource::Command(at)) => if from_find {
+                        for directory in &directories {
+                            match directory {
+                                Some(directory) => collect_git_write_targets(default_target, directory, &args[at], depth + 1, targets),
+                                None => targets.push(uncertain()),
+                            }
+                        }
+                    },
+                    // An unquoted expansion could become options or another script.
+                    Ok(shell_effects::ShellSource::Script(at)) if args[..=at].iter().all(literal) => {}
+                    Ok(shell_effects::ShellSource::Stdin) if !mentions_git => {}
+                    Ok(shell_effects::ShellSource::Rejected) => {}
+                    _ => targets.push(uncertain()),
+                }
+                continue;
+            }
+            if matches!(name, "script" | "su" | "runuser") {
+                let args = &words[command_index + 1..];
+                if !matches!(args, [flag, ..] if flag == "-c") {
+                    targets.push(uncertain());
+                }
+                continue;
+            }
+            if name == "find" {
+                // find runs each -exec/-execdir payload as a command.
+                for (index, word) in words.iter().enumerate().rev() {
+                    if matches!(word.as_str(), "-exec" | "-execdir") {
+                        let payload = &words[index + 1..];
+                        let end = payload.iter()
+                            .position(|word| word == ";" || word == "+")
+                            .unwrap_or(payload.len());
+                        pending.push_front((payload[..end].to_vec(), None, true));
+                    }
+                }
+                continue;
+            }
+            if name != "git" {
+                continue;
+            }
+            let git_words = &words[command_index + 1..];
+            let Some(write_index) = git_history_write_operation(git_words) else {
+                continue;
             };
-            if let Some(payload) = payload {
-                // A child inherits cwd but cannot change its parent's cwd.
-                collect_git_write_targets(default_target, &mut shell_cwd.clone(), payload, depth + 1, targets);
-            } else {
+            let operation = git_words[write_index].as_str();
+            let operands = &git_words[write_index + 1..];
+            let head_action = if (matches!(operation, "cherry-pick" | "merge" | "rebase")
+                    && operands == ["--abort"])
+                || (operation == "reset" && operands == ["--merge"])
+            {
+                GitHeadAction::Recover { branch: None }
+            } else if operation == "switch" && matches!(operands.len(), 2 | 3)
+                && matches!(operands[0].as_str(), "-C" | "--force-create")
+            {
+                GitHeadAction::Recover { branch: Some(operands[1].clone()) }
+            } else if matches!(operation, "checkout" | "switch") {
+                git_head_action(operation, operands)
+            } else { GitHeadAction::Guarded };
+            let resolve_path = |base: &std::path::Path, value: &str| {
+                let expanded = match literal_words.get(value) {
+                    Some(true) => vec![value.to_string()],
+                    _ => expand_factory_shell_word(value, &context.values),
+                };
+                let [value] = expanded.try_into().ok()?;
+                let value: String = match value.strip_prefix('~') {
+                    Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("{}{rest}", std::env::var("HOME").ok()?),
+                    _ => value,
+                };
+                (!value.contains(['$', '`', '*', '?'])).then(|| resolve_git_option_path(base, &value))
+            };
+            for directory in &directories {
                 let mut target = default_target.clone();
-                target.uncertain_scope = true;
+                target.head_action = head_action.clone();
+                target.checkout_args = (operation == "checkout").then(|| operands.to_vec());
+                let Some(directory) = directory else {
+                    target.unresolved_directory = true;
+                    targets.push(target);
+                    continue;
+                };
+                target.unresolved_directory = sourced;
+                target.cwd = super::operator_credentials::wrapper_cwd(&words[..command_index], directory);
+                let mut index = 0;
+                while index < write_index {
+                    let word = &git_words[index];
+                    let (option, value, width) = if let Some(path) = word.strip_prefix("-C").filter(|path| !path.is_empty()) {
+                        ("-C", Some(path), 1)
+                    } else if let Some((option, path)) = word.split_once('=').filter(|(option, _)| matches!(*option, "--git-dir" | "--work-tree")) {
+                        (option, Some(path), 1)
+                    } else if matches!(word.as_str(), "-C" | "--git-dir" | "--work-tree") {
+                        (word.as_str(), git_words.get(index + 1).map(String::as_str), 2)
+                    } else {
+                        index += 1;
+                        continue;
+                    };
+                    let Some(value) = value else { break };
+                    let path = resolve_path(&target.cwd, value);
+                    target.unresolved_directory |= path.is_none();
+                    match option {
+                        "-C" => if let Some(path) = path { target.cwd = path },
+                        "--git-dir" => target.git_dir = path,
+                        _ => target.work_tree = path,
+                    }
+                    index += width;
+                }
                 targets.push(target);
             }
-            continue;
-        }
-        if matches!(name, "read" | "readarray" | "mapfile" | "getopts" | "declare" | "typeset" | "local" | "export" | "readonly" | "let" | "unset" | "source" | ".")
-            || (name == "printf" && words[command_index + 1..].iter().any(|arg| arg.starts_with("-v")))
-        {
-            bindings.clear();
-            if matches!(name, "source" | ".") { *shell_cwd = None; }
-        }
-        let resolve_path = |base: Option<&std::path::Path>, value: &str, spelling: &str| {
-            let value = worker_path_value(value, path_word(spelling), &bindings, allow_variables)?;
-            let path = std::path::Path::new(&value);
-            if path.is_absolute() { Some(path.to_path_buf()) }
-            else { base.map(|base| resolve_git_option_path(base, &value)) }
-        };
-        if shell_word_basename(&words[command_index]) == "find" {
-            // find runs each -exec/-execdir payload as a command. Inspect
-            // these scopes before later statements can change shell_cwd.
-            for (index, word) in words.iter().enumerate().rev() {
-                if matches!(word.as_str(), "-exec" | "-execdir") {
-                    let payload = &words[index + 1..];
-                    let end = payload.iter()
-                        .position(|word| word == ";" || word == "+")
-                        .unwrap_or(payload.len());
-                    pending_statements.push_front(payload[..end].to_vec());
-                }
-            }
-            continue;
-        }
-        if words[command_index] == "cd" {
-            let path = words.get(command_index + 1).filter(|path| path.as_str() != "--")
-                .or_else(|| words.get(command_index + 2));
-            let cdpath = words[..command_index].iter().any(|word| word.starts_with("CDPATH=") && word != "CDPATH=")
-                || bindings.get("CDPATH").is_some_and(|value| !value.is_empty())
-                || std::env::var("CDPATH").is_ok_and(|value| !value.is_empty());
-            *shell_cwd = path.and_then(|path| {
-                let value = worker_path_value(path, path_word(path), &bindings, allow_variables)?;
-                if cdpath && !std::path::Path::new(&value).is_absolute()
-                    && !value.starts_with("./") && !value.starts_with("../")
-                    && value != "." && value != ".."
-                { return None; }
-                resolve_path(shell_cwd.as_deref(), path, path)
-            });
-            bindings.remove("PWD");
-            bindings.remove("OLDPWD");
-            continue;
-        }
-        if shell_word_basename(&words[command_index]) != "git" {
-            continue;
-        }
-        let git_words = &words[command_index + 1..];
-        let Some(write_index) = git_history_write_operation(git_words) else {
-            continue;
-        };
-
-        let mut target = default_target.clone();
-        target.unresolved_directory = shell_cwd.is_none();
-        target.cwd = shell_cwd.clone().unwrap_or_else(|| default_target.cwd.clone());
-        let operation = git_words[write_index].as_str();
-        let operands = &git_words[write_index + 1..];
-        target.head_action = if (matches!(operation, "cherry-pick" | "merge" | "rebase")
-                && operands == ["--abort"])
-            || (operation == "reset" && operands == ["--merge"])
-        {
-            GitHeadAction::Recover { branch: None }
-        } else if operation == "switch" && matches!(operands.len(), 2 | 3)
-            && matches!(operands[0].as_str(), "-C" | "--force-create")
-        {
-            GitHeadAction::Recover { branch: Some(operands[1].clone()) }
-        } else if matches!(operation, "checkout" | "switch") {
-            git_head_action(operation, operands)
-        } else { GitHeadAction::Guarded };
-        target.checkout_args = (git_words[write_index] == "checkout")
-            .then(|| git_words[write_index + 1..].to_vec());
-        let mut index = 0;
-        while index < write_index {
-            let word = &git_words[index];
-            if word == "-C" {
-                if let Some(path) = git_words.get(index + 1) {
-                    match resolve_path(Some(&target.cwd), path, path) {
-                        Some(path) => target.cwd = path,
-                        None => target.unresolved_directory = true,
-                    }
-                    index += 2;
-                    continue;
-                }
-                break;
-            }
-            if let Some(path) = word.strip_prefix("-C").filter(|path| !path.is_empty()) {
-                match resolve_path(Some(&target.cwd), path, word) {
-                    Some(path) => target.cwd = path,
-                    None => target.unresolved_directory = true,
-                }
-                index += 1;
-                continue;
-            }
-            if word == "--git-dir" {
-                if let Some(path) = git_words.get(index + 1) {
-                    target.git_dir = resolve_path(Some(&target.cwd), path, path);
-                    target.unresolved_directory |= target.git_dir.is_none();
-                    index += 2;
-                    continue;
-                }
-                break;
-            }
-            if let Some(path) = word.strip_prefix("--git-dir=") {
-                target.git_dir = resolve_path(Some(&target.cwd), path, word);
-                target.unresolved_directory |= target.git_dir.is_none();
-                index += 1;
-                continue;
-            }
-            if word == "--work-tree" {
-                if let Some(path) = git_words.get(index + 1) {
-                    target.work_tree = resolve_path(Some(&target.cwd), path, path);
-                    target.unresolved_directory |= target.work_tree.is_none();
-                    index += 2;
-                    continue;
-                }
-                break;
-            }
-            if let Some(path) = word.strip_prefix("--work-tree=") {
-                target.work_tree = resolve_path(Some(&target.cwd), path, word);
-                target.unresolved_directory |= target.work_tree.is_none();
-                index += 1;
-                continue;
-            }
-            index += 1;
-        }
-        targets.push(target);
-    }
-    for body in &substitutions.bodies {
-        for cwd in &visited_cwds {
-            // A subshell inherits cwd but cannot change its parent's cwd.
-            collect_git_write_targets(default_target, &mut cwd.clone(), body, depth + 1, targets);
         }
     }
 }
@@ -4824,7 +4677,7 @@ fn factory_shell_variable_values(
     if let Ok(home) = std::env::var("HOME") {
         values.insert("HOME".to_string(), vec![home]);
     }
-    for token in tokens {
+    for (at, token) in tokens.iter().enumerate() {
         let ShellToken::Word(word) = token else {
             continue;
         };
@@ -4835,7 +4688,17 @@ fn factory_shell_variable_values(
             // Shell assignments expand their RHS using values already bound:
             // `R=/artifacts; P=$R/task; mkdir -p $P` must not leave `$R`
             // inside the target. Unknown values still remain unresolved.
-            let expanded = expand_factory_shell_word(value, &values);
+            let expanded = match tokens.get(at + 1) {
+                Some(ShellToken::Operator('(')) if value.ends_with('$') => {
+                    values.remove(name);
+                    continue;
+                }
+                Some(ShellToken::Operator('(')) if value.is_empty() => {
+                    shell_effects::array_elements(&tokens[at + 2..]).iter()
+                        .flat_map(|element| expand_factory_shell_word(element, &values)).collect()
+                }
+                _ => expand_factory_shell_word(value, &values),
+            };
             values.insert(name.to_string(), expanded);
         }
     }
@@ -4916,7 +4779,15 @@ pub(super) fn expand_factory_shell_word(
                 continue;
             };
             let end = index + 2 + close;
-            (end + 1, chars[index + 2..end].iter().collect::<String>())
+            let name: String = chars[index + 2..end].iter().collect();
+            let name = match name.split_once('[') {
+                Some((base, subscript)) if subscript.ends_with(']') => base.to_string(),
+                _ => name,
+            };
+            (end + 1, name)
+        } else if chars.get(index + 1).is_some_and(|ch| ch.is_ascii_digit() || matches!(ch, '@' | '*')) {
+            // Unbraced positional parameters are one character: `$10` is `${1}0`.
+            (index + 2, chars[index + 1].to_string())
         } else {
             let mut end = index + 1;
             while end < chars.len() && (chars[end] == '_' || chars[end].is_ascii_alphanumeric()) {
@@ -5866,7 +5737,17 @@ fn factory_delete_violation(
     } else {
         lexically_normalize_path(std::path::PathBuf::from(&input.cwd).join(expanded))
     };
-    let Some(resolved) = canonicalize_for_containment(&path) else {
+    // Removing a symlink unlinks its directory entry and leaves the target
+    // alone; a trailing slash names the target instead (GH #2528).
+    let link_parent = (!raw_path.ends_with('/') && !raw_path.ends_with("/."))
+        .then(|| path.symlink_metadata().ok().filter(|meta| meta.file_type().is_symlink()))
+        .flatten()
+        .and_then(|_| path.parent().and_then(canonicalize_for_containment).zip(path.file_name()));
+    let resolved = match &link_parent {
+        Some((parent, name)) => Some(parent.join(name)),
+        None => canonicalize_for_containment(&path),
+    };
+    let Some(resolved) = resolved else {
         return Some(violation(path, "deletion outside sanctioned roots (unresolvable path)"));
     };
     let canonical = |path: &std::path::Path| canonicalize_for_containment(path);
@@ -5889,12 +5770,13 @@ fn factory_delete_violation(
     {
         return Some(violation(resolved, "deletion of a protected root ($HOME, /, /tmp, the repository or the worktree)"));
     }
+    let checked = link_parent.as_ref().map(|(parent, _)| parent.display().to_string());
     if unsanctioned_factory_path_with_worktree(
         input,
         configured_artifacts_root,
         configured_scratch_root,
         is_supervisor,
-        raw_path,
+        checked.as_deref().unwrap_or(raw_path),
         registered_worktree_root,
     )
     .is_none()
@@ -6558,12 +6440,6 @@ pub(super) struct ShellSubstitutions {
     pub(super) bodies: Vec<String>,
     pub(super) unresolved_heredoc: bool,
     pub(super) unresolved_ansi_c: bool,
-}
-
-impl ShellSubstitutions {
-    pub(super) fn unresolved(&self) -> bool {
-        self.unresolved_heredoc || self.unresolved_ansi_c
-    }
 }
 
 pub(super) fn shell_substitutions(command: &str) -> ShellSubstitutions {
@@ -11093,6 +10969,30 @@ EOF
             // credential read, which the credential gate refuses.
             ("cd \"$UNKNOWN_CWD\" && git status", false),
             ("sh -c 'printf x > src/new.rs'", false),
+            // GH #2497, #2458, #2479: background payloads with positional
+            // parameters and redirected output stay in the worktree.
+            ("A=src; setsid bash -c 'pnpm typecheck > \"$1/typecheck.log\" 2>&1' bash \"$A\" < /dev/null & tail -n 2 \"$A/test.log\"", false),
+            ("A=src; nohup bash -c 'pnpm typecheck; printf \"exit=%s\\n\" \"$?\"' > \"$A/typecheck.log\" 2>&1 < /dev/null &", false),
+            ("bash -c 'printf x > \"$1\"' bash ../../config.toml", true),
+            ("bash -c 'shift; printf x > \"$1\"' bash src/new.rs ../../config.toml", true),
+            ("bash -c 'f() { printf x > \"$1\"; }; f ../../config.toml' bash src/new.rs", true),
+            // A child shell receives exported variables only.
+            ("W=$PWD; bash -c 'printf x > \"$W/etc-cas-e460\"'", true),
+            ("export W=$PWD; bash -c 'printf x > \"$W/src/new.rs\"'", false),
+            // GH #2473, #2512: `cd \"$OLDPWD\"` and `cd -` return; `pushd` moves.
+            ("cd ../.. && cat config.toml && cd \"$OLDPWD\" && printf x > src/new.rs", false),
+            ("cd ../.. && cat config.toml && cd - >/dev/null && printf x > src/new.rs", false),
+            ("cd /nonexistent && true; cd - >/dev/null && printf x > .bashrc", true),
+            ("pushd ../.. >/dev/null && printf x > config.toml", true),
+            ("eval -- 'cd ../..'; printf x > config.toml", true),
+            // GH #1866, #2547: numeric counters and clock arithmetic are inert.
+            ("missing=0; for p in src/a src/b; do [ -f \"$p\" ] || missing=$((missing+1)); done; printf '%s\\n' \"$missing\" > src/missing.txt", false),
+            ("until_timer=$((900 - $(date +%s) % 900)); printf '%s\\n' \"$until_timer\" > src/timer.txt", false),
+            ("n=$(cat src/n); printf '%s' $((n+1))", true),
+            ("n=0; read n < src/n; printf '%s' $((n+1))", true),
+            // GH #2491: array words are data and bind their elements.
+            ("a=(src/*); ls -l \"${a[0]}\"", false),
+            ("a=(../../config.toml); printf x > \"${a[0]}\"", true),
             ("(cd src && printf x > new.rs); printf x > local.rs", false),
             ("cd ../.. && cat config.toml", false),
         ] {
@@ -11135,9 +11035,10 @@ EOF
         let main = root_path.join("main");
         let worktree = main.join(".cas/worktrees/solid-condor-23");
         let artifacts = root_path.join("artifacts");
-        for dir in [home.join(".cas/sessions"), worktree.join("src"), artifacts.join("cas-cf4f/old")] {
+        for dir in [home.join(".cas/sessions"), worktree.join("src"), artifacts.join("cas-cf4f/old"), main.join("node_modules")] {
             std::fs::create_dir_all(dir).unwrap();
         }
+        std::os::unix::fs::symlink(main.join("node_modules"), worktree.join("node_modules")).unwrap();
         for file in [
             home.join(".cas/factory-qa4cd6.gui.sock"),
             home.join(".cas/sessions/qa4cd6.json.lock"),
@@ -11176,6 +11077,8 @@ EOF
             ("stale session file", "rm ~/.cas/sessions/qa4cd6.json".into(), false),
             ("stale pid file via $HOME", "rm -f $HOME/.cas/daemon.pid".into(), false),
             ("a file in the worktree", "rm -f src/stale.rs".into(), false),
+            // GH #2528: rm unlinks the worktree's symlink, not its target.
+            ("a worktree symlink to a main-checkout directory", "rm -r node_modules".into(), false),
             ("task-scoped artifacts", format!("rm -rf {}", artifacts.join("cas-cf4f/old").display()), false),
             ("supervisor clears a /tmp cache", format!("rm -rf {tmp_cache_path}"), true),
         ];
@@ -11191,6 +11094,7 @@ EOF
             ("/tmp itself", "rm -rf /tmp".into(), true, "protected"),
             ("the whole ~/.cas directory", "rm -rf ~/.cas".into(), false, "outside"),
             ("an unrelated home file", "rm ~/.zshrc".into(), false, "outside"),
+            ("a symlink's target through a trailing slash", "rm -rf node_modules/".into(), false, "outside"),
             ("a worker clearing /tmp", format!("rm -rf {tmp_cache_path}"), false, "outside"),
         ];
         for (case, command, supervisor, rule) in &refused {
@@ -13430,8 +13334,10 @@ mod worker_commit_guard_tests {
             ("bash scripts/test-release.sh > /tmp/cas-6837.log 2>&1".into(), true),
             ("bash 'scripts/test release.sh' --flag -c 'git commit -m argument'".into(), false),
             ("bash scripts/test-release.sh".into(), false),
-            ("bash".into(), true),
-            ("sh -s".into(), true),
+            // GH #2508 family: a stdin shell runs no visible git write.
+            ("bash".into(), false),
+            ("sh -s".into(), false),
+            ("echo 'git commit -m probe' | bash".into(), true),
             (format!("cd '{repo_path}' && git commit --allow-empty -m probe"), true),
             (format!("bash -c 'cd \"{repo_path}\" && git commit --allow-empty -m probe'"), true),
             (format!("bash -c -- 'cd \"{repo_path}\" && git commit -m probe'"), true),
@@ -13451,19 +13357,28 @@ mod worker_commit_guard_tests {
             ("bash --login -c 'git commit -m work'".to_string(), false),
             ("bash --login -c -- 'git commit -m work'".to_string(), false),
             ("bash -c 'git commit -m work' -ec".to_string(), false),
-            ("bash -co nounset 'git commit -m work'".to_string(), true),
-            ("bash -oc nounset 'git commit -m work'".to_string(), true),
-            ("bash -ec 'git commit -m work'".to_string(), true),
-            ("bash -O extglob -c 'git commit -m work'".to_string(), true),
-            ("bash -c -e 'git commit -m work'".to_string(), true),
-            ("bash -c -o nounset 'git commit -m work'".to_string(), true),
-            ("bash -c +O extglob 'git commit -m work'".to_string(), true),
-            ("bash -c --rcfile config 'git commit -m work'".to_string(), true),
-            ("bash -c --unknown 'git commit -m work'".to_string(), true),
-            ("bash -c -Z 'git commit -m work'".to_string(), true),
+            // The shell grammar reads option bundles and option values.
+            ("bash -lc 'git commit -m work'".to_string(), false),
+            ("bash -co nounset 'git commit -m work'".to_string(), false),
+            ("bash -euo pipefail -c 'git commit -m work'".to_string(), false),
+            ("bash -c +O extglob 'git commit -m work'".to_string(), false),
+            (format!("bash -co nounset 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("bash -c 'cd \"$1\" && git commit -m probe' bash '{repo_path}'"), true),
+            ("zsh -c -Z 'git commit -m work'".to_string(), true),
             ("bash -c -o".to_string(), true),
             ("bash -c --".to_string(), true),
             (format!("bash -c 'cd \"{repo_path}\"'; git commit -m work"), false),
+            // GH #2499, #2512: subshell `cd` and `cd -` are shell scoping.
+            (format!("d='{repo_path}'; (cd \"$d\" && true) && git commit -m work"), false),
+            (format!("cd '{repo_path}' && git status; cd - >/dev/null && git commit -m work"), false),
+            (format!("cd '{repo_path}' && (cd '{linked_path}') && git commit -m probe"), true),
+            (format!("cd '{linked_path}'; cd '{repo_path}'; cd - >/dev/null; cd - >/dev/null; git commit -m probe"), true),
+            (format!("pushd '{repo_path}' >/dev/null; git commit -m probe"), true),
+            (format!("env -C '{repo_path}' git commit -m probe"), true),
+            // A variable executable is classified by its bound value.
+            (format!("bash -c '\"$1\" -C {repo_path} commit -m probe' bash git"), true),
+            (format!("G=git; $G -C '{repo_path}' commit -m probe"), true),
+            ("G=git; $G commit -m work".to_string(), false),
             (format!("cd '{repo_path}'; sh -c 'cd \"{linked_path}\" && git commit -m work'"), false),
             // The merged directory resolver also applies inside shell payloads.
             (format!("bash -c 'W=\"{linked_path}\"; cd \"$W\"; git commit -m work'"), false),
@@ -13520,28 +13435,14 @@ mod worker_commit_guard_tests {
             (format!("{owned_edit}bash -n scripts/release.sh scripts/test-release.sh\ngit status --short\ngit log -1 --oneline"), false),
             (format!("{owned_edit}bash -c 'cd \"{repo_path}\"; git commit -m probe'"), true),
             (format!("python3 - <<'PY'\nfrom pathlib import Path\nPath('{repo_path}/f.txt').write_text('outside')\nPY\nbash -n scripts/release.sh"), true),
-            ("bash -n 'scripts/release.sh'".into(), true),
-            ("bash -n 'scripts/release check.sh'".into(), true),
+            // A script operand is opaque like `bash script.sh`; words after it
+            // are its arguments. An expansion could still become options.
+            ("bash -l -n 'scripts/release check.sh' +n -c ':'".into(), false),
+            ("bash -n < scripts/release.sh".into(), false),
             ("bash -n $VAR".into(), true),
             ("bash -n scripts/*.sh".into(), true),
             ("bash -n ~/x".into(), true),
-            ("bash -n scripts/release=check.sh".into(), true),
-            ("bash -n scripts/release\\.sh".into(), true),
-            ("bash '-n' scripts/release.sh".into(), true),
-            ("bash '--noexec' scripts/release.sh".into(), true),
-            ("bash -l -n scripts/release.sh".into(), true),
-            ("bash -n -- scripts/release.sh".into(), true),
-            ("bash --noexec -- scripts/release.sh".into(), true),
-            ("bash -n scripts/release.sh > syntax.log 2>&1".into(), true),
-            ("bash -n < scripts/release.sh".into(), true),
             ("bash -n scripts/release.sh > /tmp/cas-93e0.log 2>&1".into(), true),
-            ("bash -n scripts/release.sh +n -c ':'".into(), true),
-            ("bash -n scripts/release.sh -c ':'".into(), true),
-            ("bash -n scripts/release.sh -o nounset".into(), true),
-            ("bash -n scripts/release.sh -i".into(), true),
-            ("bash -n scripts/release.sh -s".into(), true),
-            ("bash -n scripts/release.sh --rcfile config".into(), true),
-            ("bash -n scripts/release.sh --unknown".into(), true),
             (format!("bash -n scripts/release.sh; git -C '{repo_path}' commit -m probe"), true),
             (format!("bash -n +n -c 'cd \"{repo_path}\"; git commit -m probe'"), true),
             (format!("bash +n -c 'cd \"{repo_path}\"; git commit -m probe'"), true),

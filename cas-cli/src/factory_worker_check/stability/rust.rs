@@ -406,7 +406,7 @@ pub(crate) fn selected_inputs(repo: &Path, base: &str, head: &str, test: &Target
     let mut selected = Vec::new();
     let mut uncertain = false;
     for path in paths.into_iter().filter(|path| path.ends_with(".rs")) {
-        if let crate::factory_worker_check::widened::Scope::Crate(owner) = super::super::widened::scope(repo, &path)
+        if let Some(crate::factory_worker_check::widened::Scope::Crate(owner)) = super::super::widened::scope(repo, &path)
             && owner != package { continue; }
         match changed(repo, base, head, std::slice::from_ref(&path)) {
             Ok(tests) => selected.extend(tests.into_iter().filter(|own| own.package == package

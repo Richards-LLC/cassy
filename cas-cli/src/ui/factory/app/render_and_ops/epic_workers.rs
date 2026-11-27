@@ -3498,7 +3498,7 @@ impl FactoryApp {
             Some(prompt)
         });
         self.remove_exited_worker_pane(&worker_name)?;
-        self.forget_tools_listed(&worker_name);
+        let reset_tools = self.worker_readiness_reset(&worker_name, effective_cli);
         let handoff = startup_handoff(effective_cli);
         // A Codex worker launches without the actionable prompt; its assignment is
         // enqueued below and the readiness-gated queue delivers it (GH #2128).
@@ -3511,6 +3511,7 @@ impl FactoryApp {
             &self.supervisor_name,
             teams.as_ref(),
             spec, // cas-4cae: per-spawn spec override from SpawnWorkers protocol
+            reset_tools,
         ) {
             crate::telemetry::track(
                 "factory_worker_spawn_result",
@@ -4334,9 +4335,20 @@ impl FactoryApp {
 
     /// A launching worker has listed no tools yet; its predecessor's record (a recycle's
     /// old server may still be alive) must not release its first wake (GH #2128).
-    fn forget_tools_listed(&self, worker: &str) {
-        if let Some(session) = self.factory_session() {
-            crate::factory_tools_ready::await_listing(self.cas_dir(), session, worker);
+    fn worker_readiness_reset<'worker>(&self, worker: &'worker str, cli: cas_mux::SupervisorCli)
+        -> impl FnOnce(Option<&str>) -> std::io::Result<()> + use<'worker>
+    {
+        let root = self.cas_dir().to_path_buf();
+        let factory_session = self.factory_session().map(str::to_owned);
+        move |launch_id| {
+            let Some(session) = factory_session.as_deref() else { return Ok(()) };
+            if cli == cas_mux::SupervisorCli::Codex {
+                let launch_id = launch_id.ok_or_else(|| std::io::Error::other("Codex worker has no launch session ID"))?;
+                crate::factory_tools_ready::await_launch_listing(&root, session, worker, launch_id)
+            } else {
+                crate::factory_tools_ready::await_listing(&root, session, worker);
+                Ok(())
+            }
         }
     }
 
@@ -4392,7 +4404,7 @@ impl FactoryApp {
 
         // Add pane to mux (spawns new Claude process)
         self.remove_exited_worker_pane(name)?;
-        self.forget_tools_listed(name);
+        let reset_tools = self.worker_readiness_reset(name, effective_spec.cli);
         if let Err(e) = self.mux.add_worker(
             name,
             cwd,
@@ -4400,6 +4412,7 @@ impl FactoryApp {
             &self.supervisor_name,
             teams.as_ref(),
             requested_spec,
+            reset_tools,
         ) {
             crate::telemetry::track(
                 "factory_worker_respawn_result",

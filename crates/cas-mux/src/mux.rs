@@ -953,6 +953,7 @@ impl Mux {
         supervisor_name: &str,
         teams: Option<&TeamsSpawnConfig>,
         spec: Option<WorkerSpec>,
+        before_spawn: impl FnOnce(Option<&str>) -> std::io::Result<()>,
     ) -> PtyConfig {
         let effective = self.effective_worker_spec(name, spec);
         let effort_str = effective
@@ -1075,6 +1076,7 @@ impl Mux {
             self.factory_session.as_deref(),
             Some(fleet_size),
             startup_prompt.as_deref(),
+            before_spawn,
         )?;
         let id = pane.id().to_string();
         // Persist the resolved spec so `effective_worker_spec(name, None)` is

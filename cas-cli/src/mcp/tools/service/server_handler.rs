@@ -1467,7 +1467,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn worker_catalog_readiness_survives_sibling_front_exit_cas_a43b() {
-        use crate::factory_tools_ready::{FRONT_PID_ENV, await_listing, path_for_test, tools_listed};
+        use crate::factory_tools_ready::{FRONT_PID_ENV, await_launch_listing, await_listing, path_for_test, tools_listed};
         use crate::mcp::{CasCore, CasService, daemon::pid_alive};
         use rmcp::ServiceExt;
         use std::process::Stdio;
@@ -1476,6 +1476,9 @@ mod tests {
         env.set("CAS_AGENT_ROLE", "worker");
         env.set("CAS_FACTORY_SESSION", "factory-test");
         env.set("CAS_AGENT_NAME", "worker-test");
+        let first_launch = "codex-worker-test-first";
+        let next_launch = "codex-worker-test-next";
+        env.set("CAS_SESSION_ID", first_launch);
         let temp = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
         let service = CasService::new(CasCore::with_daemon(root.clone(), None, None),
@@ -1494,7 +1497,7 @@ mod tests {
             (().serve(client_io).await.unwrap(), server)
         };
 
-        await_listing(&root, "factory-test", "worker-test");
+        await_launch_listing(&root, "factory-test", "worker-test", first_launch).unwrap();
         let marker = path_for_test(&root, "factory-test", "worker-test");
         let legacy_list = |pid: u32| {
             let staged = marker.with_extension(format!("pid{pid}"));
@@ -1534,15 +1537,33 @@ mod tests {
         primary_front.kill().await.unwrap();
         assert!(ready(), "a genuinely listed successor keeps the same launch ready");
 
-        std::fs::write(&marker, "awaiting").unwrap();
-        assert!(!ready(), "a legacy launch reset discards prior acknowledgments");
-        legacy_list(primary_pid);
-        assert!(!ready(), "a legacy dead PID cannot revive old acknowledgments");
+        await_launch_listing(&root, "factory-test", "worker-test", next_launch).unwrap();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "awaiting");
+        successor.list_tools(None).await.unwrap();
+        assert!(!ready(), "a live predecessor's fresh catalog cannot open the next launch");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "awaiting");
         legacy_list(successor_pid);
-        assert!(ready(), "a legacy reader/writer still uses a numeric ready record");
+        assert!(!ready(), "an old writer cannot acknowledge a stamped launch");
+
+        let mut next_front = spawn_front();
+        let (next_client, next_server) = connect().await;
+        let next_pid = next_front.id().unwrap();
+        env.set(FRONT_PID_ENV, &next_pid.to_string());
+        env.set("CAS_SESSION_ID", next_launch);
+        assert!(!ready());
+        next_client.list_tools(None).await.unwrap();
+        assert!(ready());
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().parse::<u32>().unwrap(), next_pid);
+        legacy_list(primary_pid);
+        assert!(ready(), "a legacy writer does not replace stamped acknowledgments");
+
         await_listing(&root, "factory-test", "worker-test");
         assert!(!ready());
-
+        legacy_list(successor_pid);
+        assert!(ready(), "an unstamped launch still accepts a legacy listing");
+        next_client.cancel().await.unwrap();
+        next_server.await.unwrap();
+        next_front.kill().await.unwrap();
         successor.cancel().await.unwrap();
         successor_server.await.unwrap();
         successor_front.kill().await.unwrap();

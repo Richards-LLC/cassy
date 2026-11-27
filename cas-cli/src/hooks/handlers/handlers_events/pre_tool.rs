@@ -558,6 +558,35 @@ fn secret_path_hit(path: &str, protection: &crate::config::PreToolUseProtectionC
         || protection.patterns.iter().any(|pattern| path.ends_with(pattern.as_str()) || path.contains(pattern.as_str()))
 }
 
+/// A word that is a real secret file once resolved: `.env` and its non-template variants,
+/// credential and key files by basename. Templates and gitignored test files are not secrets.
+fn real_secret_word(word: &str, cwd: &Path, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
+    let path = cwd.join(word);
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let template = matches!(name.rsplit('.').next(), Some("example" | "sample" | "template" | "dist"));
+    protection.files.iter().any(|pattern| {
+        (name == pattern || name.strip_prefix(pattern.as_str()).is_some_and(|rest| rest.starts_with('.')))
+            && !template
+            && !is_env_fixture(&path.to_string_lossy())
+    }) || protection.patterns.iter().any(|pattern| name.ends_with(pattern.as_str()))
+}
+
+/// Whether a Bash command names a real secret file as a word; quoted text with spaces is data.
+fn command_reads_real_secret(command: &str, cwd: &Path, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
+    let words: Vec<String> = if shell_effects::collect(command, cwd).is_ok() {
+        shell_statement_words(command).into_iter().flatten().collect()
+    } else {
+        command
+            .split(|c: char| c.is_whitespace() || "\"'`();|&<>=,{}[]".contains(c))
+            .filter(|word| !word.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    words.iter().any(|word| !word.contains(char::is_whitespace) && real_secret_word(word, cwd, protection))
+}
+
 /// Whether any word of the text names a protected secret file.
 fn text_names_secret_path_with(text: &str, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
     text.split(|c: char| c.is_whitespace() || "\"'`();|&<>=,{}[]".contains(c))
@@ -1718,21 +1747,6 @@ fn handle_pre_tool_use_checked(
         } else {
             Vec::new()
         };
-        let unparseable_names_secret = tool_name == "Bash"
-            && input
-                .tool_input
-                .as_ref()
-                .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
-                .is_some_and(|command| {
-                    shell_effects::collect(command, Path::new(&input.cwd)).is_err()
-                        && text_names_secret_path_with(command, protection)
-                });
-        if unparseable_names_secret {
-            return Ok(HookOutput::with_pre_tool_permission(
-                "deny",
-                &crate::gates::tag("H-33", "Protected file: a command the shell recognizer cannot parse names a secret file"),
-            ));
-        }
         for path in file_path
             .into_iter()
             .chain(shell_targets.iter().map(String::as_str))
@@ -1759,6 +1773,18 @@ fn handle_pre_tool_use_checked(
                     }
                 }
             }
+        }
+        if tool_name == "Bash"
+            && input
+                .tool_input
+                .as_ref()
+                .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
+                .is_some_and(|command| command_reads_real_secret(command, Path::new(&input.cwd), protection))
+        {
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                &crate::gates::tag("H-33", "Protected file: a Bash command names a secret file"),
+            ));
         }
     }
 

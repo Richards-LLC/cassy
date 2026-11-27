@@ -102,6 +102,7 @@ fn kept_guards_still_deny_over_real_hook_json() {
         (bash("cat ~/.config/neonctl/credentials.json", project), "H-09"),
         (bash(&format!("{unparseable}; cat ~/.config/neonctl/credentials.json"), project), "H-09"),
         (bash(&format!("{unparseable}; echo x > /etc/cas-demo-outside"), project), "H-29"),
+        (bash("cat .env", project), "H-33"),
         (bash(&format!("{unparseable}; cat .env"), project), "H-33"),
         (bash(&format!("echo hi # <<'X'\ntouch /etc/cas-demo-outside\nX\n{unparseable}"), project), "H-29"),
         (bash(&format!("echo \"$(touch /etc/cas-demo-outside)\"; {unparseable}"), project), "H-29"),

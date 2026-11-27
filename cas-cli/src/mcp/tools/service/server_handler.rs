@@ -1931,7 +1931,33 @@ mod tests {
         let refused = service.factory_with_budget_for_testing(
             request(2), Duration::from_secs(5), Duration::ZERO).await.unwrap_err();
         assert_eq!(refused.code, ErrorCode::INVALID_PARAMS);
+        let mut receipts = std::fs::read_dir(root.join("spawn-receipts")).unwrap();
+        let refusal = serde_json::from_slice::<Value>(
+            &std::fs::read(receipts.next().unwrap().unwrap().path()).unwrap(),
+        ).unwrap();
+        assert!(receipts.next().is_none());
+        assert_eq!(refusal["mutation_outcome"], "NOT_ADMITTED");
+        assert_eq!(refusal["result"]["error"], json!(refused));
         assert!(queue.peek(10).unwrap().is_empty());
+
+        let read = |path: &std::path::Path| {
+            serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap()
+        };
+        let completed = async |answer: &Value| {
+            let receipt_id = answer["receipt_id"].as_str().expect("receipt ID");
+            let path = std::path::Path::new(answer["receipt_path"].as_str().expect("receipt path"));
+            assert!(path.starts_with(&root));
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let outcome = read(path);
+                    assert_eq!(outcome["receipt_id"], receipt_id);
+                    if outcome["state"] == "completed" {
+                        break outcome;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("spawn receipt must reach its final state")
+        };
 
         let writer = rusqlite::Connection::open(root.join("cas.db")).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -1943,20 +1969,7 @@ mod tests {
         let answer = result.expect("deadline must return a durable spawn continuation");
         let answer = answer.structured_content.expect("structured continuation");
         assert_eq!(answer["mutation_outcome"], "IN_PROGRESS");
-        let receipt_id = answer["receipt_id"].as_str().expect("receipt ID");
-        let path = std::path::Path::new(answer["receipt_path"].as_str().expect("receipt path"));
-        assert!(path.starts_with(&root));
-        let read = || serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap();
-        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let outcome = read();
-                assert_eq!(outcome["receipt_id"], receipt_id);
-                if outcome["state"] == "completed" {
-                    break outcome;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }).await.expect("spawn handler must finish after the queue write is released");
+        let outcome = completed(&answer).await;
         assert_eq!(outcome["mutation_outcome"], "COMMITTED", "{outcome}");
         let admitted = queue.peek(10).unwrap();
         assert_eq!(admitted.len(), 1);
@@ -1964,9 +1977,31 @@ mod tests {
         assert_eq!(admitted[0].count, Some(1));
         assert!(admitted[0].isolate);
         assert_eq!(admitted[0].task_id.as_deref(), Some(task_id));
-        assert_eq!(read(), outcome);
+        assert_eq!(read(answer["receipt_path"].as_str().unwrap().as_ref()), outcome);
         assert_eq!(queue.peek(10).unwrap().len(), 1);
         assert_eq!(tasks.get(task_id).unwrap().status, cas_types::TaskStatus::Open);
+
+        let arguments = serde_json::to_value(request(1)).unwrap();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let (capture, original) = tokio::sync::oneshot::channel();
+        let answer = service.call_with_deadline(
+            "factory", arguments.as_object(), Duration::from_millis(120), async move {
+                let error = super::super::panic_catch::dispatch_with_catch("factory", async move {
+                    wait.await.unwrap();
+                    panic!("spawn receipt fixture panic");
+                }).await.unwrap_err();
+                capture.send(json!(&error)).unwrap();
+                Err(error)
+            },
+        ).await.unwrap().structured_content.unwrap();
+        assert_eq!(answer["mutation_outcome"], "IN_PROGRESS");
+        release.send(()).unwrap();
+        let abnormal = completed(&answer).await;
+        assert!(abnormal["request_id"].is_null());
+        assert_eq!(abnormal["result"]["error"]["code"], json!(ErrorCode::INTERNAL_ERROR));
+        assert_eq!(abnormal["result"]["error"], original.await.unwrap());
+        assert_eq!(abnormal["mutation_outcome"], "UNKNOWN", "{abnormal}");
+        assert_eq!(queue.peek(10).unwrap().len(), 1);
     }
 
     #[tokio::test]

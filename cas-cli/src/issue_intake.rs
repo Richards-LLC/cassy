@@ -1,7 +1,17 @@
 //! Find or file (cas-7823): the key that matches a new Cassy report or
 //! finding to an open issue or task before anything new is filed.
 
+use std::io::Write;
+use std::path::Path;
+
+use chrono::{DateTime, Duration, Utc};
+
 const FINGERPRINT_MARKER: &str = "**Fingerprint**: `";
+const REPORT_LEDGER: &str = "bug-reports.jsonl";
+
+/// An agent's report reaches GitHub once its key has this many rows in the window.
+pub(crate) const AGENT_FILING_THRESHOLD: usize = 5;
+pub(crate) const AGENT_FILING_WINDOW_DAYS: i64 = 7;
 
 /// Lowercased words with paths, ids, numbers and hashes collapsed to `#` and gate
 /// tags removed, so one refusal reads the same in every report.
@@ -81,6 +91,45 @@ impl RefusalFingerprint {
     pub(crate) fn marker(&self) -> String {
         format!("- {FINGERPRINT_MARKER}{}`", self.headline)
     }
+
+    /// The dedup key a report ledger row carries.
+    fn key(&self) -> String {
+        format!("{}|{}", self.codes.join(","), self.headline)
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct LedgerRow {
+    at: DateTime<Utc>,
+    key: String,
+}
+
+/// Append one row to the local report ledger and return how many rows share
+/// its key inside the window, this one included.
+pub(crate) fn record_report(
+    cas_root: &Path,
+    fingerprint: &RefusalFingerprint,
+    actor: &str,
+    task: &str,
+    title: &str,
+    now: DateTime<Utc>,
+) -> std::io::Result<usize> {
+    let path = cas_root.join(REPORT_LEDGER);
+    let key = fingerprint.key();
+    let row = serde_json::json!({
+        "at": now, "key": key, "codes": fingerprint.codes, "actor": actor, "task": task, "title": title,
+    });
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?
+        .write_all(format!("{row}\n").as_bytes())?;
+    let since = now - Duration::days(AGENT_FILING_WINDOW_DAYS);
+    Ok(std::fs::read_to_string(&path)?
+        .lines()
+        .filter_map(|line| serde_json::from_str::<LedgerRow>(line).ok())
+        .filter(|row| row.key == key && row.at >= since)
+        .count())
 }
 
 /// The first eligible open task whose title, description or notes name this refusal.

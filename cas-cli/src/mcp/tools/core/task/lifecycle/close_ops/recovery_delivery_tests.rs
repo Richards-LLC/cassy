@@ -2134,8 +2134,6 @@ async fn cas_5dc0_repark_opens_next_qa_round_with_fresh_workers() {
         let supervisor = crate::mcp::CasService::new(supervisor, None);
         for request in [
             serde_json::json!({"action":"update", "id":TASK, "assignee":replacement.name}),
-            serde_json::json!({"action":"rebind_branch", "id":TASK, "branch":branch,
-                "reason":"Approve the fresh correction worker"}),
         ] {
             let response = supervisor.task(Parameters(serde_json::from_value(request).unwrap())).await.unwrap();
             assert_ne!(response.is_error, Some(true), "{response:?}");

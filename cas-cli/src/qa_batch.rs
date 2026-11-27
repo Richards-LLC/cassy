@@ -6,7 +6,7 @@ use crate::mcp::tools::core::task::lifecycle::close_ops::{
 use cas_store::{QaBatchReceipt, TaskStore};
 use cas_types::Task;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1100,8 +1100,10 @@ pub(crate) fn prepare_release_tag_receipt(
 
 /// History membership cannot prove shipment: a later revert retains ancestry.
 /// The final tree must preserve the delivery's effect, including ordinary edits.
-pub(crate) fn release_tag_ships_delivery(repo: &Path, base: Option<&str>, anchor: &str, tag_sha: &str, task_id: &str) -> bool {
-    release_delivery_effect(repo, base, anchor, tag_sha, task_id).is_ok()
+pub(crate) fn release_tag_ships_delivery(root: &Path, repo: &Path, task: &Task, anchor: &str, tag_sha: &str) -> bool {
+    release_delivery_effect_for_task(root, repo, task,
+        task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
+        anchor, tag_sha, None).is_ok()
 }
 
 pub(crate) fn release_delivery_effect(
@@ -1160,7 +1162,157 @@ fn release_delivery_effect_for_task(
                 && release_close::carried_approval(source, source_head));
         approved.then(|| release_delivery_effect(repo, Some(&start.base_sha), source_head, target, &source.id))
     };
-    source_effect().unwrap_or(presence)
+    source_effect().or_else(|| reviewed_import_effect(root, repo, task, base?, anchor, target))
+        .unwrap_or(presence)
+}
+
+type ReleaseTreeEntries = BTreeMap<Vec<u8>, Vec<u8>>;
+
+fn release_git(repo: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    let output = Command::new("git").args(args).current_dir(repo).output().ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+fn release_tree_entries(repo: &Path, revision: &str) -> Option<ReleaseTreeEntries> {
+    let output = release_git(repo, &["ls-tree", "-rz", "--full-tree", revision])?;
+    let mut entries = BTreeMap::new();
+    for record in output.split(|byte| *byte == 0).filter(|record| !record.is_empty()) {
+        let separator = record.iter().position(|byte| *byte == b'\t')?;
+        if entries.insert(record[separator + 1..].to_vec(), record[..separator].to_vec()).is_some() {
+            return None;
+        }
+    }
+    Some(entries)
+}
+
+fn reviewed_import_effect(
+    root: &Path, repo: &Path, task: &Task, base: &str, anchor: &str, target: &str,
+) -> Option<Result<(), ReleaseInventoryCode>> {
+    use crate::mcp::tools::core::{task::{self, lifecycle::close_ops, repo_context}, workflow::premerge_verification::cycle};
+
+    let delivery = &task.deliverables;
+    let start = delivery.factory_branch_start.as_ref()?;
+    let work_target = delivery.work_target.as_ref()?;
+    let landing = delivery.green_merge_commit.as_deref()?;
+    let grants = close_ops::task_commit_identity(task, None).approved_merge_parents;
+    if grants.len() < 2 || start.base_sha != base || work_target != &start.work_target
+        || delivery.factory_branch_anchor.as_deref() != Some(anchor)
+        || delivery.effective_merge_ci_admission() != cas_types::MergeCiAdmission::Green
+        || !repo_context::repo_answers_to(repo, &work_target.repo_selector)
+        || [base, anchor, landing, target].iter().any(|oid| commit(repo, oid).as_deref() != Some(*oid))
+        || ancestor(repo, anchor, landing) != Some(true) || ancestor(repo, landing, target) != Some(true)
+    {
+        return None;
+    }
+    let tree = |revision: &str| release_git(repo, &["rev-parse", "--verify", "--end-of-options", &format!("{revision}^{{tree}}")]);
+    if tree(anchor)? != tree(landing)? { return None; }
+    let project = crate::cloud::resolve_canonical_id(root)?;
+    let connection = release_close::read_connection(root).ok()?;
+    let approved = |source: &Task, head: &str| Some(
+        cycle::approved(root, repo, source, head, target).ok()?.is_some()
+        || (release_close::no_local_review(&connection, &source.id).ok()?
+            && release_close::carried_approval(source, head))
+    );
+    if !task::task_owned_by_project(task, root, Some(&project)) || !approved(task, anchor)? {
+        return None;
+    }
+
+    let history = String::from_utf8(release_git(repo, &[
+        "rev-list", "--first-parent", "--parents", "--max-count=201", &format!("{base}..{anchor}"),
+    ])?).ok()?;
+    let edges = history.lines().collect::<Vec<_>>();
+    if !(2..=200).contains(&edges.len()) { return None; }
+    let baseline = release_tree_entries(repo, base)?;
+    let mut lane = baseline.clone();
+    let mut tip = base;
+    let mut contributors = BTreeMap::new();
+    for edge in edges.into_iter().rev() {
+        let commits = edge.split_whitespace().collect::<Vec<_>>();
+        let [merge, parent, side] = commits.as_slice() else { return None; };
+        if *parent != tip || !grants.iter().any(|grant| grant == side) { return None; }
+        let common = String::from_utf8(release_git(repo, &["merge-base", "--all", parent, side])?).ok()?;
+        let mut bases = common.lines();
+        let common = bases.next()?;
+        if bases.next().is_some() { return None; }
+        let ancestor_tree = release_tree_entries(repo, common)?;
+        let imported_tree = release_tree_entries(repo, side)?;
+        let merged = release_tree_entries(repo, merge)?;
+        let paths: BTreeSet<_> = ancestor_tree.keys().chain(lane.keys())
+            .chain(imported_tree.keys()).chain(merged.keys()).collect();
+        for path in paths {
+            let prior = ancestor_tree.get(path);
+            let retained = lane.get(path);
+            let imported = imported_tree.get(path);
+            let expected = if retained == imported || imported == prior { retained }
+                else if retained == prior { imported }
+                else { return None; };
+            if merged.get(path) != expected { return None; }
+            if expected != retained {
+                contributors.insert(path.clone(), (*parent, *side));
+            }
+        }
+        lane = merged;
+        tip = merge;
+    }
+    if tip != anchor { return None; }
+    contributors.retain(|path, _| baseline.get(path) != lane.get(path));
+    if contributors.is_empty() { return None; }
+
+    let published = release_tree_entries(repo, target)?;
+    let mut sources = None;
+    let mut source_histories = BTreeMap::new();
+    for (path, (parent, side)) in contributors {
+        let entry = lane.get(&path);
+        let shipped = published.get(&path);
+        if shipped == entry { continue; }
+        let name = std::str::from_utf8(&path).ok();
+        if let Some(name) = name.filter(|name| shipped.is_none() && entry.is_some()
+            && ["changelog.d/", "docs/product-overview.d/", "docs/qa/bug-families/"].iter().any(|prefix| name.starts_with(prefix)))
+        {
+            let entry = entry?;
+            if !entry.starts_with(b"100644 blob ") && !entry.starts_with(b"100755 blob ") { return None; }
+            if sources.is_none() {
+                sources = Some(release_close::read_tasks(root).ok()?.list(Some(cas_types::TaskStatus::Closed)).ok()?);
+            }
+            let source_commits = match source_histories.entry((parent, side)) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let history = String::from_utf8(release_git(repo, &["rev-list", side, &format!("^{parent}")])?).ok()?;
+                    entry.insert(history.lines().map(str::to_owned).collect::<BTreeSet<_>>())
+                }
+            };
+            let literal = format!(":(literal){name}");
+            let expected = [entry.as_slice(), b"\t", path.as_slice(), b"\0"].concat();
+            let mut folded = None;
+            for source in sources.as_ref()? {
+                let source_delivery = &source.deliverables;
+                let (Some(head), Some(source_start)) = (source_delivery.factory_branch_anchor.as_deref(),
+                    source_delivery.factory_branch_start.as_ref()) else { continue; };
+                if !source_commits.contains(head) || source.id == task.id || source.task_type == cas_types::TaskType::Epic
+                    || crate::qa_pass::is_no_code(source) || source_delivery.evidence_only.is_some()
+                    || !task::task_owned_by_project(source, root, Some(&project))
+                    || head == source_start.base_sha
+                    || !repo_context::repo_answers_to(repo, &source_start.work_target.repo_selector)
+                    || release_git(repo, &["ls-tree", "-rz", "--full-tree", head, "--", &literal])? != expected
+                    || commit(repo, &source_start.base_sha).as_deref() != Some(source_start.base_sha.as_str())
+                    || ancestor(repo, &source_start.base_sha, head) != Some(true)
+                {
+                    continue;
+                }
+                let Some(result) = close_ops::release_owned_fragment_fold(
+                    repo, &source_start.base_sha, head, target, &source.id, name,
+                ) else { continue; };
+                if !approved(source, head)? { continue; }
+                if folded.replace(result).is_some() { return None; }
+            }
+            if !folded? { return Some(Err(ReleaseInventoryCode::Reverted)); }
+        } else if shipped == baseline.get(&path) || shipped.is_none() {
+            return Some(Err(ReleaseInventoryCode::Reverted));
+        } else {
+            return None;
+        }
+    }
+    Some(Ok(()))
 }
 
 /// As [`release_delivery_effect`], where a supervisor's reviewed drop may

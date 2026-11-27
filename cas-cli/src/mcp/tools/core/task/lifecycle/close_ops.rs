@@ -27632,6 +27632,23 @@ pub(crate) fn delivery_content_presence_from_base_on_target_for_task(
         })
 }
 
+pub(crate) fn release_owned_fragment_fold(
+    repo: &std::path::Path, base: &str, anchor: &str, target: &str, task_id: &str, path: &str,
+) -> Option<bool> {
+    let paths = task_attribution::first_parent_delivery_ranges(repo, base, anchor, anchor, task_id)?;
+    if !paths.iter().any(|(_, paths, _)| paths.as_ref().is_some_and(|paths| paths.iter().any(|owned| owned == path))) {
+        return None;
+    }
+    let literal = format!(":(literal){path}");
+    let status = std::process::Command::new("git")
+        .args(["diff", "--quiet", "--no-renames", base, anchor, "--", &literal])
+        .current_dir(repo).measurement_output().ok()?.status;
+    if status.code() != Some(1) { return None; }
+    let (_, remaining) = without_promoted_changelog_fragments(repo, anchor, target, vec![path.into()], &[task_id]);
+    let (_, remaining) = without_promoted_doc_fragments(repo, anchor, target, remaining, &[task_id]);
+    Some(remaining.is_empty())
+}
+
 /// Release-generated outputs cannot establish that a delivery's source was
 /// reverted (cas-895d3). Folded fragments retain their existing blob proof.
 pub(crate) fn release_generated_output(repo: &std::path::Path, path: &str) -> bool {

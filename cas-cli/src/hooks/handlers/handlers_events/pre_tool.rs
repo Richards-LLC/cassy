@@ -533,262 +533,6 @@ fn shadowed_by_sandbox(input: &HookInput, tool_name: &str, cas_root: Option<&Pat
     true
 }
 
-fn is_env_fixture(path: &str) -> bool {
-    let path = Path::new(path);
-    let named = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with(".env.") && name.split('.').any(|part| part == "test"));
-    named
-        && path.ancestors().skip(1).find(|dir| dir.is_dir()).is_some_and(|dir| {
-            std::process::Command::new("git")
-                .args(["check-ignore", "-q", "--"])
-                .arg(path)
-                .current_dir(dir)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success())
-        })
-}
-
-fn env_path_hit(path: &str, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
-    protection.files.iter().any(|pattern| (path.ends_with(pattern.as_str()) || path.contains(&format!("/{pattern}"))) && !is_env_fixture(path))
-}
-
-fn credential_path_hit(path: &str, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
-    protection.patterns.iter().any(|pattern| path.ends_with(pattern.as_str()) || path.contains(pattern.as_str()))
-}
-
-fn secret_path_hit(path: &str, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
-    env_path_hit(path, protection) || credential_path_hit(path, protection)
-}
-
-/// A word that is an existing real secret file once resolved: `.env` and its non-template
-/// variants, credential and key files by basename. Templates and gitignored test files are not secrets.
-fn real_secret_word(word: &str, directory: &Path, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let path = match (word, word.strip_prefix("~/").or_else(|| word.strip_prefix("$HOME/")), &home) {
-        ("~" | "$HOME", _, Some(home)) => home.clone(),
-        (_, Some(rest), Some(home)) => home.join(rest),
-        _ => directory.join(word),
-    };
-    if !path.exists() {
-        return false;
-    }
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    let template = matches!(name.rsplit('.').next(), Some("example" | "sample" | "template" | "dist"));
-    protection.files.iter().any(|pattern| {
-        (name == pattern || name.strip_prefix(pattern.as_str()).is_some_and(|rest| rest.starts_with('.')))
-            && !template
-            && !is_env_fixture(&path.to_string_lossy())
-    }) || protection.patterns.iter().any(|pattern| name.ends_with(pattern.as_str()))
-}
-
-/// Whether a Bash command names an existing real secret file, in any statement, substitution
-/// or payload, resolved against that statement's own directory.
-fn command_reads_real_secret(command: &str, cwd: &Path, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
-    let Some(contexts) = shell_read_contexts(command, cwd) else {
-        let mut texts = vec![command.to_string()];
-        texts.extend(raw_substitution_bodies(command));
-        return texts.iter().any(|text| {
-            text.split(|c: char| c.is_whitespace() || "\"'`();|&<>=,{}[]".contains(c))
-                .filter(|word| !word.is_empty())
-                .any(|word| real_secret_word(word, cwd, protection))
-        });
-    };
-    let unknown = std::ffi::OsStr::new(UNKNOWN_DIRECTORY);
-    contexts.iter().any(|context| {
-        let directories: Vec<std::path::PathBuf> = context
-            .directories
-            .iter()
-            .map(|directory| match directory {
-                Some(directory) if !directory.components().any(|part| part.as_os_str() == unknown) => directory.clone(),
-                _ => cwd.to_path_buf(),
-            })
-            .collect();
-        let words: Vec<String> = shell_statement_words(&context.command).into_iter().flatten().collect();
-        directories.iter().any(|directory| words.iter().any(|word| real_secret_word(word, directory, protection)))
-    })
-}
-
-/// The H-33 refusal for a call judged without any store: default protection patterns and the
-/// operator-store exemption, for every entry path that has no stores to load.
-fn secret_denial_without_stores(input: &HookInput) -> Option<String> {
-    let tool = input.tool_name.as_deref()?;
-    let protection = crate::config::PreToolUseProtectionConfig::default();
-    let operator_store = (!crate::harness_policy::is_factory_agent(input) || crate::harness_policy::is_supervisor(input))
-        && super::operator_credentials::references_store(input, tool);
-    let cwd = Path::new(&input.cwd);
-    let command = input
-        .tool_input
-        .as_ref()
-        .and_then(|tool_input| tool_input.get("command").and_then(|command| command.as_str()))
-        .filter(|_| tool == "Bash");
-    let targets: Vec<String> = command
-        .map(|command| literal_targets(command, cwd, bash_write_targets, place_path))
-        .unwrap_or_default()
-        .into_iter()
-        .map(|target| cwd.join(target).to_string_lossy().into_owned())
-        .collect();
-    let file_path = input.tool_input.as_ref().and_then(|tool_input| tool_input.get("file_path")).and_then(|path| path.as_str());
-    let hit = file_path
-        .into_iter()
-        .chain(targets.iter().map(String::as_str))
-        .any(|path| env_path_hit(path, &protection) || (!operator_store && credential_path_hit(path, &protection)))
-        || (!operator_store && command.is_some_and(|command| command_reads_real_secret(command, cwd, &protection)));
-    hit.then(|| crate::gates::tag("H-33", "Protected file: may contain secrets or credentials"))
-}
-
-/// Whether any word of the text names a protected secret file.
-fn text_names_secret_path_with(text: &str, protection: &crate::config::PreToolUseProtectionConfig) -> bool {
-    text.split(|c: char| c.is_whitespace() || "\"'`();|&<>=,{}[]".contains(c))
-        .filter(|word| !word.is_empty())
-        .any(|word| secret_path_hit(word, protection))
-}
-
-pub(crate) fn text_names_secret_path(text: &str) -> bool {
-    text_names_secret_path_with(text, &crate::config::PreToolUseProtectionConfig::default())
-}
-
-fn with_substitutions<T>(command: &str, direct: fn(&str) -> Vec<T>) -> Vec<T> {
-    fn walk<T>(command: &str, depth: usize, direct: fn(&str) -> Vec<T>, found: &mut Vec<T>) {
-        found.extend(direct(command));
-        if depth < 3 {
-            for body in shell_substitutions(command).bodies {
-                walk(&body, depth + 1, direct, found);
-            }
-        }
-    }
-    let mut found = Vec::new();
-    walk(command, 0, direct, &mut found);
-    found
-}
-
-/// Every `$(...)` and backtick body in the text, quotes and heredocs ignored, nested ones included.
-fn raw_substitution_bodies(text: &str) -> Vec<String> {
-    fn collect(chars: &[char], depth: usize, out: &mut Vec<String>) {
-        let mut index = 0;
-        while index < chars.len() {
-            let (start, end) = if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
-                let mut open = 0usize;
-                let close = chars[index + 1..].iter().position(|&ch| {
-                    open += usize::from(ch == '(');
-                    open -= usize::from(ch == ')' && open > 0);
-                    ch == ')' && open == 0
-                });
-                (index + 2, close.map_or(chars.len(), |at| index + 1 + at))
-            } else if chars[index] == '`' {
-                let close = chars[index + 1..].iter().position(|&ch| ch == '`');
-                (index + 1, close.map_or(chars.len(), |at| index + 1 + at))
-            } else {
-                index += 1;
-                continue;
-            };
-            let body = &chars[start.min(end)..end];
-            out.push(body.iter().collect());
-            if depth < 4 {
-                collect(body, depth + 1, out);
-            }
-            index = end + 1;
-        }
-    }
-    let mut bodies = Vec::new();
-    collect(&text.chars().collect::<Vec<_>>(), 0, &mut bodies);
-    bodies
-}
-
-/// The statements of a command text, split at newlines, `;`, `&&` and `||`.
-fn statement_pieces(text: &str) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut pieces = Vec::new();
-    let mut current = String::new();
-    let mut index = 0;
-    while index < chars.len() {
-        let ch = chars[index];
-        if ch == '\n' || ch == ';' || ((ch == '&' || ch == '|') && chars.get(index + 1) == Some(&ch)) {
-            pieces.push(std::mem::take(&mut current));
-            index += usize::from(ch == '&' || ch == '|');
-        } else {
-            current.push(ch);
-        }
-        index += 1;
-    }
-    pieces.push(current);
-    pieces
-}
-
-/// The directory after a statement: a literal `cd` moves it, an unresolvable one leaves it unknown.
-fn directory_after(piece: &str, directory: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
-    let words: Vec<&str> = piece.trim().trim_start_matches(['(', '{']).split_whitespace().collect();
-    match words.first().copied() {
-        Some("cd") => {
-            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-            let target = words[1..]
-                .iter()
-                .map(|word| word.trim_matches(['\'', '"']))
-                .find(|word| !matches!(*word, "-P" | "-L" | "--"));
-            match target {
-                None | Some("~") => home,
-                Some(word) if word.contains(['$', '`', '*', '?', '[']) || word.starts_with('-') => None,
-                Some(word) => match word.strip_prefix("~/") {
-                    Some(rest) => home.map(|home| home.join(rest)),
-                    None if word.starts_with('/') => Some(std::path::PathBuf::from(word)),
-                    None => directory.map(|directory| directory.join(word)),
-                },
-            }
-        }
-        Some("pushd" | "popd") => None,
-        _ => directory,
-    }
-}
-
-fn place_path(directory: Option<&Path>, target: String) -> Option<String> {
-    if target.starts_with(['/', '~', '$']) {
-        return Some(target);
-    }
-    directory.map(|directory| directory.join(&target).to_string_lossy().into_owned())
-}
-
-fn place_delete(directory: Option<&Path>, (target, recursive): (String, bool)) -> Option<(String, bool)> {
-    place_path(directory, target).map(|target| (target, recursive))
-}
-
-/// For a command the recognizer cannot resolve: every statement of it and of every substitution
-/// body is a command, whatever its quotes or heredoc markers claim, run in the directory the
-/// literal `cd`s before it left.
-fn lexical_literals<T>(
-    command: &str,
-    cwd: &Path,
-    direct: fn(&str) -> Vec<T>,
-    place: fn(Option<&Path>, T) -> Option<T>,
-) -> Vec<T> {
-    let mut found = with_substitutions(command, direct);
-    let mut texts = vec![command.to_string()];
-    texts.extend(raw_substitution_bodies(command));
-    for text in &texts {
-        let mut directory = Some(cwd.to_path_buf());
-        for piece in statement_pieces(text) {
-            let unquoted = piece.replace(['\'', '"'], " ");
-            for target in direct(&piece).into_iter().chain(direct(&unquoted)) {
-                found.extend(place(directory.as_deref(), target));
-            }
-            directory = directory_after(&piece, directory);
-        }
-    }
-    found
-}
-
-fn literal_targets<T>(command: &str, cwd: &Path, direct: fn(&str) -> Vec<T>, place: fn(Option<&Path>, T) -> Option<T>) -> Vec<T> {
-    if shell_effects::collect(command, cwd).is_ok() {
-        with_substitutions(command, direct)
-    } else {
-        lexical_literals(command, cwd, direct, place)
-    }
-}
-
 /// Pre-tool guards that keep denying: the census KEEP rows. Every other guard
 /// records a fact and warns, whatever its code family.
 const BLOCKING_GUARDS: [&str; 35] = [
@@ -836,9 +580,32 @@ pub(crate) fn record_demoted(input: Option<&HookInput>, cas_root: &Path, reason:
 }
 
 /// The native entry's fail-open answer when the hook cannot run with its stores: the guards
-/// that need none, including the secret-file check.
+/// that need none, then the default secret-file patterns (R5).
 pub(crate) fn pre_tool_without_stores(input: &HookInput) -> HookOutput {
-    handle_pre_tool_use(input, None).unwrap_or_else(|_| HookOutput::empty())
+    let output = handle_pre_tool_use(input, None).unwrap_or_else(|_| HookOutput::empty());
+    if crate::gates::facts::hook_denial(&output).is_some() {
+        return output;
+    }
+    let protection = crate::config::PreToolUseProtectionConfig::default();
+    let shell_targets: Vec<String> = input
+        .tool_input
+        .as_ref()
+        .and_then(|tool_input| tool_input.get("command").and_then(|command| command.as_str()))
+        .filter(|_| input.tool_name.as_deref() == Some("Bash"))
+        .map(bash_write_targets)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|target| Path::new(&input.cwd).join(target).to_string_lossy().into_owned())
+        .collect();
+    let file_path = input.tool_input.as_ref().and_then(|tool_input| tool_input.get("file_path")).and_then(|path| path.as_str());
+    let secret = file_path.into_iter().chain(shell_targets.iter().map(String::as_str)).any(|path| {
+        protection.files.iter().any(|pattern| path.ends_with(pattern.as_str()) || path.contains(&format!("/{pattern}")))
+            || protection.patterns.iter().any(|pattern| path.ends_with(pattern.as_str()) || path.contains(pattern.as_str()))
+    });
+    if secret {
+        return HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-33", "Protected file: may contain secrets or credentials"));
+    }
+    output
 }
 
 /// Pure admission selection; safe before logging, DB discovery or telemetry.
@@ -882,7 +649,6 @@ fn handle_pre_tool_use_checked(
     prepared_cargo_input: Option<serde_json::Value>,
     turn_cwd: &Path,
     accepted_override_codes: &mut Vec<&'static str>,
-    warnings: &mut Vec<String>,
 ) -> Result<HookOutput, MemError> {
     let tool_name = match &input.tool_name {
         Some(name) => name.as_str(),
@@ -905,9 +671,7 @@ fn handle_pre_tool_use_checked(
     {
         // A post-release hold already carries its own gate code (G-120).
         let reason = if crate::gates::codes_in(&reason).is_empty() { crate::gates::tag("H-07", reason) } else { reason };
-        if let Some(denial) = refuse(input, cas_root, reason, warnings) {
-            return Ok(denial);
-        }
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
 
     // gate[H-08 pre-tool]: Browser test tier
@@ -918,8 +682,18 @@ fn handle_pre_tool_use_checked(
     }
 
     // gate[H-09 pre-tool]: Worker operator-credential store read
-    if let Some(reason) =
-        super::worker_denied_tools::credential_store_access_denial(input, tool_name)
+    // The credential gate refuses a shell command it cannot project. With a
+    // Cassy root, the workspace contract below refuses one the shell-effects
+    // recognizer cannot resolve, with that specific reason.
+    let workspace_refuses_unresolved = cas_root.is_some()
+        && tool_name == "Bash"
+        && crate::harness_policy::is_factory_agent(input)
+        && input.tool_input.as_ref().and_then(|tool_input| tool_input.get("command"))
+            .and_then(|command| command.as_str())
+            .is_some_and(|command| shell_effects::collect(command, Path::new(&input.cwd)).is_err());
+    if !workspace_refuses_unresolved
+        && let Some(reason) =
+            super::worker_denied_tools::credential_store_access_denial(input, tool_name)
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-09", reason)));
     }
@@ -964,7 +738,9 @@ fn handle_pre_tool_use_checked(
     if let Some(reason) = cas_config_file_write_denial(input).map(|reason| crate::gates::tag("H-14", reason))
         && !shadowed_by_sandbox(input, tool_name, cas_root, &reason)
     {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+        if let Some(denial) = refuse(input, cas_root, reason, warnings) {
+            return Ok(denial);
+        }
     }
 
     // cas-803f: a supervisor in a long foreground Bash call cannot hear the
@@ -991,7 +767,6 @@ fn handle_pre_tool_use_checked(
             .and_then(|tool_input| tool_input.get("command"))
             .and_then(|command| command.as_str())
             .is_some_and(git_push_bypasses_required_hooks)
-        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-15", "🚫 WORKER PUSH POLICY: `--no-verify`, Git config environment overrides, and `core.hooksPath` overrides can skip required factory push checks. `-n` is a dry-run and still runs the pre-push hook; worker pushes must use a plain `git push`. If an exception is needed, ask the supervisor to run the supervisor-approved push."), warnings)
     {
         return Ok(denial);
     }
@@ -1116,6 +891,7 @@ fn handle_pre_tool_use_checked(
     // with `isolation: "worktree"` create worktrees Claude Code cleans up only
     // on process exit — which leaks across Petrastella repos when the session
     // is long-lived (see EPIC cas-7c88 / project_factory_worktree_leak).
+    warnings: &mut Vec<String>,
     //
     // Non-isolation Agent calls (Explore, code-review personas, task-verifier)
     // stay allowed — they're load-bearing for correctness verification.
@@ -1155,7 +931,6 @@ fn handle_pre_tool_use_checked(
         && tool_name == "SendMessage"
         && crate::harness_policy::is_worker(input)
         && !owns_native_message_target(input, cas_root)
-        && let Some(denial) = refuse(input, cas_root, factory_worker_send_message_denial(), warnings)
     {
         return Ok(denial);
     }
@@ -1211,6 +986,7 @@ fn handle_pre_tool_use_checked(
                         "deny",
                         &crate::gates::tag("H-23", "🚫 LOCAL-MERGE DELIVERY: git push origin is disabled for this factory session. Commit locally; the supervisor merges your local factory branch. Set CAS_FACTORY_LOCAL_MERGE_PUSH_OVERRIDE=1 only when explicitly authorized by the supervisor."),
                     ));
+        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-15", "🚫 WORKER PUSH POLICY: `--no-verify`, Git config environment overrides, and `core.hooksPath` overrides can skip required factory push checks. `-n` is a dry-run and still runs the pre-push hook; worker pushes must use a plain `git push`. If an exception is needed, ask the supervisor to run the supervisor-approved push."), warnings)
                 }
                 }
                 // gate[H-22 pre-tool]: Worker commit guard / git scope (layer 1)
@@ -1265,7 +1041,6 @@ fn handle_pre_tool_use_checked(
             .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
         && let Some(refusal) =
             crate::qa_pass::supervisor_merge_refusal(root, std::path::Path::new(&input.cwd), cmd)
-        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-24", refusal), warnings)
     {
         return Ok(denial);
     }
@@ -1284,7 +1059,6 @@ fn handle_pre_tool_use_checked(
             .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
         && let Some(refusal) =
             crate::qa_pass::github_merge_refusal(root, std::path::Path::new(&input.cwd), cmd)
-        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-25", refusal), warnings)
     {
         return Ok(denial);
     }
@@ -1308,7 +1082,6 @@ fn handle_pre_tool_use_checked(
             std::env::var("CAS_FACTORY_SESSION").ok().as_deref(),
             accepted_override_codes,
         )
-        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-26", refusal), warnings)
     {
         return Ok(denial);
     }
@@ -1330,15 +1103,8 @@ fn handle_pre_tool_use_checked(
                 .filter(|out| out.status.success())
                 .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         })
-        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-27", refusal), warnings)
     {
         return Ok(denial);
-    }
-
-    if cas_root.is_none()
-        && let Some(reason) = secret_denial_without_stores(input)
-    {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
 
     // ========================================================================
@@ -1389,6 +1155,7 @@ fn handle_pre_tool_use_checked(
     // unreachable when `cas_root` is `None` because of the early return
     // immediately following this block. Since `is_factory_agent` derives
     // from the hook's role snapshot with an env fallback (no store access
+        && let Some(denial) = refuse(input, cas_root, factory_worker_send_message_denial(), warnings)
     // required), we fire the allow here to rescue the cas_root=None case — the
     // scenario the user hit in the BUG-factory-write-permission-deadlock
     // report where a supervisor session runs the hook without a Cassy root
@@ -1498,6 +1265,7 @@ fn handle_pre_tool_use_checked(
 
     // Compute current agent's task IDs (via leases) once for all jail checks.
     // This prevents cross-agent jail contamination where Agent A's pending tasks
+        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-24", refusal), warnings)
     // block Agent B in a different session.
     let current_agent_id = current_agent_id(input);
     let agent_task_ids: std::collections::HashSet<String> = stores
@@ -1516,6 +1284,7 @@ fn handle_pre_tool_use_checked(
     // cas_root=None auto-approve check (cas-7f33).
     if is_factory_agent {
         // cas-7aa2 (GH #176): the auto-route below returns `allow`, so the
+        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-25", refusal), warnings)
         // harness's native SendMessage runs too and writes a second copy into
         // THIS process's config-dir teams tree. When that tree is not the one
         // the factory daemon delivers into (a worker spawned with an explicit
@@ -1539,6 +1308,7 @@ fn handle_pre_tool_use_checked(
     //    either unjails by clearing pending_worktree_merge.
     //
     // The unjail happens in PreToolUse when one of those calls is detected.
+        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-26", refusal), warnings)
     //
     // NOTE: This entire system is EXPERIMENTAL and only active when worktrees.enabled=true
     //
@@ -1560,6 +1330,7 @@ fn handle_pre_tool_use_checked(
                     .iter()
                     .filter(|t| {
                         agent_task_ids.contains(&t.id)
+        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-27", refusal), warnings)
                             || t.assignee
                                 .as_ref()
                                 .map(|a| a == &current_agent_id)
@@ -1766,88 +1537,6 @@ fn handle_pre_tool_use_checked(
         .as_ref()
         .and_then(|ti| ti.get("file_path").and_then(|v| v.as_str()));
 
-    // Check for protected paths that should be blocked (configurable)
-    let protection = &stores.config().hooks().pre_tool_use.protection;
-    // gate[H-33 pre-tool]: Protection files/patterns (.env, keys)
-    if protection.enabled {
-        // Operator Neon/Vercel store reads belong to supervisors and plain
-        // sessions. Workers were refused before auto-approval above; writes
-        // and unrelated credential files retain the generic protection.
-        let operator_store_read = matches!(tool_name, "Read" | "Grep" | "Glob" | "NotebookRead")
-            && (!is_factory_agent || crate::harness_policy::is_supervisor(input))
-            && file_path.is_some_and(|path| {
-                // Check the protected operand itself, not any other path field.
-                let path_input = HookInput {
-                    tool_input: Some(serde_json::json!({"file_path": path})),
-                    ..input.clone()
-                };
-                super::operator_credentials::references_store(&path_input, tool_name)
-            });
-        // Bash has no file_path. Reuse the structural destination recognizer
-        // from workspace containment; credential reads and quoted command text
-        // do not name write targets. Resolve relative destinations as a direct
-        // Write would name them, including .env.local / .env.example paths.
-        let shell_targets: Vec<String> = if tool_name == "Bash" {
-            input
-                .tool_input
-                .as_ref()
-                .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
-                .map(|command| literal_targets(command, Path::new(&input.cwd), bash_write_targets, place_path))
-                .unwrap_or_default()
-                .into_iter()
-                .map(|target| {
-                    Path::new(&input.cwd)
-                        .join(target)
-                        .to_string_lossy()
-                        .into_owned()
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        for path in file_path
-            .into_iter()
-            .chain(shell_targets.iter().map(String::as_str))
-        {
-            // Block access to protected files (e.g., .env files)
-            for pattern in &protection.files {
-                if (path.ends_with(pattern) || path.contains(&format!("/{pattern}"))) && !is_env_fixture(path) {
-                    let reason = crate::gates::tag("H-33", format!("Protected file: {pattern} files may contain secrets"));
-                    if !(sandbox_denies_secret(path) && shadowed_by_sandbox(input, tool_name, Some(cas_root), &reason)) {
-                        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
-                    }
-                }
-            }
-
-            // Block access to credential files
-            if operator_store_read {
-                continue;
-            }
-            for pattern in &protection.patterns {
-                if path.ends_with(pattern) || path.contains(pattern) {
-                    let reason = crate::gates::tag("H-33", "Protected file: may contain credentials or private keys");
-                    if !(sandbox_denies_secret(path) && shadowed_by_sandbox(input, tool_name, Some(cas_root), &reason)) {
-                        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
-                    }
-                }
-            }
-        }
-        if tool_name == "Bash"
-            && !((!is_factory_agent || crate::harness_policy::is_supervisor(input))
-                && super::operator_credentials::references_store(input, tool_name))
-            && input
-                .tool_input
-                .as_ref()
-                .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
-                .is_some_and(|command| command_reads_real_secret(command, Path::new(&input.cwd), protection))
-        {
-            return Ok(HookOutput::with_pre_tool_permission(
-                "deny",
-                &crate::gates::tag("H-33", "Protected file: a Bash command names a secret file"),
-            ));
-        }
-    }
-
     // Load proven rules with auto-approve configuration
     let rule_store = stores.rules()?;
     let rules = rule_store.list_proven()?;
@@ -1893,6 +1582,74 @@ fn handle_pre_tool_use_checked(
         }
     }
 
+    // Check for protected paths that should be blocked (configurable)
+    let protection = &stores.config().hooks().pre_tool_use.protection;
+    // gate[H-33 pre-tool]: Protection files/patterns (.env, keys)
+    if protection.enabled {
+        // Operator Neon/Vercel store reads belong to supervisors and plain
+        // sessions. Workers were refused before auto-approval above; writes
+        // and unrelated credential files retain the generic protection.
+        let operator_store_read = matches!(tool_name, "Read" | "Grep" | "Glob" | "NotebookRead")
+            && (!is_factory_agent || crate::harness_policy::is_supervisor(input))
+            && file_path.is_some_and(|path| {
+                // Check the protected operand itself, not any other path field.
+                let path_input = HookInput {
+                    tool_input: Some(serde_json::json!({"file_path": path})),
+                    ..input.clone()
+                };
+                super::operator_credentials::references_store(&path_input, tool_name)
+            });
+        // Bash has no file_path. Reuse the structural destination recognizer
+        // from workspace containment; credential reads and quoted command text
+        // do not name write targets. Resolve relative destinations as a direct
+        // Write would name them, including .env.local / .env.example paths.
+        let shell_targets: Vec<String> = if tool_name == "Bash" {
+            input
+                .tool_input
+                .as_ref()
+                .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
+                .map(bash_write_targets)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|target| {
+                    Path::new(&input.cwd)
+                        .join(target)
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for path in file_path
+            .into_iter()
+            .chain(shell_targets.iter().map(String::as_str))
+        {
+            // Block access to protected files (e.g., .env files)
+            for pattern in &protection.files {
+                if path.ends_with(pattern) || path.contains(&format!("/{pattern}")) {
+                    let reason = crate::gates::tag("H-33", format!("Protected file: {pattern} files may contain secrets"));
+                    if !(sandbox_denies_secret(path) && shadowed_by_sandbox(input, tool_name, Some(cas_root), &reason)) {
+                        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+                    }
+                }
+            }
+
+            // Block access to credential files
+            if operator_store_read {
+                continue;
+            }
+            for pattern in &protection.patterns {
+                if path.ends_with(pattern) || path.contains(pattern) {
+                    let reason = crate::gates::tag("H-33", "Protected file: may contain credentials or private keys");
+                    if !(sandbox_denies_secret(path) && shadowed_by_sandbox(input, tool_name, Some(cas_root), &reason)) {
+                        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+                    }
+                }
+            }
+        }
+    }
+
     // cas-beaf: a factory `Agent` verifier mints no handoff, so its verdict
     // is recorded under the spawning session. While a bound verifier is
     // still running on the dispatch, a second verifier's verdict cannot land
@@ -1910,11 +1667,6 @@ fn handle_pre_tool_use_checked(
         && dispatch.state == cas_types::VerificationDispatchState::Claimed
         && let Some(verifier) = dispatch.verifier_agent_id.as_deref()
         && stores.agents().is_some_and(|agents| agents.get(verifier).is_ok_and(|agent| crate::mcp::tools::service::agent_liveness::verifier_is_running(&agent)))
-        && let Some(denial) = refuse(input, Some(cas_root), crate::gates::tag("H-34", format!(
-            "Verifier {verifier} is already running on dispatch {} for task {task_id}; a second verifier's verdict could not be recorded once that dispatch resolves. Next: wait for its verdict or supervisor_call (`{}verification action=latest task_id={task_id}`).",
-            dispatch.id,
-            crate::harness_policy::own_tool_prefix(),
-        )), warnings)
     {
         return Ok(denial);
     }
@@ -2107,6 +1859,11 @@ fn worker_check_command(command: &str) -> Option<(Vec<String>, String, Option<st
     // Preserve the existing complete provider-isolation profile.
     let isolated = (|| {
         let words = prefix.split_whitespace().collect::<Vec<_>>();
+        && let Some(denial) = refuse(input, Some(cas_root), crate::gates::tag("H-34", format!(
+            "Verifier {verifier} is already running on dispatch {} for task {task_id}; a second verifier's verdict could not be recorded once that dispatch resolves. Next: wait for its verdict or supervisor_call (`{}verification action=latest task_id={task_id}`).",
+            dispatch.id,
+            crate::harness_policy::own_tool_prefix(),
+        )), warnings)
         let (assignment, prefix) = words.split_last()?;
         let directory = assignment.strip_prefix("XDG_CONFIG_HOME=")?;
         // A literal path, never a shell expansion or arbitrary assignment.
@@ -3058,16 +2815,6 @@ fn agent_active_tasks(stores: &mut ToolHookStores<'_>, input: &HookInput) -> Vec
         .collect()
 }
 
-/// Delivery modes of the in-progress tasks assigned to this worker. Unreadable
-/// task state yields none, which leaves the session's mode in charge (the
-/// pre-cas-6db4 behaviour).
-fn worker_active_task_delivery_modes(
-    stores: &mut ToolHookStores<'_>,
-    input: &HookInput,
-) -> Vec<cas_types::DeliveryMode> {
-    agent_active_tasks(stores, input).into_iter().map(|task| task.delivery_mode).collect()
-}
-
 fn local_merge_push_override() -> bool {
     std::env::var("CAS_FACTORY_LOCAL_MERGE_PUSH_OVERRIDE")
         .map(|value| {
@@ -3311,6 +3058,16 @@ fn collect_git_write_targets(
             for _ in 0..16 {
                 let Some(index) = unwrapped_command_index(&words) else { break };
                 if !words[index].contains(['$', '`']) || literal_words.get(&words[index]) == Some(&true) {
+/// Delivery modes of the in-progress tasks assigned to this worker. Unreadable
+/// task state yields none, which leaves the session's mode in charge (the
+/// pre-cas-6db4 behaviour).
+fn worker_active_task_delivery_modes(
+    stores: &mut ToolHookStores<'_>,
+    input: &HookInput,
+) -> Vec<cas_types::DeliveryMode> {
+    agent_active_tasks(stores, input).into_iter().map(|task| task.delivery_mode).collect()
+}
+
                     break;
                 }
                 let [value] = expand_factory_shell_word(&words[index], &context.values).try_into().ok()?;
@@ -5128,24 +4885,6 @@ struct HeredocDelimiter {
     literal_body: bool,
 }
 
-/// The index after the arithmetic expansion or command that starts at `start`, where `<<` is a shift.
-fn skip_arithmetic(chars: &[char], start: usize) -> usize {
-    let open_at = if chars[start] == '$' { start + 1 } else { start };
-    let (open, close) = if chars[open_at] == '[' { ('[', ']') } else { ('(', ')') };
-    let mut depth = 0usize;
-    for (offset, &ch) in chars[open_at..].iter().enumerate() {
-        if ch == open {
-            depth += 1;
-        } else if ch == close {
-            depth -= 1;
-            if depth == 0 {
-                return open_at + offset + 1;
-            }
-        }
-    }
-    chars.len()
-}
-
 /// Find heredoc delimiters on one shell command line without interpreting
 /// quoted `<<` text as shell syntax. The returned order matches the shell's
 /// order for multiple heredocs on the same line.
@@ -5170,13 +4909,6 @@ fn heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
                 if index < chars.len() {
                     index += 1;
                 }
-            }
-            '#' if index == 0 || chars[index - 1].is_whitespace() || matches!(chars[index - 1], ';' | '|' | '&' | '(') => break,
-            '$' if chars.get(index + 1) == Some(&'[') || (chars.get(index + 1) == Some(&'(') && chars.get(index + 2) == Some(&'(')) => {
-                index = skip_arithmetic(&chars, index);
-            }
-            '(' if chars.get(index + 1) == Some(&'(') && (index == 0 || chars[index - 1].is_whitespace() || matches!(chars[index - 1], ';' | '|' | '&' | '(')) => {
-                index = skip_arithmetic(&chars, index);
             }
             '<' if chars.get(index + 1) == Some(&'<') => {
                 // `<<<` is a Bash here-string, not a heredoc declaration.
@@ -6344,15 +6076,10 @@ fn factory_write_decision(
         .filter_map(|dir| canonicalize_for_containment(dir))
         .collect();
     let shell_effects = if tool == "Bash" {
-        let command = tool_input.get("command").and_then(|value| value.as_str()).unwrap_or("");
-        shell_effects::collect(command, &cwd).unwrap_or_else(|_| {
-            let mut literal = shell_effects::ShellEffects::default();
-            literal.writes = lexical_literals(command, &cwd, bash_write_targets, place_path).into_iter().map(|path| (path, None)).collect();
-            literal.deletes = lexical_literals(command, &cwd, bash_delete_targets, place_delete);
-            literal.edits = lexical_literals(command, &cwd, bash_in_place_edit_targets, place_path);
-            literal.links = bash_link_creations(command, &cwd).into_iter().map(|link| (link, cwd.clone())).collect();
-            literal
-        })
+        match shell_effects::collect(tool_input.get("command").and_then(|value| value.as_str()).unwrap_or(""), &cwd) {
+            Ok(effects) => effects,
+            Err(rule) => return link_violation(input.cwd.clone(), cwd.clone(), rule),
+        }
     } else {
         shell_effects::ShellEffects::default()
     };
@@ -6540,10 +6267,10 @@ fn factory_write_decision(
             }).unwrap_or(".");
             let traverses_parent = std::path::Path::new(&raw_path).components()
                 .any(|component| component == std::path::Component::ParentDir);
-            if prefix.is_empty() || (!traverses_parent && [prefix, parent].iter().all(|path| {
+            if !prefix.is_empty() && !traverses_parent && [prefix, parent].iter().all(|path| {
                 unsanctioned_factory_path_with_worktree(input, configured_artifacts_root,
                     configured_scratch_root, is_supervisor, path, registered_worktree_root).is_none()
-            })) {
+            }) {
                 continue;
             }
             return FactoryWriteDecision::Denied(FactoryWriteViolation {
@@ -6612,10 +6339,10 @@ fn cas_config_file_write_denial(input: &HookInput) -> Option<String> {
             .unwrap_or_default(),
         "Bash" => {
             let command = tool_input.get("command").and_then(|value| value.as_str())?;
-            literal_targets(command, Path::new(&input.cwd), bash_write_targets, place_path)
+            bash_write_targets(command)
                 .into_iter()
                 .chain(bash_in_place_edit_targets(command))
-                .chain(literal_targets(command, Path::new(&input.cwd), bash_delete_targets, place_delete).into_iter().map(|(path, _)| path))
+                .chain(bash_delete_targets(command).into_iter().map(|(path, _)| path))
                 // cas-7d68: `ln -sf forged.toml .cas/config.toml` replaces it.
                 .chain(
                     bash_link_creations(command, Path::new(&input.cwd))
@@ -8398,6 +8125,27 @@ fn factory_workspace_contract_denial(
     let worktree = worktree_root
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
+    if violation.matched_rule == "an unresolved shell payload" {
+        return format!(
+            "{WORKSPACE_CONTRACT_DENIAL}: cannot resolve shell filesystem effects (an unresolved shell payload). For gh issue or PR text, save a literal body file under your configured scratch root or assigned worktree and pass `--body-file <path>`. Assigned worktree: `{}`.",
+            worktree.display(),
+        );
+    }
+    if matches!(violation.matched_rule,
+        "a write with an unresolved effective working directory"
+        | "a link with an unresolved effective working directory"
+        | "an unresolved shell payload"
+        | "an unresolved shell executable"
+        | "an unresolved shell write target"
+        | "an unresolved arithmetic operand"
+        | "a shell command without a resolvable payload"
+        | "a shell payload beyond the resolution limit"
+        | "an unmatched shell scope") {
+        return format!(
+            "{WORKSPACE_CONTRACT_DENIAL}: cannot resolve shell filesystem effects ({}). Use literal directory operands and a literal, bounded shell payload so every write can be checked against its effective directory. Assigned worktree: `{}`.",
+            violation.matched_rule, worktree.display(),
+        );
+    }
     if violation.matched_rule == "unresolved shell variable" {
         let suffix = violation.evaluated_path.split_once('$').map(|(_, rest)| rest).unwrap_or("");
         let variable = if suffix.starts_with('$') {
@@ -9757,7 +9505,7 @@ mod workspace_contract_tests {
         let mut failures = Vec::new();
         for (case, command, denied) in [
             ("arithmetic variable", format!("{prefix}cat <<EOF\n$(( x ))\nEOF\n"), true),
-            ("ambient arithmetic", "cat <<EOF\n$(( x ))\nEOF\n".into(), false),
+            ("ambient arithmetic", "cat <<EOF\n$(( x ))\nEOF\n".into(), true),
             ("bracket arithmetic", format!("{prefix}cat <<EOF\n$[ x ]\nEOF\n"), true),
             ("literal subscript", format!("cat <<EOF\n$(( {operand} ))\nEOF\n"), true),
             ("command substitution", "cat <<EOF\n$(touch /outside/cas-b8ae-must-not-execute)\nEOF\n".into(), true),
@@ -9771,9 +9519,9 @@ mod workspace_contract_tests {
             ("case pattern substitution", "case x in $(touch /outside/p)) true ;; esac\n".into(), true),
             ("case pattern backticks", "case x in `touch /outside/p`) true ;; esac\n".into(), true),
             ("case subject substitution", "case $(touch /outside/p) in x) true ;; esac\n".into(), true),
-            ("unterminated case", "case x in x) cat <<EOF\nhello\nEOF\n;;\n".into(), false),
-            ("stray arm", "x) cat <<EOF\nhello\nEOF\n".into(), false),
-            ("quoted case keyword", "'case' x in x) cat <<EOF\nhello\nEOF\n;; esac\n".into(), false),
+            ("unterminated case", "case x in x) cat <<EOF\nhello\nEOF\n;;\n".into(), true),
+            ("stray arm", "x) cat <<EOF\nhello\nEOF\n".into(), true),
+            ("quoted case keyword", "'case' x in x) cat <<EOF\nhello\nEOF\n;; esac\n".into(), true),
             ("earlier arm directory", format!("cd /outside; case x in a) cd {} ;; b) touch p ;; esac\n", project.path().display()), true),
             // ver-e69b5575c18c: a redirect's filename is no keyword, so bash runs
             // `touch in /outside/p` here; it must not be read as a case statement.
@@ -9785,7 +9533,7 @@ mod workspace_contract_tests {
             ("input target named case", "(<case touch in /outside/p) <esac\n".into(), true),
             ("subshell after a redirect target named case", ">case x in\n(touch /outside/p)\nesac\n".into(), true),
             ("case redirect", "case x in x) true ;; esac > /outside/p\n".into(), true),
-            ("unseparated pattern words", "case x in touch /outside/p) true ;; esac\n".into(), false),
+            ("unseparated pattern words", "case x in touch /outside/p) true ;; esac\n".into(), true),
             ("redirect before a write", ">out touch /outside/p\n".into(), true),
             ("clobber redirect", "echo hi >|/outside/p\n".into(), true),
             ("combined redirect", "echo hi >&/outside/p\n".into(), true),
@@ -9893,6 +9641,7 @@ EOF
         // Ambient values and persistent integer attributes are also unknown;
         // shell quoting does not make their secondary evaluation inert.
         for command in [
+            "echo \"$(( ambient ))\"".to_owned(),
             format!("declare -i y=1; y='{operand}'"),
             format!("flag=-i; declare \"$flag\" y='{operand}'"),
             format!("typeset -ix y='{operand}'"),
@@ -9902,6 +9651,12 @@ EOF
         ] {
             let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();
             let response = serde_json::to_value(response).unwrap();
+            if command.contains("ambient") && !response["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str().unwrap_or("")
+                .contains("cannot resolve shell filesystem effects (an unresolved arithmetic operand)")
+            {
+                failures.push(format!("arithmetic diagnostic {command}: {response}"));
+            }
             if response["hookSpecificOutput"]["permissionDecision"] != "deny" {
                 failures.push(format!("{command}: {response}"));
             }
@@ -10061,6 +9816,7 @@ EOF
             "echo \"$((true #)\nrm -rf /outside/cas-0c9c-dir\n))\"",
             "echo \"$(( 1 #)\ntouch /outside/cas-0c9c-p\n))\"",
             "echo \"$((touch /outside/cas-0c9c-p \") && (\"true))\"",
+            "echo \"$(( \")\" ) && (true))\"",
             "echo \"$((touch /outside/cas-0c9c-p \")\" ) && (true))\"",
             "echo $(( ' ) && (touch /outside/cas-0c9c-p) ' ))",
             "echo \"$(( ' ) && (touch /outside/cas-0c9c-p) ' ))\"",
@@ -10077,6 +9833,7 @@ EOF
             "echo \"$((touch /outside/cas-0c9c-p)$(true))\"",
             "echo \"$((rm -rf /outside/cas-0c9c-dir) && (true))\"",
             "echo \"$((echo hi > /outside/cas-0c9c-p) && (true))\"",
+            "echo \"$(( $(cat <<'EOF'\n1\nEOF\n) ))\"",
             "echo \"$(( $(cat <<'EOF'\na[$(touch /outside/cas-0c9c-p)]\nEOF\n) ))\"",
         ] {
             let (status, reason) = decision(command);
@@ -10155,6 +9912,10 @@ EOF
             let (status, reason) = decision(allowed);
             assert_ne!(status, "deny", "{allowed}: {reason}");
         }
+        // An unfinished word expansion cannot provide a trustworthy boundary.
+        assert_eq!(decision("echo ${x:-unfinished").0, "deny");
+        assert_eq!(decision("echo $[1 + (2)").0, "deny");
+        assert_eq!(decision("cat <<EOF\n$(echo ${x:-abc)\nEOF").0, "deny");
         for operation in [
             r#"set factory.write_roots "~/x""#,
             "grant-write --task cas-1234 --path /x --reason example",
@@ -11193,22 +10954,22 @@ EOF
             ("sh -c 'printf x > ../../operator/write-policy.toml'", true),
             ("bash -c 'cd ../.. && printf x > config.toml'", true),
             ("(cd ../.. && printf x > config.toml)", true),
-            ("cd \"$UNKNOWN_CWD\" && printf x > file.txt", false),
-            ("cd \"$LATER_CWD\"; LATER_CWD=src; printf x > file.txt", false),
+            ("cd \"$UNKNOWN_CWD\" && printf x > file.txt", true),
+            ("cd \"$LATER_CWD\"; LATER_CWD=src; printf x > file.txt", true),
             ("D=../..; cd \"$D\"; D=src; printf x > config.toml", true),
             ("{ cd ../..; }; printf x > config.toml", true),
             ("D=../..; false && D=src; cd \"$D\" && printf x > config.toml", true),
-            ("false && D=src; cd \"$D\" && printf x > file.txt", false),
+            ("false && D=src; cd \"$D\" && printf x > file.txt", true),
             ("CDPATH=../..; cd operator && printf x > write-policy.toml", true),
             ("CDPATH=../.. cd operator && printf x > write-policy.toml", true),
             ("sh -c 'cd && printf x > new.rs'; HOME=src", true),
             ("CDPATH=../..; cd ./src && printf x > new.rs", false),
-            ("sh -c \"$UNKNOWN_SCRIPT\"", false),
-            ("sh -c '$UNKNOWN_SCRIPT'", false),
-            ("sh -c '$(printf touch) src/new.rs'", false),
-            ("sh -c 'cd $(printf src) && printf x > new.rs'", false),
-            ("sh -c 'printf x > \"$(printf src/new.rs)\"'", false),
-            ("sh -c \"printf x $UNKNOWN_SCRIPT\"", false),
+            ("sh -c \"$UNKNOWN_SCRIPT\"", true),
+            ("sh -c '$UNKNOWN_SCRIPT'", true),
+            ("sh -c '$(printf touch) src/new.rs'", true),
+            ("sh -c 'cd $(printf src) && printf x > new.rs'", true),
+            ("sh -c 'printf x > \"$(printf src/new.rs)\"'", true),
+            ("sh -c \"printf x $UNKNOWN_SCRIPT\"", true),
             ("sh -c 'printf \"%s\" \"$(cat src/new.rs)\"'", false),
             ("sh -c 'printf \"%s\" \"$(touch ../../config.toml)\"'", true),
             // cas-74b2: nested double quotes belong to the substitution's
@@ -11219,7 +10980,7 @@ EOF
             (r#"for file in "$(cat "status).txt")"; do rm ../../config.toml; done"#, true),
             (r#"while [ "$(cat "status).txt")" = waiting ]; do cat status.txt; done"#, false),
             (r#"while [ "$(cat "status).txt")" = waiting ]; do git -C ../.. push origin main; done"#, true),
-            (r#"printf '%s\n' "$(cat"#, false),
+            (r#"printf '%s\n' "$(cat"#, true),
             // cas-9623: a quoted cat heredoc is literal argument data. Its
             // quotes, substitutions and parentheses must not become syntax.
             ("gh issue comment 1290 --body \"$(cat <<'EOF'\nIt's done: $(touch /etc/cas-literal) (\nEOF\n)\"", false),
@@ -11235,9 +10996,9 @@ EOF
             ("echo $(cat src/new.rs) touch ../../ordinary-data.txt", false),
             ("echo $(touch ../../config.toml) data", true),
             ("C=touch; $C ../../config.toml", true),
-            ("C=touch; sh -c '$C ../../config.toml'", false),
-            ("CMD=$UNKNOWN; $CMD", false),
-            ("sh -c '$UNKNOWN/tool src/new.rs'", false),
+            ("C=touch; sh -c '$C ../../config.toml'", true),
+            ("CMD=$UNKNOWN; $CMD", true),
+            ("sh -c '$UNKNOWN/tool src/new.rs'", true),
             ("cd src && printf x > new.rs", false),
             ("D=src; cd \"$D\" && printf x > new.rs", false),
             ("cd ../.. && cd worktrees/worker-e460 && printf x > local.rs", false),
@@ -11266,21 +11027,21 @@ EOF
             ("A=src; nohup bash -c 'pnpm typecheck; printf \"exit=%s\\n\" \"$?\"' > \"$A/typecheck.log\" 2>&1 < /dev/null &", false),
             ("bash -c 'printf x > \"$1\"' bash ../../config.toml", true),
             ("bash -c 'shift; printf x > \"$1\"' bash src/new.rs ../../config.toml", true),
-            ("bash -c 'f() { printf x > \"$1\"; }; f ../../config.toml' bash src/new.rs", false),
+            ("bash -c 'f() { printf x > \"$1\"; }; f ../../config.toml' bash src/new.rs", true),
             // A child shell receives exported variables only.
-            ("W=$PWD; bash -c 'printf x > \"$W/etc-cas-e460\"'", false),
+            ("W=$PWD; bash -c 'printf x > \"$W/etc-cas-e460\"'", true),
             ("export W=$PWD; bash -c 'printf x > \"$W/src/new.rs\"'", false),
             // GH #2473, #2512: `cd \"$OLDPWD\"` and `cd -` return; `pushd` moves.
             ("cd ../.. && cat config.toml && cd \"$OLDPWD\" && printf x > src/new.rs", false),
             ("cd ../.. && cat config.toml && cd - >/dev/null && printf x > src/new.rs", false),
-            ("cd /nonexistent && true; cd - >/dev/null && printf x > .bashrc", false),
+            ("cd /nonexistent && true; cd - >/dev/null && printf x > .bashrc", true),
             ("pushd ../.. >/dev/null && printf x > config.toml", true),
             ("eval -- 'cd ../..'; printf x > config.toml", true),
             // GH #1866, #2547: numeric counters and clock arithmetic are inert.
             ("missing=0; for p in src/a src/b; do [ -f \"$p\" ] || missing=$((missing+1)); done; printf '%s\\n' \"$missing\" > src/missing.txt", false),
             ("until_timer=$((900 - $(date +%s) % 900)); printf '%s\\n' \"$until_timer\" > src/timer.txt", false),
-            ("n=$(cat src/n); printf '%s' $((n+1))", false),
-            ("n=0; read n < src/n; printf '%s' $((n+1))", false),
+            ("n=$(cat src/n); printf '%s' $((n+1))", true),
+            ("n=0; read n < src/n; printf '%s' $((n+1))", true),
             // GH #2491: array words are data and bind their elements.
             ("a=(src/*); ls -l \"${a[0]}\"", false),
             ("a=(../../config.toml); printf x > \"${a[0]}\"", true),
@@ -11294,6 +11055,19 @@ EOF
             let decision = value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("");
             if (decision == "deny") != denied {
                 mismatches.push(format!("{command}: expected denied={denied}, got {value}"));
+            }
+            if command == r#"printf '%s\n' "$(cat"#
+                && !value["hookSpecificOutput"]["permissionDecisionReason"].as_str()
+                    .is_some_and(|reason| reason.contains("cannot resolve shell filesystem effects"))
+            {
+                mismatches.push(format!("malformed substitution needs a resolution reason: {value}"));
+            }
+            if command.starts_with("gh issue comment") && denied
+                && value["hookSpecificOutput"]["permissionDecisionReason"].as_str()
+                    .is_some_and(|reason| reason.contains("an unresolved shell payload")
+                        && !reason.contains("--body-file"))
+            {
+                mismatches.push(format!("unresolved gh body needs --body-file guidance: {value}"));
             }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");
@@ -11544,9 +11318,10 @@ EOF
         assert_eq!(violation.matched_rule, "none");
 
         let command = "P=$UNKNOWN/x; mkdir -p $P";
-        assert_eq!(factory_write_violation(
+        let violation = factory_write_violation(
             &bash_input(command, &worktree), &artifacts_root, None, true, Some(&worktree)
-        ), None, "an unknown root is not a literal write");
+        ).expect("unknown values remain guarded");
+        assert_eq!(violation.matched_rule, "unresolved shell variable");
     }
 
     #[test]
@@ -11867,6 +11642,16 @@ EOF
     }
 
     #[test]
+    fn variable_root_denial_names_the_unexpanded_variable_cas_6ada() {
+        let _env = TestEnvGuard::temp_home();
+        let worktree = tempfile::tempdir().unwrap();
+        let input = bash_input("printf proof > $UNKNOWN_ROOT/all.jsonl", worktree.path());
+        let violation = factory_write_violation(&input, &None, None, false, Some(worktree.path())).unwrap();
+        let reason = factory_workspace_contract_denial(&input, &violation, None, None, Some(worktree.path()));
+        assert!(reason.contains("$UNKNOWN_ROOT"));
+    }
+
+    #[test]
     fn dynamic_creation_prefix_keeps_boundary_traversal_and_delete_guards_cas_6ada() {
         use std::os::unix::fs::symlink;
         let _env = TestEnvGuard::temp_home();
@@ -11883,12 +11668,11 @@ EOF
             format!("printf proof > {}/run-$RUN/../../outside/file", scratch.display()),
             format!("printf proof > {}/escape/run-$RUN/file", scratch.display()),
             format!("rm -rf {}/run-$$", scratch.display()),
+            "printf proof > ${UNKNOWN_ROOT}/file".to_string(),
         ] {
             assert!(factory_write_violation(&bash_input(&command, &worktree), &None,
                 Some(&scratch_root), false, Some(&worktree)).is_some(), "must retain guard: {command}");
         }
-        assert_eq!(factory_write_violation(&bash_input("printf proof > ${UNKNOWN_ROOT}/file", &worktree), &None,
-            Some(&scratch_root), false, Some(&worktree)), None, "an unknown root is not a literal write");
     }
 
     #[test]
@@ -13630,8 +13414,8 @@ mod worker_commit_guard_tests {
             (format!("bash -co nounset 'cd \"{repo_path}\" && git commit -m probe'"), true),
             (format!("bash -c 'cd \"$1\" && git commit -m probe' bash '{repo_path}'"), true),
             ("zsh -c -Z 'git commit -m work'".to_string(), true),
-            ("bash -c -o".to_string(), false),
-            ("bash -c --".to_string(), false),
+            ("bash -c -o".to_string(), true),
+            ("bash -c --".to_string(), true),
             (format!("bash -c 'cd \"{repo_path}\"'; git commit -m work"), false),
             // GH #2499, #2512: subshell `cd` and `cd -` are shell scoping.
             (format!("d='{repo_path}'; (cd \"$d\" && true) && git commit -m work"), false),

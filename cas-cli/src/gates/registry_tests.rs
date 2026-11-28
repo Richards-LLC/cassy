@@ -406,9 +406,9 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     assert_eq!(facts::summarize(&store, before).unwrap().get("G-116"),
         Some(&facts::Counts { refused: 1, ..Default::default() }));
 
-    // Invalid native input fails open and counts one H-01 refusal.
+    // Invalid native input returns H-01 before the inner handle_hook route.
     let output = crate::cli::hook::process_hook_input("PreToolUse", Ok("{".into()), true).unwrap();
-    assert!(facts::hook_denial(&output).is_none());
+    assert!(facts::hook_denial(&output).is_some_and(|reason| codes_in(reason).contains(&"H-01")));
     assert_eq!(facts::summarize(&store, before).unwrap().get("H-01"),
         Some(&facts::Counts { refused: 1, ..Default::default() }));
 

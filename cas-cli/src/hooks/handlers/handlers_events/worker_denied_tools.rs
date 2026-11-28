@@ -153,8 +153,8 @@ fn denied_cli(policy: &WorkerDenials, invocations: &[(String, Vec<String>)]) -> 
         .find(|runs| policy.denies_cli(runs))
 }
 
-/// A `neonctl` invocation that is not a plain read: the production-database rail, whatever the
-/// configured denied-CLI list says.
+/// A `neonctl` mutation aimed at production: the production-database rail, whatever the configured
+/// denied-CLI list says. Reads, `connection-string` and a mutation of a named other branch are not.
 fn neon_cli_writes(name: &str, args: &[String]) -> bool {
     if !runs_cli(name, args).eq_ignore_ascii_case("neonctl") {
         return false;
@@ -165,7 +165,19 @@ fn neon_cli_writes(name: &str, args: &[String]) -> bool {
         None => &words[..],
     };
     let help = args.iter().any(|arg| matches!(arg.as_str(), "--help" | "-h" | "--version" | "-v"));
-    !(help || words.is_empty() || words.get(1).is_some_and(|verb| matches!(*verb, "list" | "ls" | "get" | "show")))
+    let read = help
+        || words.first().is_none_or(|group| matches!(*group, "connection-string" | "me" | "completion"))
+        || words.get(1).is_some_and(|verb| matches!(*verb, "list" | "ls" | "get" | "show"));
+    if read {
+        return false;
+    }
+    let flagged = args.iter().enumerate().find_map(|(at, arg)| {
+        ["--branch", "--branch-id", "--branch-name"].iter().find_map(|flag| {
+            arg.strip_prefix(&format!("{flag}=")).or_else(|| (arg.as_str() == *flag).then(|| args.get(at + 1).map(String::as_str)).flatten())
+        })
+    });
+    let target = if words.first() == Some(&"branches") { words.get(2).copied() } else { flagged };
+    target.is_none_or(|branch| matches!(branch.to_ascii_lowercase().as_str(), "main" | "production" | "prod"))
 }
 
 /// The command a package runner executes, if `name` is one.

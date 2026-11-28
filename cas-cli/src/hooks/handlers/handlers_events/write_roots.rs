@@ -46,9 +46,6 @@ pub(crate) fn protected_policy_paths(cas_root: &Path) -> Vec<PathBuf> {
 /// Whether `path` is any project's Cassy config or operator policy:
 /// `…/.cas/config.toml`, `…/.cas/config.yaml` or under `…/.cas/operator/`.
 pub(crate) fn is_cas_policy_path(path: &Path) -> bool {
-    if path.file_name().is_some_and(|name| name == "write-policy.toml") {
-        return true;
-    }
     let components: Vec<_> = path.components().map(|component| component.as_os_str()).collect();
     components.windows(2).any(|pair| {
         pair[0] == ".cas"

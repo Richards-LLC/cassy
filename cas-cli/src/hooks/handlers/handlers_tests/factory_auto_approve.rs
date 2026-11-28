@@ -1016,24 +1016,19 @@ mod credential_write_tests {
     }
 
     #[test]
-    fn bash_secret_file_reads_are_refused_and_quoted_text_stays_allowed_cas_5c83() {
+    fn bash_credential_reads_and_quoted_text_stay_allowed_cas_5c83() {
         let mut env = TestEnvGuard::new();
         let (root, cwd) = fixture(&mut env);
-        for name in [".env", ".env.local", ".env.example", "credentials.json"] {
-            std::fs::write(cwd.path().join(name), "K=v").unwrap();
-        }
-        for command in ["cat .env", "grep '^NAME=' credentials.json", "cp .env ordinary.txt", "source ./.env.local"] {
-            let output = call(root.path(), cwd.path(), "Bash", serde_json::json!({"command": command}));
-            assert!(deny_reason(&output).is_some_and(|reason| reason.contains("[H-33]")), "a real secret read is refused: {command}: {output:?}");
-        }
         for command in [
-            "cat .env.example",
+            "cat .env",
+            "grep '^NAME=' credentials.json",
             "python3 -c 'from pathlib import Path; print(Path(\".env\").read_text())'",
             "node -e 'require(\"fs\").readFileSync(\"secrets.json\")'",
             "printf '%s' 'printf x > .env; cp replacement credentials.json'",
             "echo 'Path(\".env\").write_text(\"FIXTURE\")'",
             "python3 -c 'print(\"Path(\\\".env\\\").write_text(\\\"FIXTURE\\\")\")'",
             "cat > ordinary.txt <<'EOF'\ncp replacement credentials.json\nEOF",
+            "cp .env ordinary.txt",
             "printf '.env credentials.json' > ordinary.txt",
         ] {
             let output = call(

@@ -112,8 +112,8 @@ fn main() -> ExitCode {
     if cli::is_native_codex_pre_tool(&std::env::args().collect::<Vec<_>>()) {
         return match cli::execute_native_pre_tool_use() {
             Ok(()) => ExitCode::SUCCESS,
-            // Read/validation failures fail open with an H-01 fact in the shared
-            // hook entry; only output serialization can fail here.
+            // Read/validation failures are converted to the observed H-01
+            // denial by the shared hook entry; only output serialization can fail here.
             Err(_) => ExitCode::FAILURE
         };
     }

@@ -104,16 +104,20 @@ fn a_worker_neonctl_write_is_refused_as_the_production_rail() {
     };
     for command in [
         "neonctl branches reset production",
-        "vercel ls; neonctl branches delete br-demo",
+        "vercel ls; neonctl projects delete demo",
         "npx -y neonctl@latest projects delete demo",
-        "sh -c 'neonctl connection-string main'",
+        "sh -c 'neonctl databases delete --name app'",
     ] {
         assert!(refused(bash(command, home.path()), Some(&cas_root)).contains(&"H-17"), "{command}");
+    }
+    for command in ["neonctl branches delete br-demo", "sh -c 'neonctl connection-string main'", "neonctl databases delete --name app --branch br-demo"] {
+        assert!(flagged(handle_pre_tool_use(&bash(command, home.path()), Some(&cas_root)).unwrap()), "{command}: only a production mutation is the rail");
     }
     let mut config = Config::load(&cas_root).unwrap_or_default();
     config.set("factory.worker_denied_clis", "").unwrap();
     config.save(&cas_root).unwrap();
     assert!(refused(bash("neonctl branches reset production", home.path()), Some(&cas_root)).contains(&"H-17"));
+    assert!(denial(handle_pre_tool_use(&bash("neonctl branches delete br-demo", home.path()), Some(&cas_root)).unwrap()).is_none());
     let output = handle_pre_tool_use(&bash("neonctl projects list", home.path()), Some(&cas_root)).unwrap();
     assert!(denial(output).is_none(), "a neonctl read is not the rail");
     for code in [

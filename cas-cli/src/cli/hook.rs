@@ -298,7 +298,7 @@ fn execute_event(event: &str, cli: &Cli) -> anyhow::Result<()> {
 }
 
 /// Shared entry enclosing native fast validation and ordinary hook handlers.
-/// Native failures fail open with an H-01 fact; only the capped-Cargo route stays closed.
+/// Native failures become a fail-closed H-01 output before leaving this entry.
 // gate-audit[native]: selector Chooses the harness projection; both routes share this final fact observer.
 pub(crate) fn process_hook_input(
     event: &str,
@@ -308,7 +308,9 @@ pub(crate) fn process_hook_input(
     let output = if native {
         input.map_err(anyhow::Error::from)
             .and_then(|text| native_pre_tool::process_native_input(&text))
-            .unwrap_or_else(|_| native_pre_tool::fail_open(None, "CASSY GUARD UNAVAILABLE: hook processing failed."))
+            .unwrap_or_else(|_| crate::hooks::HookOutput::with_pre_tool_permission(
+                "deny", &crate::gates::tag("H-01", "CASSY GUARD UNAVAILABLE: hook processing failed; retry when the host is responsive."),
+            ))
     } else {
         let mut input: HookInput = serde_json::from_str(&input?)
             .map_err(|error| anyhow::anyhow!("Failed to parse hook input: {error}"))?;

@@ -6,7 +6,10 @@ Approve a replacement delivery branch with `task action=rebind_branch id=<task> 
 
 ## Task risk declarations
 
-Code tasks (`task`, `bug`, `feature`) carry `risk=blast-radius`, `platform`, `concurrency` or `none` at creation; `blast-radius` also needs comma-separated `proof_targets`. At close, every changed source module must be named by a target or sit in a crate the worker tested at the delivered commit; only an untested crate needs a `proof_scope_fix`. An operations task whose work is a pull request elsewhere closes with `execution_note=no-code external_ref=<PR URL>`. The declared risk and `proof_targets` tell you what the epic's one integration proof must cover: its integration run, or one assembly build and test of the epic tip with an `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>` note. Do not demand scoped Rust proof from workers. A non-Rust `risk=platform` task still carries its `platform_proof` receipt.
+Risk notes and proof targets at task create are optional and advisory.
+Green lane CI on the exact tip plus named tests is the proof; park does not
+require five passes or a receipt per crate. An operations task delivering a
+pull request elsewhere uses `execution_note=no-code external_ref=<PR URL>`.
 
 A worker or QA reviewer that needs an exact-tip Cassy binary calls `factory action=candidate_request task_id=<own-task> revision=<sha>`; the daemon builds it and messages the requester. When the queue is unavailable or the host lacks its sandbox (including macOS), build the worker's requested revision directly with `cas qa candidate build --task <task-id> --rev <sha>` and return the receipt. Supervisors also use that direct command for their own work, such as the batch epic-tip candidate. Each build gets its own revision directory and is never replaced. For proof from another machine, use the [cross-machine proof log flow](../../cas-worker/references/close-gate.md#cross-machine-proof-logs) and read the hash-verified copy before relying on it.
 

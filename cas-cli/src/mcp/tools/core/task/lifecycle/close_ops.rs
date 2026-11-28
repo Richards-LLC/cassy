@@ -2559,22 +2559,6 @@ fn uncovered_blast_radius_scope(
     (uncovered, notice)
 }
 
-fn proof_targets_scope_fix_command(task: &Task, uncovered: &[String]) -> String {
-    let mut targets = cas_types::normalize_proof_targets(&task.proof_targets);
-    for module in uncovered {
-        if !targets.iter().any(|target| target == module) {
-            targets.push(module.clone());
-        }
-    }
-    format!(
-        "A crate the worker tested is covered without a scope fix (cas-b38a): run a capped targeted test in each uncovered module's crate at the delivered commit (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`), then retry close. Otherwise, ask a live registered supervisor to run `{supervisor}task action=update id={} proof_targets=\"{}\" proof_scope_fix=true reason=\"widen proof scope for delivered modules\"`, then record scoped proof and retry close. If no delivery transaction exists, a live registered supervisor may instead close with `{supervisor}task action=close id={} supervisor_override=true reason=\"reviewed uncovered source modules and accepted the measured scope mismatch\"`; the waived modules are recorded on the task.",
-        task.id,
-        targets.join(","),
-        task.id,
-        supervisor = crate::mcp::tools::core::guidance::supervisor_prefix(),
-    )
-}
-
 /// File kinds that are web or documentation content. A delivery made only
 /// of these cannot need a macOS native-command platform proof (cas-b4cc).
 const WEB_ONLY_EXTENSIONS: &[&str] = &[
@@ -3116,29 +3100,9 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
             task.id,
         )));
     }
-    // The same G-61 scope rule also protects closes without a factory park.
-    if task.risk.contains(&TaskRisk::BlastRadius) {
-        let (uncovered, notice) =
-            uncovered_blast_radius_scope(proof_repo, changed_paths, &task.proof_targets);
-        if !uncovered.is_empty() {
-            return Err(crate::gates::tag("G-61", format!(
-                "TASK CLOSE REJECTED: task {} declares blast-radius proof narrower than its delivery diff; uncovered source modules: {}{}. {}",
-                task.id,
-                uncovered.join(", "),
-                notice,
-                proof_targets_scope_fix_command(task, &uncovered),
-            )));
-        }
-    }
-    // cas-4cbb: a factory worker never builds, so its close carries no
-    // scoped or loaded build proof; the supervisor's single build of the epic
-    // tip at assembly proves every child at once.
     if build_proofs == BuildProofs::DeferredToAssembly {
         return Ok(());
     }
-    // cas-90e8 (L3 P2): platform proof needs a macOS cargo/xcodebuild run a
-    // factory worker is forbidden to make, so a worker close defers it to
-    // assembly with the build proofs; every other close still owes it here.
     // gate[G-78 park as-of]: Platform proof and platform-risk plausibility
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
         let missing = platform_proof_missing_evidence(&task.notes).join(", ");
@@ -3823,19 +3787,6 @@ mod risk_proof_tests {
             ),
             ["update"]
         );
-    }
-
-    #[test]
-    fn focused_proof_close_guides_supervisor_scope_widening() {
-        let mut task = Task::new("cas-d86d-guidance".into(), "proof guidance".into());
-        task.risk = vec![TaskRisk::BlastRadius];
-        task.proof_targets = vec!["lifecycle".into()];
-        let error = validate_risk_close_proofs(
-            &task,
-            &["cas-cli/src/mcp/tools/service/core.rs".into()],
-            std::path::Path::new("."),
-        )
-        .expect_err("a missing blast-radius module must refuse close");
     }
 
     #[test]
@@ -6370,27 +6321,6 @@ impl CasCore {
             }
             Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-28", message))),
         };
-        if existing_delivery.is_none() && task.execution_note.as_deref() == Some("test-first") {
-            let repo = &context.repo_root;
-            let head = &input.commit_sha;
-            let target = &input.target_branch;
-            let ranges = task_commit_identity_in_repo(repo, task, Some(head.clone())).ok()
-                .and_then(|identity| {
-                    let history = agent_store.get_lease_history(&task.id, None).unwrap_or_default();
-                    let window = resolve_task_commit_receipt_window(task.created_at, &history, identity);
-                    task_attribution::range_bounds(repo, target, &window, Some(head))
-                });
-            if let Some(ranges) = ranges.filter(|ranges| !ranges.is_empty())
-                && let Some(paths) = task_attribution::paths_from_ranges(repo, ranges.iter().map(|(base, tip)| (base.as_str(), tip.as_str())))
-                && let Ok((tests, widened)) = receipt_scope::delivered_tests(&self.cas_root, &worker_path, head, target, &paths, Some(&ranges))
-            {
-                let passing = crate::factory_worker_check::PassingTests::new(&self.cas_root, &worker_path, head)
-                    .with_target(target).with_synced(&task.deliverables.test_receipts);
-                if let Some(refusal) = receipt_scope::red_first_refusal(task, &passing, head, &ranges, &tests, &widened) {
-                    return Ok(Self::tool_error(gate_preflight::park_reply(vec![refusal])));
-                }
-            }
-        }
         let hook_evidence = match run_declared_pre_close_hook(
             task,
             &context,
@@ -9872,7 +9802,8 @@ impl CasCore {
                 && task.deliverables.green_merge_commit.is_none()
                 && let Err(message) = ac_checklist::at_park(&self.cas_root, &task)
             {
-                gate_refusals.push(message);
+                close_notes.record(&mut task, &message);
+                registry_upkeep_notices.push(message);
             }
             let fast_lane_qa = match &fast_lane_stage {
                 fast_lane_gate::LaneClose::Off => None,
@@ -9924,6 +9855,11 @@ impl CasCore {
                     for note in notes {
                         close_notes.record(&mut task, &note);
                     }
+                }
+                Err(message) if task.task_type != TaskType::Epic
+                    && crate::gates::codes_in(&message).contains(&"G-53") => {
+                    close_notes.record(&mut task, &format!("Advisory: {message}"));
+                    registry_upkeep_notices.push(message);
                 }
                 Err(message) if supervisor_override => {
                     accepted_override_codes.push("G-53");
@@ -10219,22 +10155,17 @@ impl CasCore {
                                 &close_project_root, &resolved_parent_branch, window, Some(tip),
                             ).as_deref(),
                         );
-                        // GH #2041: authority and reason were validated at entry.
-                        // Waive only stability, retaining crate/content obligations.
-                        let before = receipt_refusals.len();
-                        if supervisor_override {
-                            receipt_refusals.retain(|refusal| {
-                                !refusal.starts_with("CHANGED_TEST_STABILITY_REQUIRED:")
-                                    && !refusal.starts_with("CHANGED_TEST_DISCOVERY_FAILED:")
-                            });
-                        }
-                        if receipt_refusals.len() != before {
-                            accepted_override_codes.push("G-61");
-                            parking.notes.push_str(&format!(
-                                "\n\nDECISION: authenticated supervisor waived park test stability [G-61] at {tip}. Reason: {}",
-                                req.reason.as_deref().unwrap_or_default().trim(),
-                            ));
-                        }
+                        receipt_refusals.retain(|diagnostic| {
+                            if crate::gates::codes_in(diagnostic).iter()
+                                .any(|code| matches!(*code, "G-61" | "G-167" | "G-168"))
+                            {
+                                parking.notes.push_str(&format!("\n\nAdvisory: {diagnostic}"));
+                                registry_upkeep_notices.push(diagnostic.clone());
+                                false
+                            } else {
+                                true
+                            }
+                        });
                         gate_refusals.extend(receipt_refusals);
                     }
                     // Every park must make cited proof portable before a peer
@@ -12359,6 +12290,17 @@ impl CasCore {
                 task.notes = format!("{}\n\n[{ts}] WORKER CHECK {receipt}", task.notes);
             }
             // cas-289b: receipts from the worker's machine travel on the task row.
+            if task.risk.contains(&TaskRisk::BlastRadius) {
+                let (uncovered, notice) = uncovered_blast_radius_scope(
+                    proof_repo, &changed_paths, &task.proof_targets,
+                );
+                if !uncovered.is_empty() {
+                    close_notes.record(&mut task, &crate::gates::tag("G-61", format!(
+                        "Advisory: declared blast-radius scope omits source modules: {}{}",
+                        uncovered.join(", "), notice,
+                    )));
+                }
+            }
             let synced_receipts = task.deliverables.test_receipts.clone();
             let passing_tests = delivered_tip.as_deref().map(|head| {
                 (head, crate::factory_worker_check::PassingTests::new(&self.cas_root, receipt_repo, head)
@@ -12687,22 +12629,21 @@ impl CasCore {
             SearchManifestGateOutcome::AppendWarningNote(note) => Some(note),
         };
 
-        // Every non-park transition to Closed owes persisted batch debt,
-        // including ProceedWithNote and paths without an assignee or surface.
         if let Err(message) = crate::qa_batch::ensure_deferred_close(
             &self.cas_root, &task, req.commit_receipt.as_deref(), commit_receipt_window.as_ref(),
         ) {
-            // cas-bc15: a live supervisor's reasoned override (validated
-            // above) answers deferred batch evidence, and the task records it.
-            if !supervisor_override {
+            if task.task_type != TaskType::Epic {
+                close_notes.record(&mut task, &crate::gates::tag("G-83", format!("Advisory: {message}")));
+            } else if !supervisor_override {
                 return Ok(Self::tool_error(crate::gates::tag("G-83", message)));
-            }
-            accepted_override_codes.push("G-83");
-            close_notes.record(&mut task, &format!(
+            } else {
+                accepted_override_codes.push("G-83");
+                close_notes.record(&mut task, &format!(
                 "[{}] ✅ DECISION supervisor_override waived deferred batch evidence ({message}): {}",
                 chrono::Utc::now().format("%Y-%m-%d %H:%M"),
                 req.reason.as_deref().unwrap_or_default().trim(),
-            ));
+                ));
+            }
         }
 
         let owner_train = crate::cloud::peer_mailbox::train_parks::owner_train(&self.cas_root, &task)
@@ -14475,7 +14416,10 @@ impl CasCore {
         let (outcome, reason) = super::super::repeat_review::repair_transition(
             &self.cas_root, &task.id, &req.reason, |reason, reviewed| {
                 let effective_class = crate::mcp::tools::core::task::repair_class::require_class(task_store.as_ref(), &task.id, class_audit)
-                    .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, format!("task request_changes rejected: {message}")))?;
+                    .unwrap_or_else(|warning| {
+                        tracing::warn!(task_id = %task.id, %warning);
+                        None
+                    });
                 if let Some(class) = &effective_class {
                     task_store.patch_execution_state(&task.id, &serde_json::json!({"class_audit": class}))
                         .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,

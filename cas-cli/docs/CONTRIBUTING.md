@@ -2517,8 +2517,9 @@ only when no task, completion receipt, recorded merge or QA review binds it.
 Merge the target into parked/reviewed branches. Normal fast-forward pushes retain
 the existing ancestry, ownership, fast-row and local-gate checks.
 
-At park, `receipt_scope::park_refusal` reads passing capped test receipts for
-every changed Rust crate; missing tests produce `FOCUSED PROOF REQUIRED`.
+At park, `receipt_scope::park_refusal` reads passing capped test receipts.
+Missing local proof, including per-crate receipts, warns and never refuses.
+Green lane CI on the exact tip plus named tests is the proof.
 A fresh park evaluates focused proof at the accepted delivery boundary. A
 rebase that restores the checkpoint through
 an identical-tree merge uses the same patch, ownership and sibling checks as
@@ -3001,66 +3002,15 @@ runs as `worker-check --detach` in its own session, since Codex `exec_command`
 kills the shell's process group, including any `&` job, when the shell exits
 (cas-3d04); without a log redirect it is refused. Compile checks execute no tests.
 
-The existing focused-proof park gate also requires five consecutive passes for
-the delivery's new or changed test functions, including test-only deliveries. The capped Rust
-runner repeats only owned functions in its requested selection; unchanged tests
-retain one-pass crate coverage. Vitest, Jest and Playwright use
+Run each selected test once. Vitest, Jest and Playwright use
 `cas factory worker-check --cas-root "$CAS_ROOT" -- <runner> path/to/test-file`;
-Node's built-in runner uses `-- node --test path/to/test-file`, five serial runs
-of the changed tests alone, which `node:test` cannot retry.
-A spec that only a sibling config lists, such as `jest-integration.config.js` or
-`playwright.hermetic.config.ts`, runs under that config. The runner's own listing
-decides ownership, and the prescribed command names it with `--config`; a
-caller's `--config` always wins (GH #2058, #2195).
-Stability receipts share the worker-check store and include runner, source test
-identities, consecutive pass count and elapsed time. Park only reads them.
-When discovery cannot classify an input, the capped runner widens to the whole
-test file, or to the nearest JavaScript package/Rust crate for a source input.
-For a Jest source input, the suggested command is `jest --findRelatedTests
-<source file>`: the capped runner executes only that source's test dependents
-from its Jest config root and records proof for that source. It never drops the
-source selector to run the whole package; an empty related selection is not proof.
-Vitest source inputs, including Vue components and shared test helpers, use
-`vitest related --run <source file>` with the same source-specific receipt.
-A Vue component whose vitest config names no Vue plugin (`@vitejs/plugin-vue`
-or Nuxt's test config) cannot be transformed by `vitest related`, so it widens
-to its package run instead, and a Playwright spec importing it still proves it.
-Only Jest treats an arbitrary file under `__tests__` as a test by default;
-Vitest helpers there retain their source role and select importing specs.
-A Playwright helper that only Playwright specs import, directly or through other
-relative imports in its package, uses `playwright <helper file>`. The capped
-runner runs each importing spec under the Playwright config that lists it
-(Playwright's `--list`, nearest directory first; the caller's `--config` wins)
-and records each spec's config. Park accepts the helper once every importing
-spec has a passing capped run at the tip, through that run or through the spec's
-own `playwright --config <config> <spec>`, or through that spec's ordinary
-five-pass stability run when it executed every test the config lists in the spec
-(Playwright's `--list`; a partial selection proves nothing about the rest); an
-omitted consumer, an unrelated spec or a run that executed another spec is no proof. A spec counts only when it loads
-`@playwright/test` at runtime and imports no other runner; `import type` does
-not. A helper no spec imports, or a unit test also imports, keeps its previous
-proof (GH #2146). A helper that only `node:test` files import, such as a CI
-guard's workflow reader, uses `node --test <helper file>` the same way (GH #2200).
-That wider set runs once and records a separate widened receipt at the tested
-commit. Park consumes it without executing tests; identified changed tests still
-owe five consecutive passes. Caller Jest name filters cannot narrow this proof.
-If a broader Rust selection fails, prior valid stability can survive for owned
-tests with a positive passing result in every attempted run. Failed or unrun
-tests lose that evidence, and changed inputs still require fresh proof. This
-restores stability only; the failed selection receives no passing crate receipt.
-Stability and widened receipts use the same receipt carry-forward as crate
-proof: documentation, changelog or `docs/qa/bug-families/` fragment commits
-preserve them when no test/build inputs change. A bug-family YAML counts as an
-input only when a Rust source names it, not by its extension. Target merges
-use the shared input/resolution checks. A changed test needs fresh stability
-even when its name is unchanged or its product change is already on the target.
-For widened Playwright proof, a failing journey is replayed at the merge base
-through the same `scripts/ci-test-impact.py::lane_attribute` engine as lane CI.
-Only matching runtime identities and normalized failure fingerprints count as
-inherited. Their evidence and a deterministic `release-repair` task link are
-recorded with the proof. A base pass, different failure or incomplete replay
-still refuses G-61; identified changed tests retain five-pass stability.
-
+Node uses `-- node --test path/to/test-file`. Discovery selects the runner and
+config that own the spec; an explicit `--config` wins. Source inputs select
+related tests or widen to a package when discovery cannot classify them.
+Receipts retain the tested commit, runner and identities. Park reads those
+receipts as advice; missing coverage never refuses. Fix or delete flaky tests
+instead of retrying them. No failing-first receipt or test-first execution note
+is required; never stage a red baseline for proof.
 
 Detached capped runs register their worker/task, output log and PID incarnation
 before returning. Their existing worker-check command inherits a hidden
@@ -3145,12 +3095,9 @@ Cargo output, including ANSI bytes; automatic guards remain in the original
 producer log. Each attempt keeps a separate capture beside the redirected
 producer log, or under the receipt directory's `logs/` for foreground runs.
 Use that selected path as `log_path`; no extraction or filtering is needed.
-When a changed test can only run on the peer machine, add
-`"repeat_log_paths"` with that run's four repeat captures
-(`<selected>.repeat-2` to `.repeat-5`). Each must be a distinct run whose one
-summary shows exactly the changed tests the selection owns, all passing; the
-receipt then carries the five-pass stability proof that park requires.
-Short, failed, reused or mismatched log sets are refused.
+Optional `repeat_log_paths` records additional independent runs; no repeat
+count is required. Each supplied log must be a distinct passing run of the
+owned tests. Short, failed, reused or mismatched logs are refused.
 A failed recorded retry removes
 that exact command's previous receipt. An active worker run refuses recording.
 The action writes the normal worker-check receipt key and adds

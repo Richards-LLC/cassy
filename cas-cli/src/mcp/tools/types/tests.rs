@@ -78,41 +78,19 @@ fn test_task_create_request_full() {
 }
 
 #[test]
-fn task_risk_requires_a_declaration_for_code_tasks() {
-    let error = validate_task_risk_declaration(
-        cas_types::TaskType::Task,
-        None,
-        None,
-        false,
-        false,
-        None,
-    )
-    .expect_err("code-bearing task creates must declare risk");
-}
-
-#[test]
-fn blast_radius_requires_proof_targets_and_normalizes_them() {
-    let error = validate_task_risk_declaration(
-        cas_types::TaskType::Feature,
-        Some("blast-radius"),
-        None,
-        false,
-        false,
-        None,
-    )
-    .expect_err("blast-radius without proof targets must be rejected");
-    assert!(error.contains("proof_targets"), "{error}");
-
-    let (_, targets) = validate_task_risk_declaration(
-        cas_types::TaskType::Feature,
-        Some("blast-radius"),
-        Some(" task_tools, lifecycle, task_tools "),
-        false,
-        false,
-        None,
-    )
-    .expect("declared proof targets should parse");
+fn task_risk_and_targets_are_optional_but_supplied_values_are_parsed() {
+    for task_type in [cas_types::TaskType::Task, cas_types::TaskType::Bug, cas_types::TaskType::Feature] {
+        let (risk, targets) = validate_task_risk_declaration(task_type, None, None, false, false, None).unwrap();
+        assert!(risk.is_empty() && targets.is_empty());
+        let (risk, targets) = validate_task_risk_declaration(task_type, Some("blast-radius"), None, false, false, None).unwrap();
+        assert_eq!(risk, [cas_types::TaskRisk::BlastRadius]);
+        assert!(targets.is_empty());
+    }
+    let (_, targets) = validate_task_risk_declaration(cas_types::TaskType::Feature,
+        Some("blast-radius"), Some(" task_tools, lifecycle, task_tools "), false, false, None).unwrap();
     assert_eq!(targets, ["task_tools", "lifecycle"]);
+    assert!(validate_task_risk_declaration(cas_types::TaskType::Task,
+        Some("unknown"), None, false, false, None).is_err());
 }
 
 #[test]

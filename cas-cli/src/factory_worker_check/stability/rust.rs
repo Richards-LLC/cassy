@@ -362,13 +362,6 @@ pub(crate) fn owners(repo: &Path, head: &str, tests: &[Identity]) -> Result<BTre
     Ok(owners)
 }
 
-pub(in crate::factory_worker_check) fn parameterized_tests(repo: &Path, head: &str, tests: &[Identity]) -> Result<Vec<Test>> {
-    let paths = tests.iter().filter(|test| test.path.ends_with(".rs")).map(|test| test.path.clone())
-        .collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
-    Ok(inventory(repo, head, &paths)?.0.into_iter()
-        .filter(|test| test.parameterized && tests.contains(&test.identity)).collect())
-}
-
 pub(crate) fn changed(repo: &Path, base: &str, head: &str, paths: &[String]) -> Result<Vec<Test>> {
     Discovery::default().changed(repo, base, head, paths)
 }
@@ -425,13 +418,6 @@ pub(crate) fn selected(repo: &Path, base: &str, head: &str, test: &TargetedTest)
     Ok(selected_inputs(repo, base, head, test)?.0)
 }
 
-pub(crate) fn repeat_filter(tests: &[Test]) -> String {
-    tests.iter().map(|test| if test.parameterized {
-        format!("test(/^{}(?:::|$)/)", regex::escape(&test.identity.name))
-    }
-        else { format!("test(={})", test.identity.name) }).collect::<Vec<_>>().join(" | ")
-}
-
 /// A broader selection can fail without breaking an owned test's existing
 /// streak. Restore only stability, never a PASS for that failed selection.
 pub(crate) fn restore_passing(cas_root: &Path, repo: &Path, head: &str,
@@ -468,41 +454,6 @@ pub(crate) fn restore_passing(cas_root: &Path, repo: &Path, head: &str,
         if !proof.tests.is_empty() { super::record(cas_root, repo, head, proof)?; }
     }
     Ok(())
-}
-
-/// All five attempts stay in the original capped process and builder slot.
-/// The first selection keeps existing coverage; only owned tests repeat.
-pub(crate) fn wrap(command: Command, test: &TargetedTest, tests: &[Test], count: &Path) -> Command {
-    let mut args = vec!["nextest".to_owned(), "run".into(), "-p".into(), test.package.clone()];
-    if let Some(harness) = &test.harness { args.extend(["--test".into(), harness.clone()]); }
-    else { args.push("--lib".into()); }
-    args.extend(["--retries".into(), "0".into(), "-E".into(), repeat_filter(tests)]);
-    let mut wrapper = Command::new("bash");
-    wrapper.args(["-c", r#"
-verified=$1
-count_file=$2
-extra_count=$3
-shift 3
-extra=("${@:1:extra_count}")
-shift "$extra_count"
-"$@" || exit $?
-cp "$count_file" "$count_file.initial" || exit $?
-trap 'rm -f "$count_file.initial"' EXIT
-original_log=${VERIFIED_TEST_LOG:-}
-for attempt in 2 3 4 5; do
-    if [ -n "$original_log" ]; then export VERIFIED_TEST_LOG="$original_log.repeat-$attempt"; fi
-    bash -c "$verified" worker-repeat "${extra[@]}" || exit $?
-done
-mv "$count_file.initial" "$count_file" || exit $?
-"#, "worker-stability"])
-        .arg(include_str!("../../../../scripts/run-verified-tests.sh"))
-        .arg(count).arg(args.len().to_string()).args(args)
-        .arg(command.get_program()).args(command.get_args());
-    if let Some(directory) = command.get_current_dir() { wrapper.current_dir(directory); }
-    for (key, value) in command.get_envs() {
-        if let Some(value) = value { wrapper.env(key, value); } else { wrapper.env_remove(key); }
-    }
-    wrapper
 }
 
 #[cfg(test)]

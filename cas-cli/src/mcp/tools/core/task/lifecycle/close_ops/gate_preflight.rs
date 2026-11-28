@@ -151,7 +151,7 @@ impl CasCore {
         }
         lines.push("Dead code: park names every function, method, export, type or CSS class the delivery leaves without a caller; delete it or keep its caller.".to_string());
         if !receipt_scope::workspace_package_dirs(&repo).is_empty() {
-            lines.push("Focused proof: each changed Rust crate needs a passing capped test receipt at the tip.".to_string());
+            lines.push("Proof: green lane CI on the exact tip plus named tests; missing local receipts warn.".to_string());
         }
         if qa.evidence_gate {
             lines.push(format!(
@@ -197,7 +197,6 @@ impl CasCore {
             }
         }
         match task.execution_note.as_deref() {
-            Some("test-first") => lines.push("Method: test-first requires a capped failing test at the start base or a committed red checkpoint before the fix, or a capped compile failure at the start base.".to_string()),
             Some("additive-only") => lines.push("Method: additive-only refuses modified, deleted or renamed files.".to_string()),
             Some("value-only") => lines.push("Method: value-only refuses added, deleted, copied or renamed files.".to_string()),
             _ => {}

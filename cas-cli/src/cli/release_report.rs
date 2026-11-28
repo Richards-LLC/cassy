@@ -420,7 +420,7 @@ fn pipeline_latency_section(evidence: &ReleaseEvidence) -> String {
             "Within budget: every measured stage met its budget in scripts/release-stage-budgets.json.\n\n",
         ),
         Some(_) => output.push_str(&format!(
-            "FAILED: {} over budget. {}. Post-publication files a P0 task for each over-budget release.\n\n",
+            "FAILED: {} over budget. {}. Misses are reported in the nightly scorecard; no tasks are auto-filed.\n\n",
             over.len(),
             over.iter()
                 .map(|(stage, seconds)| format!(

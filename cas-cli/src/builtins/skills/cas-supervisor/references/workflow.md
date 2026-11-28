@@ -34,7 +34,7 @@ A worker cannot recover a goal or a proof method the brief never named, so fill 
 | Scope: files to edit, and what is off-limits | `description` (or `design`) |
 | Acceptance: the observable pass condition | `acceptance_criteria` |
 | Proof expected: the touched tests; never name suites or evals | `proof_targets`, `demo_statement`, or the named command or grep in `acceptance_criteria` |
-| Test plan: extend one existing test; assert behaviour, ids or codes; no message/text assertions; failing-first ([Fewest tests](../../cas-writing-tests/SKILL.md#fewest-tests)) | `acceptance_criteria` or `design` |
+| Test plan: extend one existing test; assert behaviour, ids or codes; no message/text assertions; failing-first is optional ([Fewest tests](../../cas-writing-tests/SKILL.md#fewest-tests)) | `acceptance_criteria` or `design` |
 
 A brief names a full or stress run only as a named, justified exception.
 
@@ -152,7 +152,10 @@ Workers commit directly and close their own tasks. Review their commits, then ap
 
 ### Lessons must remove causes
 
-Fix a recurring failure on the highest rung that fits: a default or auto-fix, then a seconds-long preflight, then a gate row, prose last. A lesson learned twice needs an open P0/P1 task that removes the cause, not another note. Tag lessons `operation:release-cut|spawn|report|epic-close`; starting that operation surfaces them.
+Fix recurring Cassy friction at the source as a default, auto-fix or warning.
+A new blocking gate needs operator sign-off or must replace a deleted gate.
+One manual workaround is fine; file only when it recurs. Upkeep is generated
+or warned at release prep, never a park refusal.
 
 ## Handling Blockers
 
@@ -178,25 +181,6 @@ with `scripts/release.sh --hotfix`.
 <!-- cas-src:else -->
 as a hotfix release.
 <!-- cas-src:end -->
-
-## Before freeze
-
-<!-- cas-src:begin -->
-At the exact train tip, `train_freeze` dispatches or adopts `full-validation.yml`
-and returns its run URL (train branches have no push CI). Read green for that
-SHA. If no run is reported, read its skip/failure reason; the manual command is
-`gh workflow run full-validation.yml --ref <train branch>`. On that tip run
-`cargo tree -i aws-lc-rs --target x86_64-unknown-linux-gnu` (empty graph), capped
-`cargo nextest run -p cas --lib -E 'test(gates::registry_tests)'`, and
-`python3 scripts/check-test-shape.py`. Lint the committed
-notes with `python3 scripts/release-train-announce.py --lint <draft>`.
-<!-- cas-src:end -->
-
-Draft, commit and lint notes while jobs run, before the suite goes green. Once
-frozen, inspect suite jobs between short reminders until terminal; do not wait
-blind on a long reminder or use a blocking watch. A newer tip needs its own proof.
-
-Lift a release freeze on your own train with `factory action=train_freeze id=<train> decision=lift reason="<why>"` only when a Cassy gate blocks the cut on a green frozen tip or the operator asked for new work in the release, never as a CI hold. The lift is recorded on the train and sent to the operator; a freeze the operator applied in Commander (or one from before supervisor lifts existed) stays theirs unless they set `release.supervisor_lifts_operator_freeze`.
 
 ## Queue precheck
 

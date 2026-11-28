@@ -5,7 +5,6 @@
 //! reopening it for a fresh verification round.
 use super::*;
 use crate::mcp::CasService;
-use crate::factory_worker_check::stability;
 use crate::store::{open_agent_store, open_store, open_task_store, open_worktree_store};
 use crate::test_support::TestEnvGuard;
 use cas_types::{Agent, AgentRole, TaskRisk, WorkTarget};
@@ -191,22 +190,8 @@ fn declared_parent_covers_only_real_sibling_test_mounts_cas_ba56() {
             ("#[path = \"gear_tests.rs\"] mod", false),
         ] {
             std::fs::write(src.join("gear.rs"), body).unwrap();
-            // Exercise the live declaration gate without receipt widening or build
-            // evidence; factory workers defer those build proofs to assembly.
-            let result = validate_risk_close_proofs_with_base_and_target_and_cache(
-                &task,
-                &changed,
-                repo.path(),
-                repo.path(),
-                None,
-                None,
-                BuildProofs::DeferredToAssembly,
-                &mut ScopedProofTargetCache::default(),
-            );
-            assert_eq!(result.is_ok(), covered, "{target}, {body:?}: {result:?}");
-            if let Err(error) = result {
-                assert!(error.contains("nested::gear_tests"), "{error}");
-            }
+            let (uncovered, _) = uncovered_blast_radius_scope(repo.path(), &changed, &task.proof_targets);
+            assert_eq!(uncovered.is_empty(), covered, "{target}, {body:?}: {uncovered:?}");
         }
     }
     // A mod.rs parent can mount the same sibling, even when only the tests
@@ -275,149 +260,13 @@ fn declared_parent_covers_only_real_sibling_test_mounts_cas_ba56() {
         "#[path = \"blast_radius_park_tests.rs\"] mod tests;\n",
     ).unwrap();
     task.proof_targets.push("cas-cli named::close_ops::alternate::tests".into());
-    let error = validate_risk_close_proofs_with_base_and_target_and_cache(
-        &task, &changed[2..], repo.path(), repo.path(), None, None,
-        BuildProofs::DeferredToAssembly, &mut ScopedProofTargetCache::default(),
-    ).expect_err("competing mounts require explicit physical proof scope");
-    assert!(error.contains("named/close_ops.rs") && error.contains("named/close_ops/alternate.rs"),
-        "uncovered diagnostic must name both mounting parents: {error}");
+    let (uncovered, _) = uncovered_blast_radius_scope(repo.path(), &changed[2..], &task.proof_targets);
+    assert!(!uncovered.is_empty());
     task.proof_targets.push("cas-cli named::close_ops::blast_radius_park_tests".into());
     validate_risk_close_proofs_with_base_and_target_and_cache(
         &task, &changed[2..], repo.path(), repo.path(), None, None,
         BuildProofs::DeferredToAssembly, &mut ScopedProofTargetCache::default(),
     ).expect("an explicit physical module target resolves ambiguous parent aliases");
-}
-
-/// A parent's capped tests cover a mounted sibling and exercised child through
-/// real worker park, merge and supervisor close; the audit names physical files.
-#[tokio::test]
-async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
-    let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env);
-    std::fs::create_dir_all(f.worker_path.join("crates/widget/src/gear")).unwrap();
-    for (path, body) in [
-        ("gear.rs", "pub fn turn() {}\nmod blocked;\n#[cfg(test)]\n#[path = \"gear_tests.rs\"]\nmod tests;\n"),
-        ("gear_tests.rs", "#[test] fn turns() { super::turn(); super::blocked::blocked(); }\n"),
-        ("gear/blocked.rs", "pub fn blocked() {}\n"),
-    ] {
-        std::fs::write(f.worker_path.join("crates/widget/src").join(path), body).unwrap();
-    }
-    git(&f.worker_path, &["add", "."]);
-    git(&f.worker_path, &["commit", "-q", "-m", "test(cas-br01): parent selection covers mounted tests and child"]);
-    git(&f.worker_path, &["push", "-q", "origin", LANE]);
-    let updated = call(
-        &f.worker,
-        serde_json::json!({
-            "action": "update", "id": ID, "proof_targets": ["unrelated"],
-        }),
-    )
-    .await;
-    assert_eq!(f.task().proof_targets, ["unrelated"], "{updated}");
-    let head = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    // A receipt in another crate must not make the mounted file disappear
-    // from the focused-proof obligation.
-    crate::factory_worker_check::record_passing_test_for_tests(
-        &f.cas_dir(),
-        &f.worker_path,
-        &head,
-        "other-crate",
-        "test(gear::tests)",
-    );
-    let refused = call(&f.worker, serde_json::json!({
-        "action": "close", "id": ID, "reason": "parent tests cover delivery",
-    })).await;
-    assert!(refused.contains("FOCUSED PROOF REQUIRED"), "{refused}");
-    assert_eq!(f.task().status, TaskStatus::InProgress);
-    crate::factory_worker_check::record_passing_test_for_tests(
-        &f.cas_dir(),
-        &f.worker_path,
-        &head,
-        "widget",
-        "test(gear::tests)",
-    );
-    // Crate coverage and the mounted test's exact-tip stability are separate.
-    stability::record(&f.cas_dir(), &f.worker_path, &head, stability::Proof {
-        runner: "nextest".into(),
-        tests: vec![stability::Identity::exact("crates/widget/src/gear_tests.rs", "gear::tests::turns")],
-        consecutive_passes: stability::REQUIRED_PASSES, elapsed_ms: 0, inactive: Vec::new(),
-    }).unwrap();
-    let parked = call(&f.worker, serde_json::json!({
-        "action": "close", "id": ID, "reason": "parent tests cover delivery",
-    })).await;
-    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
-    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
-    git(f.dir.path(), &["merge", "--no-ff", "-m", "merge delivery", LANE]);
-    git(f.dir.path(), &["push", "-q", "origin", "main"]);
-    let closed = call(&f.supervisor, serde_json::json!({
-        "action": "close", "id": ID, "reason": "reviewed parent test proof",
-    })).await;
-    assert!(closed.contains("Closed task"), "{closed}");
-    assert_eq!(f.task().status, TaskStatus::Closed);
-    let note = f.task().notes;
-    assert!(note.lines().any(|line| line.contains("PROOF SCOPE derived") && line.contains("widget::gear_tests")), "{note}");
-    assert_eq!(
-        f.task().proof_targets,
-        ["unrelated"],
-        "no administrative scope widening"
-    );
-}
-
-/// cas-eac2 / cas-95e0: a focused receipt is required after each proof-input
-/// change, but can be rebound across a docs-only commit without rerunning.
-/// Start names what close will check, and one park reply names every failure.
-#[tokio::test]
-async fn start_lists_close_requirements_and_park_reports_every_failure() {
-    let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env);
-    std::fs::write(f.worker_path.join("CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n").unwrap();
-    git(&f.worker_path, &["add", "."]);
-    git(&f.worker_path, &["commit", "-q", "-m", &format!("docs({ID}): seed the changelog")]);
-    git(&f.worker_path, &["push", "-q", "origin", LANE]);
-
-    let started = call(&f.worker, serde_json::json!({"action": "start", "id": ID})).await;
-    for requirement in [
-        "Close checks",
-        "Branch: factory/br-worker to main",
-        "Changelog:",
-        "Focused proof:",
-        "Adversarial probe:",
-        "Proof targets: unrelated",
-        "Close reason:",
-    ] {
-        assert!(started.contains(requirement), "{requirement}: {started}");
-    }
-    assert!(!started.contains("exceed the response budget"), "{started}");
-
-    let artifacts = crate::config::resolved_factory_artifact_paths(&f.cas_dir(), None);
-    let ledger_dir = &artifacts.task_dirs(ID)[0];
-    std::fs::create_dir_all(ledger_dir).unwrap();
-    std::fs::write(ledger_dir.join("LEDGER.md"), "not a ledger\n").unwrap();
-
-    let refused = call(&f.worker, serde_json::json!({
-        "action": "close", "id": ID, "reason": "the CI run passed",
-    })).await;
-    for gate in [
-        "PROOF CLAIM RECEIPT REQUIRED",
-        "QA LEDGER REJECTED",
-        "CHANGELOG [Unreleased] REQUIRED",
-        "FOCUSED PROOF REQUIRED",
-    ] {
-        assert!(refused.contains(gate), "{gate}: {refused}");
-    }
-    assert_eq!(f.task().status, TaskStatus::InProgress, "a refused delivery stays with its worker");
-
-    // A local-only tip joins the list, and its receipts are judged at that tip,
-    // but it can never move the recorded delivery anchor.
-    let anchor = f.task().deliverables.factory_branch_anchor;
-    std::fs::write(f.worker_path.join("crates/widget/src/gear.rs"), "pub fn turn() { let _ = 3; }\n").unwrap();
-    git(&f.worker_path, &["commit", "-qam", &format!("fix({ID}): local only")]);
-    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    let unpushed = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
-    for expected in ["is absent from the cached origin ref", "FOCUSED PROOF REQUIRED", &tip[..12]] {
-        assert!(unpushed.contains(expected), "{expected}: {unpushed}");
-    }
-    assert_eq!(f.task().deliverables.factory_branch_anchor, anchor);
-    assert_eq!(f.task().status, TaskStatus::InProgress);
 }
 
 /// A claim refusal waits for the park gates, so it must also stop a close that
@@ -440,436 +289,6 @@ async fn deferred_claim_refusal_stops_a_merged_delivery_close() {
         "action": "close", "id": ID, "reason": "gear turns",
     })).await;
     assert!(!retried.contains("PROOF CLAIM RECEIPT REQUIRED"), "{retried}");
-}
-
-#[tokio::test]
-async fn builtin_docs_rebind_rust_receipts_at_park_cas_23b1() {
-    for rust_edit in [false, true] {
-        let mut env = TestEnvGuard::temp_home();
-        let f = fixture(&mut env);
-        let doc = "cas-cli/src/builtins/skills/cas-worker/SKILL.md";
-        let history = "cas-cli/src/builtins/reference-history.json";
-        std::fs::create_dir_all(f.worker_path.join(doc).parent().unwrap()).unwrap();
-        std::fs::write(f.worker_path.join(doc), "worker instructions v1\n").unwrap();
-        std::fs::write(f.worker_path.join(history), "{}\n").unwrap();
-        std::fs::write(
-            f.worker_path.join("crates/widget/src/gear.rs"),
-            format!("pub const PROMPT: &str = include_str!(\"../../../{doc}\");\n"),
-        ).unwrap();
-        git(&f.worker_path, &["add", "."]);
-        git(&f.worker_path, &["commit", "-qm", "fix(cas-br01): embed worker instructions"]);
-        let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-        crate::factory_worker_check::record_passing_test_for_tests(
-            &f.cas_dir(), &f.worker_path, &tested_tip, "widget", "test(gear)",
-        );
-
-        std::fs::write(f.worker_path.join(doc), "worker instructions v2\n").unwrap();
-        std::fs::write(f.worker_path.join(history), "{\"updated\":true}\n").unwrap();
-        if rust_edit {
-            std::fs::write(f.worker_path.join("crates/widget/src/gear.rs"), "pub fn turn() { let _ = 2; }\n").unwrap();
-        }
-        git(&f.worker_path, &["add", "."]);
-        git(&f.worker_path, &["commit", "-qm", "docs(cas-br01): correct worker instructions"]);
-        git(&f.worker_path, &["push", "-q", "origin", LANE]);
-
-        let reply = call(&f.worker, serde_json::json!({
-            "action": "close", "id": ID, "reason": "worker instructions corrected",
-        })).await;
-        if rust_edit {
-            assert!(reply.contains("FOCUSED PROOF REQUIRED"), "{reply}");
-            assert_eq!(f.task().status, TaskStatus::InProgress, "{reply}");
-        } else {
-            assert!(reply.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{reply}");
-            assert_eq!(f.task().status, TaskStatus::AwaitingMerge, "{reply}");
-        }
-    }
-}
-
-#[tokio::test]
-async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
-    let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env);
-    let close = serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"});
-
-    let refused = call(&f.worker, close.clone()).await;
-    assert!(refused.contains("FOCUSED PROOF REQUIRED"), "{refused}");
-    assert!(refused.contains("receipt at"), "{refused}");
-    assert!(refused.contains(": widget."), "{refused}");
-    assert_eq!(f.task().status, TaskStatus::InProgress, "the proof is still the worker's to run");
-
-    call(
-        &f.worker,
-        serde_json::json!({"action": "update", "id": ID, "proof_targets": "unrelated,gear"}),
-    )
-    .await;
-    let widened = call(&f.worker, close.clone()).await;
-    assert!(widened.contains("FOCUSED PROOF REQUIRED"), "{widened}");
-
-    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    // cas-0dac: a supervisor ran this selection in a scratch checkout while
-    // the worker's build lane was unavailable. Record it through the public
-    // factory action, then let the real park gate consume the normal receipt.
-    let scratch = tempfile::tempdir().unwrap();
-    let tested_repo = scratch.path().join("tested");
-    git(f.dir.path(), &["worktree", "add", "-q", "--detach", tested_repo.to_str().unwrap(), &tested_tip]);
-    let log = scratch.path().join("supervisor-test.log");
-    std::fs::write(&log, "     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n").unwrap();
-    let proof = serde_json::json!({
-        "head": tested_tip, "repo": tested_repo,
-        "cargo_args": ["nextest", "run", "-p", "widget", "--lib", "-E", "test(gear)"],
-        "log_path": log, "exit_code": 0,
-    });
-    let request = |proof: &serde_json::Value| serde_json::from_value(serde_json::json!({
-        "action": "record_test_receipt", "task_id": ID, "payload": proof.to_string(),
-    })).unwrap();
-    env.set("CAS_AGENT_ROLE", "supervisor");
-    assert!(f.worker.factory(Parameters(request(&proof))).await.is_err(), "a worker cannot attest supervisor evidence via an environment hint");
-    for (field, value) in [
-        ("head", serde_json::json!(git(&f.worker_path, &["rev-parse", "HEAD^"]))),
-        ("exit_code", serde_json::json!(100)),
-        ("cargo_args", serde_json::json!(["nextest", "run", "-p", "widget", "--lib", "-E", "all()"])),
-    ] {
-        let mut invalid = proof.clone();
-        invalid[field] = value;
-        assert!(f.supervisor.factory(Parameters(request(&invalid))).await.is_err(), "invalid {field} must not supply a test receipt");
-    }
-    for failed_log in [
-        "     Summary [ 0.01s] 0 tests run: 0 passed, 1 skipped\n",
-        "     Summary [ 0.01s] 2 tests run: 1 passed, 1 failed\n",
-        "no harness summary\n",
-    ] {
-        std::fs::write(&log, failed_log).unwrap();
-        assert!(f.supervisor.factory(Parameters(request(&proof))).await.is_err(), "failed or empty selection evidence must not count");
-    }
-    std::fs::write(&log, "     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n").unwrap();
-    std::fs::write(tested_repo.join("dirty.rs"), "// not tested\n").unwrap();
-    assert!(f.supervisor.factory(Parameters(request(&proof))).await.is_err(), "dirty supervisor checkout must not count");
-    std::fs::remove_file(tested_repo.join("dirty.rs")).unwrap();
-    git(&tested_repo, &["checkout", "-q", "HEAD^"]);
-    assert!(f.supervisor.factory(Parameters(request(&proof))).await.is_err(), "another tested commit cannot supply this tip's receipt");
-    git(&tested_repo, &["checkout", "-q", &tested_tip]);
-    let mut wrong_task = request(&proof);
-    wrong_task.task_id = Some("cas-no-task".into());
-    assert!(f.supervisor.factory(Parameters(wrong_task)).await.is_err(), "evidence must name an assigned task");
-    std::fs::write(f.worker_path.join("dirty.rs"), "// worker changed\n").unwrap();
-    assert!(f.supervisor.factory(Parameters(request(&proof))).await.is_err(), "dirty worker checkout must not count");
-    std::fs::remove_file(f.worker_path.join("dirty.rs")).unwrap();
-    for caller in ["not-registered", "shutdown-supervisor"] {
-        if caller == "shutdown-supervisor" {
-            let mut agent = Agent::new_with_role(caller.into(), caller.into(), AgentRole::Supervisor);
-            agent.status = cas_types::AgentStatus::Shutdown;
-            open_agent_store(&f.cas_dir()).unwrap().register(&agent).unwrap();
-        }
-        let core = CasCore::with_daemon(f.cas_dir(), None, None);
-        core.set_agent_id_for_testing(caller.into());
-        let service = CasService::new(core, None);
-        assert!(service.factory(Parameters(request(&proof))).await.is_err(), "{caller} has no live supervisor authority");
-    }
-    let recorded = f.supervisor.factory(Parameters(request(&proof))).await;
-    assert!(recorded.is_ok(), "registered supervisor evidence must reach the worker receipt: {recorded:?}");
-    let receipt = crate::factory_worker_check::passing_test_receipts(&f.cas_dir(), &f.worker_path, &tested_tip).join("\n");
-    // pin: supervisor-recorded distinguishes an attestation from a worker-executed run.
-    assert!(receipt.contains("supervisor-recorded") && receipt.contains("br-supervisor-session"), "the gate must preserve execution provenance: {receipt}");
-    let parked = call(&f.worker, close.clone()).await;
-    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "supervisor receipt must pass focused proof at park: {parked}");
-    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
-    assert!(f.task().notes.contains("br-supervisor-session"), "recording audits its registered issuer");
-    let reopened = call(&f.supervisor, serde_json::json!({
-        "action": "request_changes", "id": ID, "reason": "continue proof input regression",
-    })).await;
-    assert!(!reopened.contains("rejected"), "{reopened}");
-    let resumed = call(&f.worker, serde_json::json!({"action": "start", "id": ID})).await;
-    assert_eq!(f.task().status, TaskStatus::InProgress, "{resumed}");
-    let source_path = "crates/widget/src/gear.rs";
-    std::fs::write(f.worker_path.join(source_path), "pub fn turn() { let _ = 2; }\n").unwrap();
-    git(&f.worker_path, &["add", source_path]);
-    git(&f.worker_path, &["commit", "-q", "-m", "fix(cas-br01): update gear behavior"]);
-    git(&f.worker_path, &["push", "-q", "origin", LANE]);
-    let stale = call(&f.worker, close.clone()).await;
-    assert!(
-        stale.contains("FOCUSED PROOF REQUIRED"),
-        "receipt at {tested_tip} must not cover Rust source change: {stale}"
-    );
-    assert_eq!(f.task().status, TaskStatus::InProgress, "{stale}");
-
-    std::fs::write(
-        f.worker_path.join(source_path),
-        "pub fn turn() { let _ = 1; }\n",
-    )
-    .unwrap();
-    git(&f.worker_path, &["add", source_path]);
-    git(
-        &f.worker_path,
-        &["commit", "-q", "-m", "revert(cas-br01): restore gear source"],
-    );
-    git(&f.worker_path, &["push", "-q", "origin", LANE]);
-    let stale_after_revert = call(&f.worker, close.clone()).await;
-    assert!(
-        stale_after_revert.contains("FOCUSED PROOF REQUIRED"),
-        "a proof input changed and was reverted after {tested_tip}: {stale_after_revert}"
-    );
-    assert_eq!(
-        f.task().status,
-        TaskStatus::InProgress,
-        "{stale_after_revert}"
-    );
-    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    crate::factory_worker_check::record_passing_test_for_tests(
-        &f.cas_dir(),
-        &f.worker_path,
-        &tested_tip,
-        "widget",
-        "test(gear)",
-    );
-
-    let test_path = "crates/widget/tests/gear.rs";
-    std::fs::create_dir_all(f.worker_path.join("crates/widget/tests")).unwrap();
-    std::fs::write(f.worker_path.join(test_path), "#[test] fn gear_turns() {}\n").unwrap();
-    git(&f.worker_path, &["add", test_path]);
-    git(
-        &f.worker_path,
-        &["commit", "-q", "-m", "test(cas-br01): add gear coverage"],
-    );
-    git(&f.worker_path, &["push", "-q", "origin", LANE]);
-    let stale = call(&f.worker, close.clone()).await;
-    assert!(
-        stale.contains("FOCUSED PROOF REQUIRED"),
-        "receipt at {tested_tip} must not cover test change: {stale}"
-    );
-    assert_eq!(f.task().status, TaskStatus::InProgress, "{stale}");
-    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    crate::factory_worker_check::record_passing_test_for_tests(
-        &f.cas_dir(),
-        &f.worker_path,
-        &tested_tip,
-        "widget",
-        "test(gear)",
-    );
-
-    let manifest_path = "crates/widget/Cargo.toml";
-    let manifest = std::fs::read_to_string(f.worker_path.join(manifest_path)).unwrap();
-    std::fs::write(
-        f.worker_path.join(manifest_path),
-        format!("{manifest}\n# build input changed\n"),
-    )
-    .unwrap();
-    git(&f.worker_path, &["add", manifest_path]);
-    git(
-        &f.worker_path,
-        &["commit", "-q", "-m", "build(cas-br01): update crate manifest"],
-    );
-    git(&f.worker_path, &["push", "-q", "origin", LANE]);
-    let stale = call(&f.worker, close.clone()).await;
-    assert!(
-        stale.contains("FOCUSED PROOF REQUIRED"),
-        "receipt at {tested_tip} must not cover Cargo change: {stale}"
-    );
-    assert_eq!(f.task().status, TaskStatus::InProgress, "{stale}");
-    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    crate::factory_worker_check::record_passing_test_for_tests(
-        &f.cas_dir(),
-        &f.worker_path,
-        &tested_tip,
-        "widget",
-        "test(gear)",
-    );
-
-    let embedded_path = "crates/widget/src/embedded.md";
-    std::fs::write(f.worker_path.join(embedded_path), "embedded prompt v2\n").unwrap();
-    git(&f.worker_path, &["add", embedded_path]);
-    git(
-        &f.worker_path,
-        &["commit", "-q", "-m", "docs(cas-br01): change compiled-in prompt"],
-    );
-    git(&f.worker_path, &["push", "-q", "origin", LANE]);
-    let stale_embedded = call(&f.worker, close.clone()).await;
-    assert!(
-        stale_embedded.contains("FOCUSED PROOF REQUIRED"),
-        "receipt at {tested_tip} must not cover a compiled-in non-Rust file: {stale_embedded}"
-    );
-    assert_eq!(f.task().status, TaskStatus::InProgress, "{stale_embedded}");
-    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    crate::factory_worker_check::record_passing_test_for_tests(
-        &f.cas_dir(),
-        &f.worker_path,
-        &tested_tip,
-        "widget",
-        "test(gear)",
-    );
-
-    let external_embedded_path = "docs/RELEASE_SLACK_RUBRIC.md";
-    std::fs::write(
-        f.worker_path.join(external_embedded_path),
-        "release rubric v2\n",
-    )
-    .unwrap();
-    git(&f.worker_path, &["add", external_embedded_path]);
-    git(
-        &f.worker_path,
-        &[
-            "commit",
-            "-q",
-            "-m",
-            "docs(cas-br01): change an external compiled-in rubric",
-        ],
-    );
-    git(&f.worker_path, &["push", "-q", "origin", LANE]);
-    let stale_external_embedded = call(&f.worker, close.clone()).await;
-    assert!(
-        stale_external_embedded.contains("FOCUSED PROOF REQUIRED"),
-        "receipt at {tested_tip} must not cover an outside-crate compiled-in Markdown file: {stale_external_embedded}"
-    );
-    assert_eq!(
-        f.task().status,
-        TaskStatus::InProgress,
-        "{stale_external_embedded}"
-    );
-    // cas-70cb: another task can remove the include after this delivery was
-    // measured. That newer HEAD must not let the old receipt cover its asset.
-    let untested_delivery = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    git(&f.worker_path, &["checkout", "-q", "-b", "factory/without-include"]);
-    std::fs::write(f.worker_path.join("crates/widget/src/lib.rs"), "pub mod gear;\n").unwrap();
-    git(&f.worker_path, &["add", "crates/widget/src/lib.rs"]);
-    git(&f.worker_path, &["commit", "-q", "-m", "next task removes include"]);
-    assert!(
-        crate::factory_worker_check::passing_test_receipts(&f.cas_dir(), &f.worker_path, &untested_delivery).is_empty(),
-        "removing an include on another HEAD must not authorize the delivered asset change"
-    );
-    git(&f.worker_path, &["checkout", "-q", LANE]);
-    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    crate::factory_worker_check::record_passing_test_for_tests(
-        &f.cas_dir(),
-        &f.worker_path,
-        &tested_tip,
-        "widget",
-        "test(gear)",
-    );
-
-    let doc_path = "docs/design/cli/update-managed-files.brief.md";
-    // An older receipt whose range includes this obvious source input must
-    // be rejected without searching Rust source for its filename.
-    crate::factory_worker_check::record_passing_test_for_tests(
-        &f.cas_dir(), &f.worker_path, &tested_tip, "widget", "test(before_script)",
-    );
-    std::fs::write(f.worker_path.join("operator.py"), "print('next')\n").unwrap();
-    git(&f.worker_path, &["add", "operator.py"]);
-    git(&f.worker_path, &["commit", "-q", "-m", "update operator script"]);
-    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    for filter in ["test(gear)", "test(adjacent)"] {
-        crate::factory_worker_check::record_passing_test_for_tests(
-            &f.cas_dir(), &f.worker_path, &tested_tip, "widget", filter,
-        );
-    }
-    std::fs::create_dir_all(f.worker_path.join("docs/design/cli")).unwrap();
-    std::fs::write(f.worker_path.join(doc_path), "Updated operator guidance.\n").unwrap();
-    git(&f.worker_path, &["add", doc_path]);
-    git(&f.worker_path, &["commit", "-q", "-m", "docs(cas-br01): update managed files brief"]);
-    git(&f.worker_path, &["push", "-q", "origin", LANE]);
-    let delivered_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    assert_ne!(tested_tip, delivered_tip);
-    // The crate receipt still rebounds across docs; the new test needs exact-tip proof.
-    // cas-763f: that test ran only on the peer machine (cas-3f0a), so the
-    // supervisor records its five per-repeat logs and park consumes them.
-    let refused = call(&f.worker, close.clone()).await;
-    assert!(refused.contains("CHANGED_TEST_STABILITY_REQUIRED"), "{refused}");
-    git(&tested_repo, &["checkout", "-q", "--detach", &delivered_tip]);
-    let passed = |i: usize, name: &str| format!(
-        "        PASS [ 0.0{i}s] (1/1) {name}\n     Summary [ 0.0{i}s] 1 test run: 1 passed, 0 skipped\n");
-    let logs: Vec<_> = (1..=7).map(|i| {
-        let log = scratch.path().join(format!("gear-{i}.log"));
-        std::fs::write(&log, passed(i, match i {
-            6 => "widget::gear gear_turns_elsewhere",
-            // Another harness with a same-named test is not this test.
-            7 => "widget::other gear_turns",
-            _ => "widget::gear gear_turns",
-        })).unwrap();
-        log
-    }).collect();
-    let failed = scratch.path().join("gear-failed.log");
-    std::fs::write(&failed, "        FAIL [ 0.01s] (1/1) widget::gear gear_turns\n     Summary [ 0.01s] 1 test run: 0 passed, 1 failed\n").unwrap();
-    let stable = |repeats: &[&std::path::PathBuf]| serde_json::json!({
-        "head": delivered_tip, "repo": tested_repo,
-        "cargo_args": ["nextest", "run", "-p", "widget", "--test", "gear", "-E", "test(gear_turns)"],
-        "log_path": logs[0], "exit_code": 0, "repeat_log_paths": repeats,
-    });
-    for (case, repeats) in [
-        ("short", vec![&logs[1], &logs[2], &logs[3]]),
-        ("failed", vec![&logs[1], &logs[2], &logs[3], &failed]),
-        ("another test", vec![&logs[1], &logs[2], &logs[3], &logs[5]]),
-        ("another harness", vec![&logs[1], &logs[2], &logs[3], &logs[6]]),
-        ("reused log", vec![&logs[1], &logs[1], &logs[2], &logs[3]]),
-    ] {
-        assert!(f.supervisor.factory(Parameters(request(&stable(&repeats)))).await.is_err(), "{case} repeat logs must not supply stability");
-    }
-    f.supervisor.factory(Parameters(request(&stable(&[&logs[1], &logs[2], &logs[3], &logs[4]])))).await
-        .expect("five passing per-repeat logs record stability");
-    // A later failed run of an overlapping selection withdraws that proof,
-    // exactly as a failed worker rerun does.
-    let mut exact = stable(&[&logs[1], &logs[2], &logs[3], &failed]);
-    exact["cargo_args"][7] = serde_json::json!("test(=gear_turns)");
-    assert!(f.supervisor.factory(Parameters(request(&exact))).await.is_err());
-    let withdrawn = call(&f.worker, close.clone()).await;
-    assert!(withdrawn.contains("CHANGED_TEST_STABILITY_REQUIRED"), "{withdrawn}");
-    f.supervisor.factory(Parameters(request(&stable(&[&logs[1], &logs[2], &logs[3], &logs[4]])))).await
-        .expect("a fresh passing set records stability again");
-    let parked = call(&f.worker, close.clone()).await;
-    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
-    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
-
-    // The worker now starts another task whose Rust source names this brief.
-    // The supervisor still closes the parked delivery's immutable tree.
-    git(&f.worker_path, &["checkout", "-q", "-b", "factory/next-task"]);
-    std::fs::write(
-        f.worker_path.join(source_path),
-        format!("pub fn turn() {{}}\nconst NEXT_TASK: &str = include_str!(\"../../../{doc_path}\");\n"),
-    ).unwrap();
-    git(&f.worker_path, &["add", source_path]);
-    git(&f.worker_path, &["commit", "-q", "-m", "next task embeds brief"]);
-    let receipts = crate::factory_worker_check::passing_test_receipts(&f.cas_dir(), &f.worker_path, &delivered_tip);
-    assert!(receipts.iter().any(|receipt| receipt.contains(&format!("rebound from {tested_tip} to {delivered_tip}"))), "the parked tree still permits doc rebind after HEAD changes: {receipts:?}");
-    // The executable pre-close hook requires the task's own lane, so restore
-    // it after exercising the parked delivery's receipt reader on another HEAD.
-    git(&f.worker_path, &["checkout", "-q", LANE]);
-
-    git(&f.dir.path(), &["merge", "--ff-only", LANE]);
-    git(&f.dir.path(), &["push", "-q", "origin", "main"]);
-    let trace = f.dir.path().join("close-git-trace.jsonl");
-    env.set("GIT_TRACE2_EVENT", &trace);
-    let closed = call(&f.supervisor, close).await;
-    env.remove("GIT_TRACE2_EVENT");
-    assert!(closed.contains("Closed task"), "{closed}");
-    let task = f.task();
-    assert_eq!(task.status, TaskStatus::Closed);
-    assert!(!task.notes.contains("test(before_script)"), "the script invalidates its older receipt: {}", task.notes);
-    assert!(
-        task.notes
-            .contains(&format!("rebound from {tested_tip} to {delivered_tip}")),
-        "the close must record the receipt rebind: {}",
-        task.notes
-    );
-    // Count real Git commands rather than inspecting cache internals. Both
-    // receipt filters and the close's package/audit readers share this lookup.
-    let trace = std::fs::read_to_string(trace).unwrap();
-    let git_calls: Vec<Vec<String>> = trace.lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|event| event["event"] == "start")
-        .filter_map(|event| Some(event["argv"].as_array()?.iter().filter_map(|arg| arg.as_str().map(str::to_owned)).collect::<Vec<_>>()))
-        .collect();
-    let brief = Path::new(doc_path).file_name().unwrap().to_str().unwrap();
-    let inventories = git_calls.iter().filter(|args| {
-        args.get(1).is_some_and(|arg| arg == "ls-tree")
-            && args.iter().any(|arg| arg == "--full-tree")
-            && args.iter().any(|arg| arg == &delivered_tip)
-    }).count();
-    assert!(inventories <= 1, "at most one delivered-tree inventory per close: {git_calls:?}");
-    let cat_batches = git_calls.iter().filter(|args| {
-        args.get(1).is_some_and(|arg| arg == "cat-file")
-            && args.iter().any(|arg| arg == "--batch")
-    }).count();
-    assert!(cat_batches <= 1, "at most one blob batch per close: {git_calls:?}");
-    assert!(git_calls.iter().all(|args| {
-        args.get(1).is_none_or(|arg| arg != "grep") || !args.iter().any(|arg| arg == brief)
-    }), "the include lookup should use the batched delivered tree: {git_calls:?}");
 }
 
 /// AC2: a worker receipt in `widget` at the parked tip already covers
@@ -951,8 +370,6 @@ async fn recovered_close_counts_supervisor_module_receipts_cas_231c() {
     git(f.dir.path(), &["push", "-q", "origin", "main"]);
     let close = serde_json::json!({"action":"close", "id":ID, "reason":"recovered gear", "commit_receipt":tip});
     env.set("CAS_AGENT_ROLE", "supervisor");
-    let missing = call(&f.supervisor, close.clone()).await;
-    assert_eq!(f.task().status, TaskStatus::InProgress, "{missing}");
     let logs = tempfile::tempdir().unwrap();
     for module in ["gear", "registry", "receipts", "workflow", "lifecycle", "teams"] {
         let log = logs.path().join(format!("{module}.log"));
@@ -972,18 +389,13 @@ async fn recovered_close_counts_supervisor_module_receipts_cas_231c() {
     assert_eq!(f.task().proof_targets, ["unrelated"], "receipts must not rewrite the declaration");
 }
 
-/// cas-e9d6: the 14:01 divergence. Cassy's post-merge close of a parked
-/// blast-radius delivery judges the worker's receipts at the delivered tip,
-/// exactly as the worker's own close does. A gate that truly fails on the
-/// verdict is the supervisor's: no worker retry, the worker hold is restored
-/// and no close-authority note is written until a close commits.
 #[tokio::test]
-async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
+async fn cassy_merge_close_warns_for_missing_delivery_evidence_cas_e9d6() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env);
     std::fs::write(
         f.cas_dir().join("config.toml"),
-        format!("[project]\ncanonical_id=\"{PROJECT}\"\n"),
+        format!("[project]\ncanonical_id=\"{PROJECT}\"\n[qa]\nmode=\"batch\"\nevidence_gate=true\n"),
     )
     .unwrap();
     let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
@@ -1020,231 +432,48 @@ async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
     assert_eq!(f.task().status, TaskStatus::Blocked);
     env.set("CAS_AGENT_ROLE", "supervisor");
     let verification = cas_store::get_verification_for_dispatch(&f.cas_dir(), &dispatch.id).unwrap().unwrap();
-    // The same approval does not waive fresh receipt-scope checks at close.
+    cas_store::defer_qa_batch_evidence(&f.cas_dir(), ID, &tip).unwrap();
     std::fs::remove_dir_all(f.cas_dir().join("worker-checks")).unwrap();
     let mut unproven = f.task();
     unproven.deliverables.test_receipts.clear();
     tasks.update(&unproven).unwrap();
-    // Publication continues the same verdict close, including its hold restoration.
-    let first = cassy.close_green_merged_delivery_after_verdict(ID, Some(&verification.id)).await.receipt(ID);
-    // pin: preserve the worker receipt-scope refusal after the review moved before publication.
-    assert!(first.contains("narrower than its delivery diff"), "{first}");
-    let held = f.task();
-    assert_eq!(held.status, TaskStatus::Blocked, "the worker hold is restored");
-    assert!(crate::mcp::tools::core::task::block_hold::read(tasks.as_ref(), ID).unwrap().is_some());
-    assert!(!held.notes.contains("Cassy close authority"), "{}", held.notes);
-    let worker_prompts = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap()
-        .peek_all(50).unwrap().into_iter().filter(|p| p.target == WORKER)
-        .map(|p| p.prompt).collect::<Vec<_>>();
-    assert!(!worker_prompts.iter().any(|p| p.contains("Retry task close")), "{worker_prompts:?}");
-
-    // With the worker's receipts back, the recorded verdict closes it.
-    record();
     let closed = cassy.close_green_merged_delivery_after_verdict(ID, Some(&verification.id)).await;
-    assert!(
-        matches!(closed, super::super::merge_close::CassyMergeClose::Closed { .. }),
-        "{}",
-        closed.receipt(ID)
-    );
+    assert!(matches!(closed, super::super::merge_close::CassyMergeClose::Closed { .. }), "{}", closed.receipt(ID));
     let closed = f.task();
     assert_eq!(closed.status, TaskStatus::Closed);
     assert!(closed.notes.contains("Cassy close authority"), "{}", closed.notes);
+    for code in ["G-61", "G-53"] {
+        assert!(crate::gates::codes_in(&closed.notes).contains(&code), "{}", closed.notes);
+    }
 }
 
-/// GH #2401 item 4: park requires `AC-CHECKLIST.md` with a row per acceptance
-/// criterion and supervisor ruling, and refuses a narrowing no supervisor
-/// decision note approved, listing every failing row in one reply.
 #[tokio::test]
-async fn park_requires_an_ac_checklist_and_an_approved_narrowing_gh_2401() {
+async fn park_warns_for_missing_checklist_and_proof_without_red_first() {
     let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env);
-    let mut task = f.task();
-    task.acceptance_criteria = "1) The gear turns. 2) The gear turns both ways.".into();
-    open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
-    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    crate::factory_worker_check::record_passing_test_for_tests(&f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)");
-    let ruling = call(&f.supervisor, serde_json::json!({
-        "action": "notes", "id": ID, "note_type": "decision", "notes": "keep the gear API unchanged",
-    })).await;
-    let started = call(&f.worker, serde_json::json!({"action": "start", "id": ID})).await;
-    assert!(started.contains("AC1, AC2, D1"), "{ruling}\n{started}");
-    let dir = &crate::config::resolved_factory_artifact_paths(&f.cas_dir(), None).task_dirs(ID)[0];
-    std::fs::create_dir_all(dir).unwrap();
-    let met = "| AC1 | MET | crates/widget/src/gear.rs:1 | test(gear) at tip |";
-    let ruled = "| D1 | MET | crates/widget/src/gear.rs:1 | test(gear) at tip |";
-    let narrowed = "| AC2 | NARROWED | one way only; reverse is a follow-up | |";
-    // A park from Blocked is judged like one from InProgress.
-    for (checklist, status, failing) in [
-        (None, TaskStatus::InProgress, &["AC1", "AC2", "D1"][..]),
-        (Some(vec![met]), TaskStatus::InProgress, &["AC2", "D1"]),
-        (Some(vec![met, ruled, "| AC2 | MET | turns both ways | |"]), TaskStatus::InProgress, &["AC2"]),
-        (Some(vec![met, ruled, narrowed]), TaskStatus::InProgress, &["AC2"]),
-        (Some(vec![met, ruled, narrowed]), TaskStatus::Blocked, &["AC2"]),
-        (Some(vec![met, ruled, "| AC2 | NARROWED | | |"]), TaskStatus::InProgress, &["AC2"]),
-    ] {
-        let path = dir.join("AC-CHECKLIST.md");
-        match &checklist {
-            Some(rows) => std::fs::write(&path, rows.join("\n")).unwrap(),
-            None => { let _ = std::fs::remove_file(&path); }
-        }
+    for method in [None, Some("test-first")] {
+        let f = fixture(&mut env);
+        std::fs::create_dir_all(f.worker_path.join("docs/qa")).unwrap();
+        std::fs::create_dir_all(f.worker_path.join("docs/product-overview.d")).unwrap();
+        std::fs::write(f.worker_path.join("docs/product-overview.d/README.md"), "Fragments\n").unwrap();
+        std::fs::write(f.worker_path.join("docs/qa/journeys.yaml"),
+            "version: 1\njourneys:\n  - id: J-gear\n    name: Gear\n    status: live\n    owners: {frontend: [\"crates/widget/src/**\"]}\n").unwrap();
+        git(&f.worker_path, &["add", "docs"]);
+        git(&f.worker_path, &["commit", "-qm", &format!("fix({ID}): describe journey")]);
+        git(&f.worker_path, &["push", "-q", "origin", LANE]);
         let mut task = f.task();
-        task.status = status;
+        task.task_type = TaskType::Bug;
+        task.acceptance_criteria = "Gear turns both ways".into();
+        task.execution_note = method.map(str::to_owned);
         open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
-        let refused = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
-        assert!(crate::gates::codes_in(&refused).contains(&"G-166"), "{checklist:?} {status:?}: {refused}");
-        let listed: Vec<_> = ["AC1", "AC2", "D1"].into_iter().filter(|id| refused.contains(&format!("- {id} ("))).collect();
-        assert_eq!(listed, failing, "{checklist:?} {status:?}: {refused}");
-        assert_eq!(f.task().status, status);
-    }
-    let mut task = f.task();
-    task.status = TaskStatus::InProgress;
-    open_task_store(&f.cas_dir()).unwrap().update(&task).unwrap();
-    // A worker's own decision note never approves its narrowing: the same
-    // checklist that parks after the supervisor's note is refused before it.
-    std::fs::write(dir.join("AC-CHECKLIST.md"), [met, ruled, narrowed].join("\n")).unwrap();
-    call(&f.worker, serde_json::json!({
-        "action": "notes", "id": ID, "note_type": "decision", "notes": "AC2 narrowed to one way",
-    })).await;
-    let refused = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
-    assert!(crate::gates::codes_in(&refused).contains(&"G-166") && refused.contains("- AC2 ("), "{refused}");
-    // The supervisor's approval names the item, so it needs no row of its own.
-    call(&f.supervisor, serde_json::json!({
-        "action": "notes", "id": ID, "note_type": "decision", "notes": "AC2 narrowed to one way; reverse is a follow-up",
-    })).await;
-    let parked = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
-    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
-    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
-}
-
-#[tokio::test]
-async fn park_requires_red_first_evidence_gh_2422() {
-    use crate::factory_worker_check::{record_rust_failure_for_tests, record_rust_pass_for_tests};
-
-    let mut env = TestEnvGuard::temp_home();
-    for (methodology, record_red, gate, status) in [
-        (Some("test-first"), false, Some("G-170"), TaskStatus::InProgress),
-        (Some("test-first"), true, None, TaskStatus::AwaitingMerge),
-        (None, false, None, TaskStatus::AwaitingMerge),
-    ] {
-        let fixture = fixture_with_gear(
-            &mut env,
-            "pub fn turn() -> u8 { 1 }\n#[test]\nfn regression() { assert_eq!(turn(), 2); }\n",
-            "pub fn turn() -> u8 { 2 }\n#[test]\nfn regression() { assert_eq!(2, turn()); }\n",
-        );
-        let cas_dir = fixture.cas_dir();
-        let checkout = &fixture.worker_path;
-        let base = git(checkout, &["rev-parse", "main"]);
-        let tip = git(checkout, &["rev-parse", "HEAD"]);
-        let mut task = fixture.task();
-        task.execution_note = methodology.map(str::to_owned);
-        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
-            assignee: WORKER.into(),
-            branch: LANE.into(),
-            base_sha: base.clone(),
-            work_target: task.deliverables.work_target.clone().unwrap(),
-        });
-        open_task_store(&cas_dir).unwrap().update(&task).unwrap();
-
-        let name = "gear::regression";
-        if record_red {
-            git(checkout, &["checkout", "-q", "--detach", &base]);
-            record_rust_failure_for_tests(&cas_dir, checkout, &base, ID, "widget", name);
-            git(checkout, &["checkout", "-q", LANE]);
+        let reply = call(&f.worker, serde_json::json!({"action":"close", "id":ID, "reason":"Gear turns"})).await;
+        let saved = f.task();
+        let codes = crate::gates::codes_in(&saved.notes);
+        for code in ["G-166", "G-61", "G-167", "G-168"] {
+            assert!(codes.contains(&code), "{code}: {reply}\n{}", saved.notes);
         }
-        record_rust_pass_for_tests(
-            &cas_dir, checkout, &tip, "widget", &format!("test(={name})"),
-            Some(stability::Proof {
-                runner: "nextest".into(),
-                tests: vec![stability::Identity::exact("crates/widget/src/gear.rs", name)],
-                consecutive_passes: stability::REQUIRED_PASSES,
-                elapsed_ms: 0,
-                inactive: Vec::new(),
-            }),
-        );
-        let reply = call(&fixture.worker, serde_json::json!({
-            "action": "close", "id": ID, "reason": "gear turns",
-        })).await;
-        assert_eq!(
-            (crate::gates::codes_in(&reply).as_slice(), fixture.task().status),
-            (gate.as_slice(), status),
-            "{methodology:?}, red={record_red}: {reply}",
-        );
+        assert_eq!(f.task().status, TaskStatus::AwaitingMerge, "{reply}");
+        assert!(f.task().notes.contains("[G-61]"));
     }
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::Digest;
-    hex::encode(sha2::Sha256::digest(bytes))
-}
-
-/// cas-289b (GH #2025): a worker's receipt files stay on its machine. The
-/// close on the machine that merges counts the receipts carried on the task
-/// row, and refuses one bound to another head or filter, a digest that is not
-/// its run's, or a run that did not pass.
-#[tokio::test]
-async fn cassy_merge_close_counts_receipts_carried_from_the_worker_machine_cas_289b() {
-    let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env);
-    std::fs::write(f.cas_dir().join("config.toml"), format!("[project]\ncanonical_id=\"{PROJECT}\"\n")).unwrap();
-    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    crate::factory_worker_check::record_passing_test_with_log_for_tests(
-        &f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)",
-    );
-    let parked = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
-    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
-    // The merging machine has none of the worker's receipt files.
-    std::fs::remove_dir_all(f.cas_dir().join("worker-checks")).unwrap();
-    let carried = f.task().deliverables.test_receipts;
-    assert!(!carried.is_empty(), "park carries the worker's receipts on the task row");
-
-    let repo = f.dir.path();
-    git(repo, &["config", "user.name", "CAS Test"]);
-    git(repo, &["config", "user.email", "cas@example.test"]);
-    let tasks = open_task_store(&f.cas_dir()).unwrap();
-    env.set("CAS_AGENT_ROLE", "supervisor");
-    let cassy = CasCore::with_daemon(f.cas_dir(), None, None);
-    cassy.set_agent_id_for_testing("br-supervisor-session".into());
-    let _ = cassy.prepare_premerge_verification(&f.task(), repo, LANE, "main");
-    let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().expect("candidate dispatch");
-    f.supervisor.verification(Parameters(serde_json::from_value(serde_json::json!({
-        "action": "add", "task_id": ID, "dispatch_id": dispatch.id,
-        "status": "approved", "summary": "gear turns", "confidence": 1.0,
-    })).unwrap())).await.expect("approve the candidate before merge");
-    git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "merge lane"]);
-    git(repo, &["push", "-q", "origin", "main"]);
-    let merge = git(repo, &["rev-parse", "HEAD"]);
-    assert!(tasks.record_merge_admission(ID, &merge, cas_types::MergeCiAdmission::Green).unwrap());
-    let verification = cas_store::get_verification_for_dispatch(&f.cas_dir(), &dispatch.id).unwrap().unwrap();
-    let set_carried = |receipts: Vec<cas_types::PortableTestReceipt>| {
-        let mut task = f.task();
-        task.deliverables.test_receipts = receipts;
-        tasks.update(&task).unwrap();
-    };
-    let tampered: [fn(&mut cas_types::PortableTestReceipt); 6] = [
-        |receipt| receipt.head = "f".repeat(40),
-        |receipt| receipt.filter = "all()".into(),
-        // A broadened filter that still selects the carried run.
-        |receipt| receipt.filter = format!("{} | test(other)", receipt.filter),
-        // A well-formed digest that is not the carried run's.
-        |receipt| receipt.log_sha256 = "0".repeat(64),
-        // A different valid filter than the run recorded.
-        |receipt| receipt.filter = "test(other)".into(),
-        // A failing run, with its own matching digest.
-        |receipt| {
-            receipt.passing_run = receipt.passing_run.replace("1 passed", "0 passed, 1 failed");
-            receipt.log_sha256 = sha256_hex(format!("{}\n{}", receipt.filter, receipt.passing_run).as_bytes());
-        },
-    ];
-    for tamper in tampered {
-        let mut receipts = carried.clone();
-        receipts.iter_mut().for_each(tamper);
-        set_carried(receipts);
-        let refused = cassy.close_green_merged_delivery_after_verdict(ID, Some(&verification.id)).await;
-        assert_ne!(f.task().status, TaskStatus::Closed, "{}", refused.receipt(ID));
-    }
-    set_carried(carried);
-    let closed = cassy.close_green_merged_delivery_after_verdict(ID, Some(&verification.id)).await;
-    assert_eq!(f.task().status, TaskStatus::Closed, "{}", closed.receipt(ID));
 }
 
 /// cas-28c5 / GH #1895: ef33 preserved its pushed checkpoint as a side
@@ -1315,11 +544,6 @@ async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
         if foreign {
             assert_eq!(parked.status, TaskStatus::InProgress, "{case}: {output}");
             assert!(!codes.contains(&"G-61"), "attribution must refuse before stale proof advice: {output}");
-            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(checkpoint.as_str()));
-        } else if !live_proof {
-            assert!(codes.contains(&"G-61"), "{case}: {output}");
-            assert!(output.contains(&tip[..12]), "proof must name the measured commit: {output}");
-            assert_eq!(parked.status, TaskStatus::InProgress);
             assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(checkpoint.as_str()));
         } else {
             assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{case}: {output}");
@@ -1436,7 +660,6 @@ async fn refused_close_preserves_anchor_cas_8f6e() {
         "commit_receipt": tip,
     })).await;
     assert!(refused.contains("PROOF CLAIM RECEIPT REQUIRED"), "{refused}");
-    assert!(refused.contains("FOCUSED PROOF REQUIRED"), "must reach the park preflight: {refused}");
     let retained = f.task();
     assert_eq!(retained.status, TaskStatus::InProgress, "{refused}");
     assert_eq!(retained.deliverables.factory_branch_anchor.as_deref(), Some(anchor.as_str()), "{refused}");

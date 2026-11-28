@@ -671,9 +671,8 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     } else {
         None
     };
-    let integrated = (batch_mode || deferred)
-        .then(|| crate::qa_batch::integration_state(repo, &head, target_branch))
-        .flatten();
+    let integrated = crate::qa_batch::integration_state(repo, &head, target_branch);
+    let screenshot_review = tier == EvidenceTier::Bundle && integrated != Some(true);
     let covering_pass = if deferred {
         crate::qa_batch::covering_pass(cas_root, task, repo, target_branch, &head)
             .map_err(|e| format!("QA EVIDENCE REJECTED: cannot read covering QA pass: {e}"))?
@@ -723,6 +722,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         None
     };
     let needs_bundle = tier == EvidenceTier::Bundle
+        && !screenshot_review
         && batch_receipt.is_none()
         && !batch_defer
         && covering_pass.is_none()
@@ -765,7 +765,8 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     }
     let mut pass = run_close_gate_with_write_dir(
         &ctx,
-        if waiver.is_some()
+        if screenshot_review
+            || waiver.is_some()
             || batch_receipt.is_some()
             || batch_defer
             || covering_pass.is_some()
@@ -779,6 +780,9 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         &markers,
         &paths.task_dirs(&task.id)[0],
     )?;
+    if screenshot_review {
+        pass.notes.push("Screenshot review belongs to the independent review of changed screens (phone/desktop, light/dark); missing screenshots warn at park.".into());
+    }
     if let Some((round, bundle, _)) = carried_bundle {
         pass.notes.push(format!(
             "QA evidence bundle accepted for identical landed delivery: pass={} reviewed={} receipt={} bundle={}",
@@ -794,7 +798,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     if batch_defer {
         cas_store::defer_qa_batch_evidence(cas_root, &task.id, &head)
             .map_err(|e| format!("QA EVIDENCE REJECTED: cannot record batch deferral: {e}"))?;
-        pass.notes.push(format!("QA batch evidence deferred: task={} head={head}; staging receipt required before close", task.id));
+        pass.notes.push(format!("QA batch evidence deferred: task={} head={head}; release QA owns the staging receipt; delivery close continues", task.id));
     }
     if let Some(receipt) = batch_receipt {
         if receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA {
@@ -915,7 +919,7 @@ mod tests {
                 let result = check();
                 let batch_park = expected == crate::config::QaMode::Batch
                     && integration != Some(true);
-                assert_eq!(result.is_ok(), batch_park,
+                assert_eq!(result.is_ok(), integration != Some(true),
                     "mode={expected}, integration={integration:?}: {result:?}");
                 assert_eq!(cas_store::has_qa_batch_deferral(&root, &task.id).unwrap(),
                     batch_park);
@@ -926,7 +930,7 @@ mod tests {
                     assert!(qa_evidence_close_gate_for_paths(
                         &root, &task, repo, "main", Some(&head), Some(&changed), Some(&base),
                     ).is_err());
-                } else if expected == crate::config::QaMode::PerTask {
+                } else if expected == crate::config::QaMode::PerTask && integration == Some(true) {
                     cas_store::defer_qa_batch_evidence(&root, &task.id, &head).unwrap();
                     assert!(check().is_err());
                 }
@@ -1274,7 +1278,7 @@ mod tests {
         qa_evidence_close_gate(&cas_root, &task, &repo, "main", Some(&rust_only))
             .expect("a Rust-only receipt needs no QA evidence");
         let refusal = qa_evidence_close_gate(&cas_root, &task, &repo, "main", None)
-            .expect_err("the live tip carries a web surface");
+            .expect("screenshots are advisory for an unmerged web surface");
 
         // A deleted lane must not replace its durable delivery with the
         // closing checkout's unrelated HEAD (cas-420af).
@@ -1518,7 +1522,7 @@ mod tests {
         // Without attribution the branch diff still sees A's UI: this is why
         // the close path passes the attributed paths.
         let refusal = qa_evidence_close_gate(&cas_root, &task, &repo, "main", None)
-            .expect_err("the branch-wide diff alone cannot tell A from B");
+            .expect("unmerged UI evidence is advisory even without attribution");
 
         // An empty set from a selected delivery range is authoritative.
         // Callers pass None when attribution found no delivery range.

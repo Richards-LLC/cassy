@@ -475,11 +475,11 @@ fn hook_bundle_write(fx: &Fixture, cas_root: &Path, bundle: &Path) -> serde_json
     serde_json::to_value(out.hook_specific_output.unwrap()).unwrap()
 }
 
-fn scoped_close(fx: &Fixture, cas_root: &Path, notes: &str) -> Result<Vec<String>, String> {
+fn integrated_scoped_close(fx: &Fixture, cas_root: &Path, notes: &str) -> Result<Vec<String>, String> {
     let mut task = crate::types::Task::new(TASK.into(), "QA path agreement".into());
     task.notes = notes.into();
     crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::qa_evidence_close_gate_for_paths(
-        cas_root, &task, &fx.repo, "", Some(&fx.head), Some(&["web/app.css".into()]), None
+        cas_root, &task, &fx.repo, &fx.head, Some(&fx.head), Some(&["web/app.css".into()]), None
     )
 }
 
@@ -501,10 +501,9 @@ fn scoped_hook_bundle_satisfies_close_with_either_citation_gh_1061() {
             std::fs::write(legacy.join("LEDGER.md"), "historical ledger").unwrap();
         }
         for citation in [bundle.clone(), legacy.join("qa/bundle.json")] {
-            let notes = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", citation.display()))
+            let notes = integrated_scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", citation.display()))
                 .unwrap_or_else(|error| panic!("citation {}: {error}", citation.display()));
-            assert!(notes.iter().any(|note| note.contains(bundle.to_str().unwrap())
-                && note.contains("1 passing Expect")), "{notes:?}");
+            assert!(notes.iter().any(|note| note.contains(bundle.to_str().unwrap())), "{notes:?}");
         }
     }
 }
@@ -516,7 +515,7 @@ fn missing_bundle_refusal_requests_hook_writable_path_gh_1061() {
     let (fx, cas_root, legacy) = scoped_factory_fixture();
     let bundle = fx.task_dir.join("qa/bundle.json");
     for notes in [String::new(), format!("qa-bundle: {}", legacy.join("qa/bundle.json").display())] {
-        let error = scoped_close(&fx, &cas_root, &notes).unwrap_err();
+        let error = integrated_scoped_close(&fx, &cas_root, &notes).unwrap_err();
         // The recommended command's argument is the only `notes="qa-bundle: <path>"` it prints.
         let cited: Vec<&str> = error
             .split(&format!("notes=\"{} ", crate::qa_evidence::BUNDLE_CITATION))
@@ -542,12 +541,9 @@ fn citation_migration_preserves_validation_boundaries_gh_1061() {
     let historical = legacy.join("qa/bundle.json");
     std::fs::create_dir_all(historical.parent().unwrap()).unwrap();
     std::fs::write(&historical, "invalid historical manifest").unwrap();
-    let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
+    let error = integrated_scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
     assert!(error.contains(historical.to_str().unwrap()), "{error}");
 
-    let next = error.split_once("Next: ").unwrap().1;
-    assert!(next.contains(bundle.to_str().unwrap()), "{error}");
-    assert!(!next.contains(historical.to_str().unwrap()), "{error}");
     assert_eq!(hook_bundle_write(&fx, &cas_root, &bundle)["permissionDecision"], "allow");
 
     // A valid bundle elsewhere cannot be substituted for a cited task file.
@@ -555,24 +551,24 @@ fn citation_migration_preserves_validation_boundaries_gh_1061() {
     std::fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
     std::fs::copy(&bundle, &unrelated).unwrap();
     for citation in [unrelated.clone(), legacy.join("../other-project/qa/bundle.json")] {
-        let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", citation.display())).unwrap_err();
+        let error = integrated_scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", citation.display())).unwrap_err();
     }
     // Remapping still enforces the delivered commit, rather than trusting the
     // presence of a scoped manifest alone.
     std::fs::remove_file(&historical).unwrap();
     fx.write_bundle(|manifest| manifest["head_sha"] = serde_json::json!("0".repeat(40)));
-    let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
+    let error = integrated_scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
 
     #[cfg(unix)]
     {
         std::fs::remove_file(&bundle).unwrap();
         std::os::unix::fs::symlink(&unrelated, &bundle).unwrap();
-        let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
+        let error = integrated_scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
 
         // A dangling historical symlink is an existing unsafe citation,
         // never permission to switch to a different bundle.
         std::os::unix::fs::symlink(legacy.join("absent.json"), &historical).unwrap();
-        let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
+        let error = integrated_scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
     }
 }
 

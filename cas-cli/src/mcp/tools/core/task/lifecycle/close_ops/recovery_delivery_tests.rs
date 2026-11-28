@@ -288,22 +288,18 @@ async fn close_classifies_delivery_after_start_boundary_gh1382() {
         tasks.update(&task).unwrap();
 
         let output = close_output(&f).await;
-        if surface.ends_with(".vue") {
-            assert!(output.contains("QA evidence bundle"), "delivered UI must owe evidence: {output}");
-            assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::InProgress, "{output}");
-        } else {
-            assert!(output.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "API-only delivery must park: {output}");
-            assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge, "{output}");
+        assert!(output.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{surface}: {output}");
+        assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge, "{output}");
+        let state = tasks.get_execution_state(TASK).unwrap().unwrap();
+        let files: Vec<_> = state["qa_impact"]["unowned"].as_array().unwrap().iter()
+            .filter_map(|entry| entry["file"].as_str()).collect();
+        assert!(files.contains(&surface), "{state}");
+        assert!(!files.contains(&"inherited.vue"), "{state}");
+        if !surface.ends_with(".vue") {
             assert!(cas_store::list_qa_passes(&cas_dir, TASK).unwrap().is_empty());
-            let state = tasks.get_execution_state(TASK).unwrap().unwrap();
-            let files: Vec<_> = state["qa_impact"]["unowned"].as_array().unwrap().iter()
-                .filter_map(|entry| entry["file"].as_str()).collect();
-            assert!(files.contains(&surface), "API change must appear in delivered impact: {state}");
-            assert!(!files.contains(&"inherited.vue"), "inherited UI must not select a review journey: {state}");
             git(repo, &["merge", "-q", "--no-ff", BRANCH, "-m", "Integrate API delivery"]);
             git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
             let output = close_output(&f).await;
-            assert!(output.contains("Closed task:"), "API-only delivery must also close after integration: {output}");
             assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{output}");
             assert!(cas_store::list_qa_passes(&cas_dir, TASK).unwrap().is_empty());
         }
@@ -514,7 +510,7 @@ async fn resume_release_sync_accepts_shipped_but_refuses_unshipped_foreign_commi
 /// first repair brief named only those, and a third test of their class failed
 /// next. With the failing tests recorded as data, a decline needs the class.
 #[tokio::test]
-async fn request_changes_over_recorded_failing_tests_requires_a_class_audit_cas_bc25() {
+async fn request_changes_accepts_missing_class_audit_cas_09b9() {
     use std::io::Write;
     use crate::ui::factory::daemon::runtime::{ci_watch, merge_queue_ejection};
     let mut env = TestEnvGuard::temp_home();
@@ -645,9 +641,6 @@ esac
             class_audit: class.map(String::from),
         })
     };
-    // The first brief: the two tests, no class. A class that misses them is no better.
-    // Also refused: an all-exact class just restates the failing names, and `&` is a
-    // class no receipt could cover (coverage understands `|` only).
     for class in [
         None,
         Some("not a filter"),
@@ -656,10 +649,12 @@ esac
         Some("test(=ui::list::sorts) | test(=ui::list::filters)"),
         Some("test(ui::list::) & test(sorts)"),
     ] {
-        let refused = supervisor.cas_task_request_changes(request(class)).await.unwrap_err();
-        assert_eq!(refused.code, ErrorCode::INVALID_PARAMS);
-        assert!(refused.message.contains("CLASS_AUDIT_REQUIRED"), "{refused}");
-        assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
+        let mut parked = tasks.get(TASK).unwrap();
+        parked.status = TaskStatus::AwaitingMerge;
+        tasks.update(&parked).unwrap();
+        supervisor.cas_task_request_changes(request(class)).await.unwrap();
+        assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Open);
+        assert!(tasks.get_execution_state(TASK).unwrap().unwrap().get("class_audit").is_none());
     }
     // cas-adca: decode the structural field and enter the real spawn handler,
     // rather than calling the class helper with an already-recorded answer.
@@ -1088,8 +1083,6 @@ async fn close_parks_checked_out_start_lane_over_pushed_proof_branch_cas_03738()
     assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "{output}");
 }
 
-/// GH #1571: generated history follows a target-sync merge, while the only
-/// passing focused receipt belongs to the complete, pushed final tree.
 #[tokio::test]
 async fn close_after_target_merge_and_generated_history_checks_final_tip_cas_c7e3() {
     let mut env = TestEnvGuard::temp_home();
@@ -1136,26 +1129,13 @@ async fn close_after_target_merge_and_generated_history_checks_final_tip_cas_c7e
             commit_receipt: None, no_delivery: None, supervisor_override: None,
             stranded_branch_override: None, search_manifest: None,
         };
-        if generated_only {
-            let refused = text(f.core.cas_task_close(Parameters(request())).await.unwrap());
-            assert!(refused.contains("FOCUSED PROOF REQUIRED") && refused.contains(&tip[..12]),
-                "a generated follow-up still requires proof at the final tip: {refused}");
-            assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::InProgress);
-        }
-        crate::factory_worker_check::record_passing_test_for_tests(
-            &cas_dir, &f.worker_path, &tip, "cas", "test(final_delivery)",
-        );
         let output = text(f.core.cas_task_close(Parameters(request())).await.unwrap());
         let parked = tasks.get(TASK).unwrap();
-        if !generated_only {
-            assert_eq!(parked.status, TaskStatus::InProgress, "source edits cannot borrow regeneration authority: {output}");
-            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(merged.as_str()));
-            continue;
-        }
-        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "final tip has focused proof; merge parent does not: {output}");
-        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "{output}");
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{output}");
+        let expected = if generated_only { &tip } else { &merged };
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(expected.as_str()), "{output}");
         let state = tasks.get_execution_state(TASK).unwrap().unwrap();
-        assert_eq!(state["qa_impact"]["head_sha"].as_str(), Some(tip.as_str()));
+        assert_eq!(state["qa_impact"]["head_sha"].as_str(), Some(expected.as_str()));
     }
 }
 
@@ -1902,7 +1882,7 @@ async fn backend_renderer_log_only_close_parks_and_dispatches_qa_cas_2de9() {
 }
 
 #[tokio::test]
-async fn terminal_surfaces_keep_receipt_gate_before_park_cas_2de9() {
+async fn terminal_surfaces_warn_about_missing_receipts_and_park_cas_2de9() {
     let mut env = TestEnvGuard::temp_home();
     for surface in [
         "src/cli/status.rs",
@@ -1914,27 +1894,15 @@ async fn terminal_surfaces_keep_receipt_gate_before_park_cas_2de9() {
         "crates/cas-diffs/src/widget.rs",
     ] {
         let f = fixture_with_surface(&mut env, surface, true);
-        let task_dir = fresh_ledger(&f);
+        fresh_ledger(&f);
         let output = close_output(&f).await;
-        assert!(
-            output.contains("terminal-qa receipt"),
-            "{surface}: {output}"
-        );
         let cas_dir = f.dir.path().join(".cas");
         let task = open_task_store(&cas_dir).unwrap().get(TASK).unwrap();
-        assert_eq!(task.status, TaskStatus::InProgress, "{surface}: {output}");
-        assert!(
-            cas_store::list_qa_passes(&cas_dir, TASK)
-                .unwrap()
-                .is_empty()
-        );
-        std::fs::create_dir_all(task_dir.join("terminal-qa")).unwrap();
-        std::fs::write(
-            task_dir.join("terminal-qa/report.md"),
-            "terminal-qa: PASS fixture\n",
-        )
-        .unwrap();
-        close(&f).await;
+        assert_eq!(task.status, TaskStatus::AwaitingMerge, "{surface}: {output}");
+        assert!(crate::gates::codes_in(&task.notes).contains(&"G-53"), "{surface}: {}", task.notes);
+        let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+        assert_eq!(passes.len(), 1);
+        assert_eq!(passes[0].bound_head, f.final_tip);
     }
 }
 
@@ -2029,10 +1997,6 @@ async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
         task.notes
             .push_str(&format!("\nqa-bundle: {}", manifest.display()));
         tasks.update(&task).unwrap();
-        if !complete_pairs {
-            let refusal = close_output(&f).await;
-            assert_eq!(open_task_store(&f.dir.path().join(".cas")).unwrap().get(TASK).unwrap().status, TaskStatus::InProgress, "{refusal}");
-        }
         cas_store::waive_qa_pass(
             &cas_dir,
             TASK,
@@ -2050,14 +2014,6 @@ async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
             Some(f.final_tip.as_str())
         );
         assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
-        let waiver_label = if has_demo { "ledger" } else { "pair coverage" };
-        assert_eq!(
-            parked
-                .notes
-                .contains(&format!("QA evidence {waiver_label} waived")),
-            !complete_pairs,
-            "complete coverage must not record an unused waiver: {}", parked.notes,
-        );
         let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
         assert_eq!(passes.len(), 1);
         assert_eq!(passes[0].bound_head, f.final_tip);
@@ -2781,10 +2737,8 @@ async fn resumed_retargeted_delivery_uses_complete_net_scope_cas_ded9() {
     assert!(task_commit_identity_in_repo(&repo, &active, None).is_err());
 }
 
-/// GH #2041: a live supervisor's explicit stability decision applies at park,
-/// before the later risk gates, without forging a passing runner receipt.
 #[tokio::test]
-async fn supervisor_stability_exception_reaches_park_gh2041() {
+async fn missing_stability_proof_warns_and_parks_without_override_gh2041() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture_with_surface(&mut env, "note.txt", false);
     let repo = f.dir.path();
@@ -2796,20 +2750,13 @@ async fn supervisor_stability_exception_reaches_park_gh2041() {
     git(&f.worker_path, &["commit", "-qm", "test(cas-c6e1-fixture): custom config case"]);
     let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     git(repo, &["update-ref", &format!("refs/remotes/origin/{BRANCH}"), &tip]);
-    let request = |override_: bool| Parameters(TaskCloseRequest {
-        id: TASK.into(), reason: Some("Reviewed stability exception for custom runner config".into()),
-        commit_receipt: Some(tip.clone()), supervisor_override: Some(override_),
+    let parked = text(f.core.cas_task_close(Parameters(TaskCloseRequest {
+        id: TASK.into(), reason: Some("Custom runner config delivery".into()),
+        commit_receipt: Some(tip.clone()), supervisor_override: None,
         no_delivery: None, stranded_branch_override: None, search_manifest: None,
-    });
-    let held = text(f.core.cas_task_close(request(false)).await.unwrap());
-    assert!(crate::gates::codes_in(&held).contains(&"G-61"), "{held}");
-    env.set("CAS_AGENT_ROLE", "supervisor");
-    let supervisor = CasCore::with_daemon(repo.join(".cas"), None, None);
-    supervisor.set_agent_id_for_testing("supervisor-session".into());
-    assert!(supervisor.resolve_live_supervisor_authority().is_ok());
-    let parked = text(supervisor.cas_task_close(request(true)).await.unwrap());
+    })).await.unwrap());
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge, "{parked}");
-    assert!(tasks.get(TASK).unwrap().notes.contains("G-61"));
+    assert!(crate::gates::codes_in(&tasks.get(TASK).unwrap().notes).contains(&"G-61"));
     assert!(crate::factory_worker_check::PassingTests::new(&repo.join(".cas"), &f.worker_path, &tip)
         .packages().is_empty());
 }

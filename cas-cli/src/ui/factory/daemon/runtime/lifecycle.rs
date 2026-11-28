@@ -3590,7 +3590,7 @@ pub(super) mod worker_attention_tests {
     }
 
     #[test]
-    fn merge_queue_ejection_with_repeat_hold_finishes_without_worker_return_gh2373() {
+    fn merge_queue_ejection_after_repeat_rejection_returns_worker_cas_09b9() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_FACTORY_SESSION", "repeat-review-ejection");
         let root = crate::store::init_cas_dir(env.home()).unwrap();
@@ -3614,11 +3614,10 @@ pub(super) mod worker_attention_tests {
             MergeQueueExit { head_sha, group_mate_failed: false },
         );
         assert!(matches!(outcome, WorkerAttentionRelayOutcome::Persisted { .. }));
-        assert_eq!(tasks.get(&task.id).unwrap().status, cas_types::TaskStatus::AwaitingMerge);
+        assert_eq!(tasks.get(&task.id).unwrap().status, cas_types::TaskStatus::Open);
         let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
-        assert!(rows.iter().any(|row| row.target == "supervisor"
-            && crate::gates::codes_in(&row.prompt).contains(&"G-172")));
-        assert!(!rows.iter().any(|row| row.target == worker.name));
+        assert!(rows.iter().any(|row| row.target == "supervisor"));
+        assert!(rows.iter().any(|row| row.target == worker.name));
     }
 
     #[test]

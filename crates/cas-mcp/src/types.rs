@@ -286,10 +286,9 @@ pub struct TaskRequest {
     #[serde(default)]
     pub task_type: Option<String>,
 
-    /// Delivery risk declaration (for create/update). Required for task, bug,
-    /// and feature creates; blast-radius also requires proof_targets.
+    /// Optional, advisory delivery risk declaration (for create/update).
     #[schemars(
-        description = "Comma-separated delivery risks: blast-radius, platform, concurrency, or none. Required for task/bug/feature creates; blast-radius requires proof_targets."
+        description = "Comma-separated delivery risks: blast-radius, platform, concurrency, or none. Optional and advisory; proof_targets may describe the intended test scope."
     )]
     #[serde(default)]
     pub risk: Option<String>,

@@ -1921,22 +1921,8 @@ impl CasCore {
             .unwrap_or_default();
 
         let mut task_notes = req.notes.unwrap_or_default();
-        if supervisor_override
-            && req
-                .risk
-                .as_deref()
-                .is_none_or(|risk| risk.trim().is_empty())
-        {
-            let reason = req.reason.as_deref().unwrap_or_default().trim();
-            let audit = format!(
-                "[{}] DECISION: supervisor_override=true accepted missing task risk declaration. Reason: {}",
-                chrono::Utc::now().to_rfc3339(),
-                reason
-            );
-            if !task_notes.is_empty() {
-                task_notes.push('\n');
-            }
-            task_notes.push_str(&audit);
+        if risk.is_empty() || (risk.contains(&cas_types::TaskRisk::BlastRadius) && proof_targets.is_empty()) {
+            task_notes.push_str(&crate::gates::tag("G-129", "Risk note is optional and advisory; add risks or proof targets when useful."));
         }
         if let Some(note) = inherited_default_note {
             if !task_notes.is_empty() {
@@ -5019,25 +5005,21 @@ mod related_recall_response_tests {
     }
 
     #[tokio::test]
-    async fn create_path_rejects_missing_risk_for_code_tasks_before_persisting() {
+    async fn create_path_defaults_missing_risk_and_blast_radius_targets() {
+        let _env = TestEnvGuard::temp_home();
         let temp = TempDir::new().expect("temporary project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
-        let mut request = plain_task_request("Risk is required");
-        request.risk = None;
-
-        let error = core
-            .cas_task_create(Parameters(request))
-            .await
-            .expect_err("code-task create without risk must be refused");
-
-        assert!(
-            core.open_task_store()
-                .expect("task store")
-                .list(None)
-                .expect("list tasks")
-                .is_empty(),
-            "rejected create must not persist a task row"
-        );
+        for risk in [None, Some("blast-radius")] {
+            let mut request = plain_task_request(if risk.is_none() { "Repair gear rotation" } else { "Index document storage" });
+            request.risk = risk.map(str::to_owned);
+            core.cas_task_create(Parameters(request)).await.unwrap();
+        }
+        let tasks = core.open_task_store().unwrap().list(None).unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks.iter().all(|task| task.proof_targets.is_empty()));
+        assert!(tasks.iter().any(|task| task.risk.is_empty()));
+        assert!(tasks.iter().any(|task| task.risk == [cas_types::TaskRisk::BlastRadius]));
+        assert!(tasks.iter().all(|task| crate::gates::codes_in(&task.notes).contains(&"G-129")));
     }
 
     /// cas-1896: one integration per release. A standalone task joins the

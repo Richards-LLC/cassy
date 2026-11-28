@@ -649,6 +649,7 @@ fn handle_pre_tool_use_checked(
     prepared_cargo_input: Option<serde_json::Value>,
     turn_cwd: &Path,
     accepted_override_codes: &mut Vec<&'static str>,
+    warnings: &mut Vec<String>,
 ) -> Result<HookOutput, MemError> {
     let tool_name = match &input.tool_name {
         Some(name) => name.as_str(),
@@ -671,7 +672,9 @@ fn handle_pre_tool_use_checked(
     {
         // A post-release hold already carries its own gate code (G-120).
         let reason = if crate::gates::codes_in(&reason).is_empty() { crate::gates::tag("H-07", reason) } else { reason };
-        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+        if let Some(denial) = refuse(input, cas_root, reason, warnings) {
+            return Ok(denial);
+        }
     }
 
     // gate[H-08 pre-tool]: Browser test tier
@@ -738,9 +741,7 @@ fn handle_pre_tool_use_checked(
     if let Some(reason) = cas_config_file_write_denial(input).map(|reason| crate::gates::tag("H-14", reason))
         && !shadowed_by_sandbox(input, tool_name, cas_root, &reason)
     {
-        if let Some(denial) = refuse(input, cas_root, reason, warnings) {
-            return Ok(denial);
-        }
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
 
     // cas-803f: a supervisor in a long foreground Bash call cannot hear the
@@ -767,6 +768,7 @@ fn handle_pre_tool_use_checked(
             .and_then(|tool_input| tool_input.get("command"))
             .and_then(|command| command.as_str())
             .is_some_and(git_push_bypasses_required_hooks)
+        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-15", "🚫 WORKER PUSH POLICY: `--no-verify`, Git config environment overrides, and `core.hooksPath` overrides can skip required factory push checks. `-n` is a dry-run and still runs the pre-push hook; worker pushes must use a plain `git push`. If an exception is needed, ask the supervisor to run the supervisor-approved push."), warnings)
     {
         return Ok(denial);
     }
@@ -891,7 +893,6 @@ fn handle_pre_tool_use_checked(
     // with `isolation: "worktree"` create worktrees Claude Code cleans up only
     // on process exit — which leaks across Petrastella repos when the session
     // is long-lived (see EPIC cas-7c88 / project_factory_worktree_leak).
-    warnings: &mut Vec<String>,
     //
     // Non-isolation Agent calls (Explore, code-review personas, task-verifier)
     // stay allowed — they're load-bearing for correctness verification.
@@ -931,6 +932,7 @@ fn handle_pre_tool_use_checked(
         && tool_name == "SendMessage"
         && crate::harness_policy::is_worker(input)
         && !owns_native_message_target(input, cas_root)
+        && let Some(denial) = refuse(input, cas_root, factory_worker_send_message_denial(), warnings)
     {
         return Ok(denial);
     }
@@ -986,7 +988,6 @@ fn handle_pre_tool_use_checked(
                         "deny",
                         &crate::gates::tag("H-23", "🚫 LOCAL-MERGE DELIVERY: git push origin is disabled for this factory session. Commit locally; the supervisor merges your local factory branch. Set CAS_FACTORY_LOCAL_MERGE_PUSH_OVERRIDE=1 only when explicitly authorized by the supervisor."),
                     ));
-        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-15", "🚫 WORKER PUSH POLICY: `--no-verify`, Git config environment overrides, and `core.hooksPath` overrides can skip required factory push checks. `-n` is a dry-run and still runs the pre-push hook; worker pushes must use a plain `git push`. If an exception is needed, ask the supervisor to run the supervisor-approved push."), warnings)
                 }
                 }
                 // gate[H-22 pre-tool]: Worker commit guard / git scope (layer 1)
@@ -1041,6 +1042,7 @@ fn handle_pre_tool_use_checked(
             .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
         && let Some(refusal) =
             crate::qa_pass::supervisor_merge_refusal(root, std::path::Path::new(&input.cwd), cmd)
+        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-24", refusal), warnings)
     {
         return Ok(denial);
     }
@@ -1059,6 +1061,7 @@ fn handle_pre_tool_use_checked(
             .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
         && let Some(refusal) =
             crate::qa_pass::github_merge_refusal(root, std::path::Path::new(&input.cwd), cmd)
+        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-25", refusal), warnings)
     {
         return Ok(denial);
     }
@@ -1082,6 +1085,7 @@ fn handle_pre_tool_use_checked(
             std::env::var("CAS_FACTORY_SESSION").ok().as_deref(),
             accepted_override_codes,
         )
+        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-26", refusal), warnings)
     {
         return Ok(denial);
     }
@@ -1103,6 +1107,7 @@ fn handle_pre_tool_use_checked(
                 .filter(|out| out.status.success())
                 .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         })
+        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-27", refusal), warnings)
     {
         return Ok(denial);
     }
@@ -1155,7 +1160,6 @@ fn handle_pre_tool_use_checked(
     // unreachable when `cas_root` is `None` because of the early return
     // immediately following this block. Since `is_factory_agent` derives
     // from the hook's role snapshot with an env fallback (no store access
-        && let Some(denial) = refuse(input, cas_root, factory_worker_send_message_denial(), warnings)
     // required), we fire the allow here to rescue the cas_root=None case — the
     // scenario the user hit in the BUG-factory-write-permission-deadlock
     // report where a supervisor session runs the hook without a Cassy root
@@ -1265,7 +1269,6 @@ fn handle_pre_tool_use_checked(
 
     // Compute current agent's task IDs (via leases) once for all jail checks.
     // This prevents cross-agent jail contamination where Agent A's pending tasks
-        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-24", refusal), warnings)
     // block Agent B in a different session.
     let current_agent_id = current_agent_id(input);
     let agent_task_ids: std::collections::HashSet<String> = stores
@@ -1284,7 +1287,6 @@ fn handle_pre_tool_use_checked(
     // cas_root=None auto-approve check (cas-7f33).
     if is_factory_agent {
         // cas-7aa2 (GH #176): the auto-route below returns `allow`, so the
-        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-25", refusal), warnings)
         // harness's native SendMessage runs too and writes a second copy into
         // THIS process's config-dir teams tree. When that tree is not the one
         // the factory daemon delivers into (a worker spawned with an explicit
@@ -1308,7 +1310,6 @@ fn handle_pre_tool_use_checked(
     //    either unjails by clearing pending_worktree_merge.
     //
     // The unjail happens in PreToolUse when one of those calls is detected.
-        && let Some(denial) = refuse(input, Some(root), crate::gates::tag("H-26", refusal), warnings)
     //
     // NOTE: This entire system is EXPERIMENTAL and only active when worktrees.enabled=true
     //
@@ -1330,7 +1331,6 @@ fn handle_pre_tool_use_checked(
                     .iter()
                     .filter(|t| {
                         agent_task_ids.contains(&t.id)
-        && let Some(denial) = refuse(input, cas_root, crate::gates::tag("H-27", refusal), warnings)
                             || t.assignee
                                 .as_ref()
                                 .map(|a| a == &current_agent_id)
@@ -1667,6 +1667,11 @@ fn handle_pre_tool_use_checked(
         && dispatch.state == cas_types::VerificationDispatchState::Claimed
         && let Some(verifier) = dispatch.verifier_agent_id.as_deref()
         && stores.agents().is_some_and(|agents| agents.get(verifier).is_ok_and(|agent| crate::mcp::tools::service::agent_liveness::verifier_is_running(&agent)))
+        && let Some(denial) = refuse(input, Some(cas_root), crate::gates::tag("H-34", format!(
+            "Verifier {verifier} is already running on dispatch {} for task {task_id}; a second verifier's verdict could not be recorded once that dispatch resolves. Next: wait for its verdict or supervisor_call (`{}verification action=latest task_id={task_id}`).",
+            dispatch.id,
+            crate::harness_policy::own_tool_prefix(),
+        )), warnings)
     {
         return Ok(denial);
     }
@@ -1859,11 +1864,6 @@ fn worker_check_command(command: &str) -> Option<(Vec<String>, String, Option<st
     // Preserve the existing complete provider-isolation profile.
     let isolated = (|| {
         let words = prefix.split_whitespace().collect::<Vec<_>>();
-        && let Some(denial) = refuse(input, Some(cas_root), crate::gates::tag("H-34", format!(
-            "Verifier {verifier} is already running on dispatch {} for task {task_id}; a second verifier's verdict could not be recorded once that dispatch resolves. Next: wait for its verdict or supervisor_call (`{}verification action=latest task_id={task_id}`).",
-            dispatch.id,
-            crate::harness_policy::own_tool_prefix(),
-        )), warnings)
         let (assignment, prefix) = words.split_last()?;
         let directory = assignment.strip_prefix("XDG_CONFIG_HOME=")?;
         // A literal path, never a shell expansion or arbitrary assignment.
@@ -2815,6 +2815,16 @@ fn agent_active_tasks(stores: &mut ToolHookStores<'_>, input: &HookInput) -> Vec
         .collect()
 }
 
+/// Delivery modes of the in-progress tasks assigned to this worker. Unreadable
+/// task state yields none, which leaves the session's mode in charge (the
+/// pre-cas-6db4 behaviour).
+fn worker_active_task_delivery_modes(
+    stores: &mut ToolHookStores<'_>,
+    input: &HookInput,
+) -> Vec<cas_types::DeliveryMode> {
+    agent_active_tasks(stores, input).into_iter().map(|task| task.delivery_mode).collect()
+}
+
 fn local_merge_push_override() -> bool {
     std::env::var("CAS_FACTORY_LOCAL_MERGE_PUSH_OVERRIDE")
         .map(|value| {
@@ -3058,16 +3068,6 @@ fn collect_git_write_targets(
             for _ in 0..16 {
                 let Some(index) = unwrapped_command_index(&words) else { break };
                 if !words[index].contains(['$', '`']) || literal_words.get(&words[index]) == Some(&true) {
-/// Delivery modes of the in-progress tasks assigned to this worker. Unreadable
-/// task state yields none, which leaves the session's mode in charge (the
-/// pre-cas-6db4 behaviour).
-fn worker_active_task_delivery_modes(
-    stores: &mut ToolHookStores<'_>,
-    input: &HookInput,
-) -> Vec<cas_types::DeliveryMode> {
-    agent_active_tasks(stores, input).into_iter().map(|task| task.delivery_mode).collect()
-}
-
                     break;
                 }
                 let [value] = expand_factory_shell_word(&words[index], &context.values).try_into().ok()?;

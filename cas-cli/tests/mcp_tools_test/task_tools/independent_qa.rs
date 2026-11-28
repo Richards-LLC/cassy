@@ -621,6 +621,8 @@ async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
         .unwrap();
     assert_eq!(round2.round, 2);
     assert_eq!(round2.bound_head, fixed_head);
+    let reviewer = reviewer_core(&cas_dir, "second-reviewer");
+    let reviewer_service = CasService::new(reviewer.clone(), None);
     reviewer
         .cas_task_start(Parameters(IdRequest {
             id: round2.qa_task_id.clone().unwrap(),
@@ -2394,7 +2396,7 @@ async fn rejected_round_reopens_after_a_target_change_and_a_test_only_fix() {
     let identity = repo.file_name().unwrap().to_string_lossy().to_string();
     std::fs::write(&config, format!("{body}[project]\ncanonical_id = {identity:?}\n")).unwrap();
     cas::store::known_repos::ensure_host_schema().unwrap();
-    let reviewer = reject_round_one(&core, &repo, &task_id).await;
+    reject_round_one(&core, &repo, &task_id).await;
 
     // The supervisor moves the task onto an epic cut from the reviewed tip,
     // so the epic already contains round 1's user-facing change.
@@ -2437,6 +2439,7 @@ async fn rejected_round_reopens_after_a_target_change_and_a_test_only_fix() {
     assert!(round2.qa_task_id.is_some(), "round two has its work item");
 
     // qa_record against the open round succeeds.
+    let reviewer = reviewer_core(&cas_dir, "second-reviewer");
     reviewer
         .cas_task_start(Parameters(IdRequest {
             id: round2.qa_task_id.clone().unwrap(),
@@ -3600,10 +3603,10 @@ async fn supervisor_fix_plan_opens_one_round_past_the_escalation_cas_624f() {
     let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
-    let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
 
     let mut head = git(&repo, &["rev-parse", "HEAD"]);
     for round in 1..=3u32 {
+        let reviewer = reviewer_core(&cas_dir, &format!("qa-reviewer-{round}"));
         let parked = close_text(&core, &task_id).await;
         assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "round {round}: {parked}");
         reject_open_round(&reviewer, &repo, &task_id, round, &head).await;
@@ -3656,6 +3659,7 @@ async fn supervisor_fix_plan_opens_one_round_past_the_escalation_cas_624f() {
 
     // A 4th rejection escalates again: the worker's next park opens nothing.
     drop(_role);
+    let reviewer = reviewer_core(&cas_dir, "qa-reviewer-4");
     reject_open_round(&reviewer, &repo, &task_id, 4, &head).await;
     commit_file(&repo, "web/composer.css", ".composer{gap:12px}\n", "fix round 4");
     let escalated_again = close_text(&core, &task_id).await;

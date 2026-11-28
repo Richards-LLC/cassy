@@ -2717,6 +2717,10 @@ impl CasService {
         ctx: &crate::ops::fleet::FleetContext,
         mut req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        if req.task_ids.as_ref().is_some_and(|ids| ids.len() != 1) {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                "Each worker owns one task; spawn a fresh worker with task_id for each task"));
+        }
         let tasks = self.inner.open_task_store()?;
         for id in req.task_ids.as_deref().unwrap_or_default().iter().map(String::as_str)
             .chain(req.task_id.as_deref())
@@ -5051,8 +5055,11 @@ impl CasService {
     pub(super) async fn factory_worker_queue(&self, req: FactoryRequest) -> Result<CallToolResult, McpError> {
         let worker = req.id.as_deref().or(req.target.as_deref()).ok_or_else(|| Self::error(
             ErrorCode::INVALID_PARAMS, "worker_queue requires id=<worker>"))?;
-        if let Some(ids) = req.task_ids.as_ref() { self.refresh_task_sources(ids).await?; }
-        self.inner.configure_worker_task_queue(worker, req.task_ids, req.expected_generation).await.map(Self::success)
+        if req.task_ids.is_some() {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                "Worker task queues are retired; spawn a fresh worker with task_id for each task"));
+        }
+        self.inner.inspect_worker_task_queue(worker).map(Self::success)
     }
 
     pub(super) async fn factory_worker_status(
@@ -13158,7 +13165,7 @@ pub(crate) fn worker_context_usage(
     path: &std::path::Path,
 ) -> Option<ContextUsage> {
     let cli = worker_cli_from_agent(agent);
-    if cli == cas_mux::SupervisorCli::Codex
+    if matches!(cli, cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Codex)
         && let Some(boundary) = agent.factory_session.as_deref().and_then(|session| {
             crate::factory_context_reset::worker_recycle_boundary(root, session, &agent.name)
         })

@@ -1628,6 +1628,7 @@ async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
         pin(&task_id);
         let assignment = assign(&env, &task_id, worker).await.unwrap();
         assert_eq!(env.task_store().get(&task_id).unwrap().assignee.as_deref(), Some(worker));
+        env.task_store().delete(&task_id).unwrap();
         let spawn_task = child_task_of_epic(&env, "cas-release-gap", "Spawn published base");
         pin(&spawn_task);
         let mut req = factory_req("spawn_workers");
@@ -1647,6 +1648,12 @@ async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
             if behind && !pinned {
                 assert!(response.contains("tag=v1.2.3"), "{response}");
                 assert!(response.contains(&format!("missing_commits={gap}")), "{response}");
+            }
+        }
+        for mut task in env.task_store().list(None).unwrap() {
+            if task.assignee.as_deref() == Some(worker) {
+                task.assignee = None;
+                env.task_store().update(&task).unwrap();
             }
         }
         let queued = env.spawn_queue().peek(10).unwrap();
@@ -2012,11 +2019,9 @@ async fn test_spawn_workers_with_task_id_succeeds_after_epic_closed_in_isolated_
         ))
         .expect("add follow-up task");
 
-    let second = task_store.generate_id().unwrap();
-    task_store.add(&Task::new(second.clone(), "Queued follow-up".into())).unwrap();
     let mut req = factory_req("spawn_workers");
     req.count = Some(1);
-    req.task_ids = Some(vec![task_id.clone(), second.clone()]);
+    req.task_id = Some(task_id.clone());
 
     let result = env.service.factory_request(Parameters(req)).await;
     assert!(
@@ -2027,19 +2032,8 @@ async fn test_spawn_workers_with_task_id_succeeds_after_epic_closed_in_isolated_
     let entries = env.spawn_queue().peek(10).expect("peek");
     assert_eq!(entries.len(), 1, "the spawn must actually be queued");
     assert_eq!(entries[0].task_id.as_deref(), Some(task_id.as_str()));
-    assert!(entries[0].isolate, "An ordered spawn must provide an owned checkout for subsequent branches");
-    let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&env.cas_root).unwrap();
-    queues.bind_spawn(entries[0].id, "spawn-session", "spawn-worker").unwrap();
-    let queue = queues.get("spawn-session", "spawn-worker").unwrap();
-    assert_eq!(queue.current_task.as_deref(), Some(task_id.as_str()));
-    assert_eq!(queue.pending, vec![second]);
-    queues.bind_spawn(entries[0].id, "spawn-session", "spawn-worker").unwrap();
-    assert_eq!(queues.get("spawn-session", "spawn-worker").unwrap(), queue);
-
 }
 
-/// cas-549c: the same relaxation must hold when no epic has ever existed —
-/// a fresh project with one task, not just a post-close one.
 #[tokio::test]
 async fn test_spawn_workers_with_task_id_succeeds_with_no_epic_at_all() {
     let env = FactoryTestEnv::new();
@@ -12265,32 +12259,15 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
         active.assignee = Some(worker.to_string());
         active.status = TaskStatus::InProgress;
         env.task_store().add(&active).unwrap();
-        // cas-8aa1: parked and queued work do not hold the checkout; started
-        // work still does, even when the agent's registry status says Idle.
-        for (prior_status, accepted) in [
-            (TaskStatus::AwaitingMerge, true),
-            (TaskStatus::InProgress, false),
-            (TaskStatus::Open, true),
-        ] {
+        for prior_status in [TaskStatus::AwaitingMerge, TaskStatus::InProgress, TaskStatus::Open, TaskStatus::Closed] {
             active.status = prior_status;
             store.update(&active).unwrap();
-            let result = assign(&env, &task_b, assignee).await;
-            if accepted {
-                let assigned = result.unwrap_or_else(|error| {
-                    panic!("{prior_status:?} work must not make an idle worker stale: {error}")
-                });
-                assert!(!assigned.contains("commits behind"), "{assigned}");
-                assert_eq!(store.get(&task_b).unwrap().assignee.as_deref(), Some(worker));
-                assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), clean_tip);
-                store.update(&targeted).unwrap();
-            } else {
-                let busy = result.expect_err("a mid-task worker must still be refused");
-                assert!(busy.contains("commits behind"), "{busy}");
-                assert!(store.get(&task_b).unwrap().assignee.is_none());
-            }
+            assign(&env, &task_b, assignee).await.expect_err("an assigned worker cannot take another task");
+            assert!(store.get(&task_b).unwrap().assignee.is_none());
+            assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), clean_tip);
         }
-        active.status = TaskStatus::Closed;
-        env.task_store().update(&active).unwrap();
+        active.assignee = None;
+        store.update(&active).unwrap();
 
         std::fs::write(worker_path.join("README"), "uncommitted work\n").unwrap();
         let dirty = assign(&env, &task_b, assignee)
@@ -12711,11 +12688,6 @@ async fn test_supervisor_override_audits_a_stale_worker_assignment_cas_0a69() {
         "reason": reason,
     }))
     .unwrap();
-    // cas-4c92: queued work bound by session ID is still Open, not active
-    // work holding this dirty lane against an audited supervisor assignment.
-    let mut queued = Task::new("cas-4c92-queued".into(), "Queued worker task".into());
-    queued.assignee = Some(registered_worker.id.clone());
-    tasks.add(&queued).unwrap();
     let response = env
         .service
         .task(Parameters(request))
@@ -12794,144 +12766,6 @@ async fn test_supervisor_override_audits_a_stale_worker_assignment_cas_0a69() {
             assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::InProgress);
         }
         assert_eq!(std::fs::read(worker_path.join("README")).unwrap(), dirty_before);
-    }
-}
-
-/// cas-dd0e: a worker's lane still holds an earlier hotfix PR's commits after
-/// a squash merge, so they never reach the target. A fresh task must not wait
-/// on that lane: start cuts `factory/<worker>-<task>` from the target beside
-/// it, and the next hotfix gets its own branch too, so the PRs run at once.
-/// Resumes keep refusing foreign lane work (cas-5eb1a below).
-#[tokio::test]
-async fn test_fresh_start_cuts_its_own_branch_beside_an_occupied_lane_cas_dd0e() {
-    let home = TempDir::new().unwrap();
-    let _guard = EnvGuard::set_optional(&[
-        ("CAS_FACTORY_MODE", Some("1")),
-        ("CAS_FACTORY_SESSION", Some("session-hotfix-lanes")),
-        ("HOME", Some(home.path().to_str().unwrap())),
-    ]);
-    let env = FactoryTestEnv::new();
-    let worker = "hotfix-worker-12";
-    let worker_path = init_sync_repo(&env, worker);
-    let project = env.cas_root.parent().unwrap().to_path_buf();
-    std::fs::write(
-        env.cas_root.join("config.toml"),
-        "[project]\ncanonical_id = \"hotfix-lanes-fixture\"\n",
-    )
-    .unwrap();
-    let mut agent = Agent::new("test-agent-id".into(), worker.into());
-    agent.role = AgentRole::Worker;
-    agent.factory_session = Some("session-hotfix-lanes".into());
-    agent.metadata.insert(
-        "clone_path".into(),
-        worker_path.to_string_lossy().into_owned(),
-    );
-    env.agent_store().register(&agent).unwrap();
-
-    // The first hotfix's PR commit stays on the lane; the target squashed it.
-    std::fs::write(worker_path.join("first.txt"), "first hotfix\n").unwrap();
-    git_stdout(&worker_path, &["add", "first.txt"]);
-    git_stdout(&worker_path, &["commit", "-m", "fix(cas-aaaa): first hotfix"]);
-    let older_delivery = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
-    std::fs::write(worker_path.join("later.txt"), "later delivery\n").unwrap();
-    git_stdout(&worker_path, &["add", "later.txt"]);
-    git_stdout(&worker_path, &["commit", "-m", "fix(cas-dddd): later delivery"]);
-    let lane_tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
-    std::fs::write(project.join("first.txt"), "first hotfix\n").unwrap();
-    git_stdout(&project, &["add", "first.txt"]);
-    git_stdout(&project, &["commit", "-m", "first hotfix (#1)"]);
-    let target_tip = git_stdout(&project, &["rev-parse", "main"]);
-
-    let start = |id: &str| -> TaskRequest {
-        serde_json::from_value(serde_json::json!({ "action": "start", "id": id })).unwrap()
-    };
-    let store = env.task_store();
-    let mut held = Task::new("cas-dddd".into(), "later delivery awaiting integration".into());
-    held.assignee = Some(worker.into());
-    held.status = TaskStatus::Blocked;
-    store.add(&held).unwrap();
-    let mut started_on: Vec<(String, String)> = Vec::new();
-    for id in ["cas-bbbb", "cas-cccc"] {
-        // cas-ce0d / GH #1677: the supervisor preserves the held delivery
-        // and hands the successor a clean detached target checkout.
-        if id == "cas-cccc" {
-            git_stdout(&worker_path, &["checkout", "--detach", &target_tip]);
-        }
-        let mut task = Task::new(id.into(), format!("independent hotfix {id}"));
-        task.assignee = Some(worker.into());
-        task.deliverables.work_target = Some(WorkTarget {
-            repo_selector: "project:hotfix-lanes-fixture".into(),
-            target_branch: "main".into(),
-        });
-        store.add(&task).unwrap();
-        if id == "cas-cccc" {
-            // Off-target detached work and tracked edits must refuse before
-            // acquiring a lease, changing refs or accepting the successor.
-            for dirty in [false, true] {
-                if !dirty {
-                    git_stdout(&worker_path, &["checkout", "--detach", &started_on.first().unwrap().0]);
-                } else {
-                    git_stdout(&worker_path, &["checkout", "--detach", &target_tip]);
-                    std::fs::write(worker_path.join("README"), "held tracked edit\n").unwrap();
-                }
-                let refs = git_stdout(&worker_path, &["show-ref"]);
-                let head = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
-                let status = git_stdout(&worker_path, &["status", "--porcelain"]);
-                let refused = env.service.task(Parameters(start(id))).await
-                    .expect_err("unsafe detached checkout must refuse before accepting start");
-                assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-                assert_eq!(store.get(id).unwrap().status, TaskStatus::Open);
-                assert!(env.agent_store().get_lease(id).unwrap().is_none());
-                assert_eq!(git_stdout(&worker_path, &["show-ref"]), refs);
-                assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), head);
-                assert_eq!(git_stdout(&worker_path, &["status", "--porcelain"]), status);
-            }
-            git_stdout(&worker_path, &["restore", "README"]);
-        }
-        let started = get_text(
-            &env.service
-                .task(Parameters(start(id)))
-                .await
-                .unwrap_or_else(|error| panic!("{id} must start beside the occupied lane: {error}")),
-        );
-        let own = format!("factory/{worker}-{id}");
-        assert!(started.contains(&own), "{started}");
-        if id == "cas-bbbb" {
-            assert!(started.contains(&lane_tip), "retained ref identity: {started}");
-            assert!(started.contains(&older_delivery), "older delivery identity: {started}");
-            assert!(started.contains("cas-dddd") && started.contains("cas-aaaa"), "{started}");
-        }
-        assert_eq!(git_stdout(&worker_path, &["branch", "--show-current"]), own);
-        assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), target_tip);
-        assert_eq!(store.get(id).unwrap().status, TaskStatus::InProgress);
-        assert_eq!(
-            store.get(id).unwrap().deliverables.factory_branch_start.map(|start| start.branch),
-            Some(own.clone())
-        );
-        if id == "cas-cccc" {
-            git_stdout(&worker_path, &["checkout", "--detach", "HEAD"]);
-            let refused = env.service.task(Parameters(start(id))).await
-                .expect_err("a detached resume must name its existing task branch");
-            assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-            assert_eq!(store.get(id).unwrap().status, TaskStatus::InProgress);
-            assert_eq!(git_stdout(&worker_path, &["branch", "--show-current"]), "");
-            git_stdout(&worker_path, &["checkout", &own]);
-        }
-        // This hotfix's PR is pushed and parked; the next one must not wait.
-        std::fs::write(worker_path.join(format!("{id}.txt")), "hotfix\n").unwrap();
-        git_stdout(&worker_path, &["add", "."]);
-        git_stdout(&worker_path, &["commit", "-m", &format!("fix({id}): hotfix")]);
-        let mut parked = store.get(id).unwrap();
-        parked.status = TaskStatus::AwaitingMerge;
-        let tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
-        parked.deliverables.factory_branch_anchor = Some(tip.clone());
-        store.update(&parked).unwrap();
-        started_on.push((own, tip));
-    }
-    // Each PR keeps its own branch, and the lane keeps the first hotfix.
-    assert_eq!(git_stdout(&worker_path, &["rev-parse", &format!("factory/{worker}")]), lane_tip);
-    for (own, tip) in &started_on {
-        assert_eq!(git_stdout(&worker_path, &["rev-parse", own]), *tip, "{own}");
     }
 }
 
@@ -13322,213 +13156,6 @@ fn failed_ancestry_check_warns_without_epic_specific_wording() {
 
     assert!(!warning.contains("epic stack"), "{warning}");
 }
-
-/// GH #2003 (cas-88d9): a queued successor rebased onto its parked
-/// predecessor shares the predecessor's tip on its own branch. The start
-/// advisory names the predecessor's recorded branch, not the checkout.
-#[tokio::test]
-async fn test_parked_advisory_names_predecessor_branch_after_successor_rebase_gh_2003() {
-    let home = TempDir::new().expect("home tempdir");
-    let _guard = EnvGuard::set_optional(&[
-        ("CAS_FACTORY_MODE", Some("1")),
-        ("CAS_FACTORY_SESSION", Some("session-2003-rebase")),
-        ("HOME", Some(home.path().to_str().unwrap())),
-    ]);
-    let env = FactoryTestEnv::new();
-    let worker = "gh2003-rebase-worker";
-    let worker_path = init_sync_repo(&env, worker);
-    let origin = home.path().join("origin.git");
-    git_stdout(home.path(), &["init", "-q", "--bare", origin.to_str().unwrap()]);
-    git_stdout(&worker_path, &["remote", "add", "origin", origin.to_str().unwrap()]);
-    std::fs::write(
-        env.cas_root.join("config.toml"),
-        "[project]\ncanonical_id = \"gh2003-fixture\"\n",
-    )
-    .unwrap();
-    let predecessor = format!("factory/{worker}-cas-pk03");
-    git_stdout(&worker_path, &["checkout", "-b", &predecessor]);
-    std::fs::write(worker_path.join("parked.txt"), "parked delivery").unwrap();
-    git_stdout(&worker_path, &["add", "parked.txt"]);
-    git_stdout(&worker_path, &["commit", "-m", "fix(cas-pk03): parked delivery"]);
-    let parked_tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
-    add_epic_with_id(&env, "cas-2003", TaskStatus::Open, "epic/requested");
-
-    let mut agent = Agent::new("test-agent-id".into(), worker.into());
-    agent.role = AgentRole::Worker;
-    agent.factory_session = Some("session-2003-rebase".into());
-    agent.metadata.insert("clone_path".into(), worker_path.to_string_lossy().into_owned());
-    env.agent_store().register(&agent).unwrap();
-
-    let store = env.task_store();
-    let mut parked = Task::new("cas-pk03".into(), "Parked predecessor".into());
-    parked.status = TaskStatus::AwaitingMerge;
-    parked.assignee = Some(worker.into());
-    parked.deliverables.factory_branch_anchor = Some(parked_tip.clone());
-    parked.deliverables.parked_branch = Some(predecessor.clone());
-    store.add(&parked).unwrap();
-
-    let successor = child_task_of_epic(&env, "cas-2003", "queued successor");
-    let mut task = store.get(&successor).unwrap();
-    task.deliverables.work_target = Some(WorkTarget {
-        repo_selector: "project:gh2003-fixture".into(),
-        target_branch: "epic/requested".into(),
-    });
-    store.update(&task).unwrap();
-    assign(&env, &successor, worker).await.expect("successor assignable");
-    // The authorized rebase: the successor's own branch now sits on the
-    // predecessor's parked tip.
-    let own = format!("factory/{worker}-{successor}");
-    git_stdout(&worker_path, &["checkout", "-b", &own, &parked_tip]);
-
-    let start: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
-        "action": "start", "id": successor,
-    }))
-    .unwrap();
-    let text = get_text(&env.service.task(Parameters(start)).await.expect("successor starts"));
-    let advisory = text.lines().find(|line| line.contains("PARKED BRANCH PRESERVED")).unwrap_or_default();
-    assert!(advisory.contains(&predecessor), "{text}");
-}
-
-/// GH #1006 item 3: a worker whose branch is frozen at a delivery parked for
-/// merge (under independent QA on another epic) reads as behind any other
-/// epic. Rebasing it would destroy the tip under review, so assignment must
-/// proceed and say so instead of refusing.
-#[tokio::test]
-// cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
-async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
-    for per_task in [false, true] {
-        let home = TempDir::new().expect("home tempdir");
-        let _guard = EnvGuard::set_optional(&[
-            ("CAS_FACTORY_MODE", Some("1")),
-            ("CAS_FACTORY_SESSION", Some("session-1006-parked")),
-            ("HOME", Some(home.path().to_str().unwrap())),
-        ]);
-        let env = FactoryTestEnv::new();
-        let worker = "gh1006-parked-worker";
-        let worker_path = init_sync_repo(&env, worker);
-        // cas-2e1b: task start publishes its recorded base for lane CI.
-        let origin = home.path().join("origin.git");
-        git_stdout(home.path(), &["init", "-q", "--bare", origin.to_str().unwrap()]);
-        git_stdout(&worker_path, &["remote", "add", "origin", origin.to_str().unwrap()]);
-        let branch = if per_task {
-            format!("factory/{worker}-cas-pk01")
-        } else {
-            format!("factory/{worker}")
-        };
-        if per_task {
-            git_stdout(&worker_path, &["checkout", "-b", &branch]);
-        }
-        std::fs::write(
-            env.cas_root.join("config.toml"),
-            "[project]\ncanonical_id = \"gh1006-fixture\"\n",
-        )
-        .unwrap();
-        std::fs::write(worker_path.join("parked.txt"), "parked delivery").unwrap();
-        git_stdout(&worker_path, &["add", "parked.txt"]);
-        git_stdout(
-            &worker_path,
-            &["commit", "-m", "fix(cas-pk01): parked delivery"],
-        );
-        let parked_tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
-        add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
-
-        let mut agent = Agent::new("test-agent-id".into(), worker.into());
-        agent.role = AgentRole::Worker;
-        agent.factory_session = Some("session-1006-parked".into());
-        agent.metadata.insert(
-            "clone_path".into(),
-            worker_path.to_string_lossy().into_owned(),
-        );
-        env.agent_store().register(&agent).unwrap();
-
-        let store = env.task_store();
-        let mut parked = Task::new("cas-pk01".into(), "Parked hub delivery".into());
-        parked.status = TaskStatus::AwaitingMerge;
-        parked.assignee = Some(worker.into());
-        parked.deliverables.factory_branch_anchor = Some(parked_tip.clone());
-        parked.deliverables.parked_branch = Some(branch.clone());
-        store.add(&parked).unwrap();
-
-        let task_b = child_task_of_epic(&env, "cas-3b7c", "burn-down fix");
-        let mut task = store.get(&task_b).unwrap();
-        task.deliverables.work_target = Some(WorkTarget {
-            repo_selector: "project:gh1006-fixture".into(),
-            target_branch: "epic/requested".into(),
-        });
-        store.update(&task).unwrap();
-        let text = assign(&env, &task_b, worker).await.unwrap_or_else(|error| {
-            panic!("a worker parked for another epic must be assignable: {error}")
-        });
-        assert!(
-            text.contains("parked at") && text.contains("cas-pk01"),
-            "{text}"
-        );
-        assert_eq!(
-            store.get(&task_b).unwrap().assignee.as_deref(),
-            Some(worker)
-        );
-
-        let start: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
-            "action": "start", "id": task_b,
-        }))
-        .unwrap();
-        let started = env.service.task(Parameters(start)).await;
-        let text = get_text(&started.expect("a parked delivery must allow a separate task lane"));
-        let own = format!("factory/{worker}-{task_b}");
-        assert!(text.contains("PARKED BRANCH PRESERVED"), "{text}");
-        assert_eq!(git_stdout(&worker_path, &["branch", "--show-current"]), own);
-        assert_eq!(git_stdout(&worker_path, &["rev-parse", &branch]), parked_tip);
-        assert_eq!(
-            git_stdout(&worker_path, &["rev-parse", "HEAD"]),
-            git_stdout(&worker_path, &["rev-parse", "epic/requested"])
-        );
-        let start = store.get(&task_b).unwrap().deliverables.factory_branch_start.unwrap();
-        assert_eq!(start.branch, own, "close must retain the new task's branch");
-        assert_eq!(start.base_sha, git_stdout(&worker_path, &["rev-parse", "HEAD"]));
-
-        let record = format!("refs/cas/delivery-base/{own}");
-        let published = git_stdout(&worker_path, &["ls-remote", "origin", &record]);
-        assert_eq!(published.split_whitespace().next(), Some(start.base_sha.as_str()));
-        git_stdout(&worker_path, &["fetch", "-q", "origin", &format!("+{record}:{record}")]);
-
-        std::fs::write(worker_path.join("delivery.txt"), "delivery change\n").unwrap();
-        git_stdout(&worker_path, &["add", "delivery.txt"]);
-        git_stdout(&worker_path, &["commit", "-m", "delivery change"]);
-        let project = env.cas_root.parent().unwrap();
-        git_stdout(project, &["checkout", "epic/requested"]);
-        std::fs::write(project.join("train.txt"), "train change\n").unwrap();
-        git_stdout(project, &["add", "train.txt"]);
-        git_stdout(project, &["commit", "-m", "train change"]);
-        git_stdout(project, &["checkout", "main"]);
-        git_stdout(&worker_path, &["merge", "--no-edit", "epic/requested"]);
-        let impact_base = git_stdout(&worker_path, &["merge-base", "HEAD", "epic/requested"]);
-        assert_ne!(impact_base, start.base_sha);
-
-        let plan = std::process::Command::new("python3")
-            .arg(cas::test_paths::workspace_root().join("scripts/ci-test-impact.py"))
-            .args(["lane", "--phase", "plan", "--base-sha", "epic/requested", "--recorded-base-ref", &record])
-            .arg("--history")
-            .arg(home.path().join("no-history.json"))
-            .arg("--out")
-            .arg(home.path().join("lane.json"))
-            .current_dir(&worker_path)
-            .output()
-            .expect("run the lane plan");
-        assert!(plan.status.success(), "{}", String::from_utf8_lossy(&plan.stderr));
-        let lane: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(home.path().join("lane.json")).unwrap()).unwrap();
-        assert_eq!(lane["plan"]["base"], impact_base);
-        // GH #2299: a merged target advances attribution beyond the recorded start.
-        assert_eq!(lane["plan"]["attribution_base"], impact_base);
-    }
-}
-
-// ===========================================================================
-// cas-aae6 (GH #110): epic_status must show the chain for a stacked epic.
-// The renderer is unit-tested with a hand-built chain; this drives the real
-// handler against a real three-deep stack, which is the only thing that can
-// catch a mis-wiring (wrong branch, wrong trunk, swapped arguments).
-// ===========================================================================
 
 #[tokio::test]
 async fn test_epic_status_reports_a_three_deep_stack_end_to_end_cas_aae6() {

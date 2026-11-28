@@ -141,6 +141,8 @@ fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option
                     <= cas_types::DEFAULT_HEARTBEAT_TIMEOUT_SECS
         });
     if let Some(worker) = worker {
+        crate::worker_lifecycle::ensure_assignment(crate::store::open_task_store(cas_dir)?.as_ref(), worker, &task.id)
+            .map_err(crate::error::CasError::Other)?;
         ensure_review_assignment(task.review_dispatch_id.as_deref(), Some(worker.role))
             .map_err(crate::error::CasError::Other)?;
     }

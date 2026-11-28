@@ -267,6 +267,8 @@ pub(crate) fn admit_assignment(root: &Path, task: &cas_types::Task, live: Option
         queues.bind_spawn(receipt.id, session, &worker.name)?;
     }
     let tasks = crate::store::open_task_store(root)?;
+    crate::worker_lifecycle::ensure_assignment(tasks.as_ref(), &worker, &task.id)
+        .map_err(crate::error::CasError::Other)?;
     // A director snapshot may predate a cancellation or reassignment.
     let current = tasks.get(&task.id)?;
     if current.status != TaskStatus::Open || current.assignee != task.assignee {
@@ -342,135 +344,12 @@ impl CasCore {
         Ok(worker)
     }
 
-    /// Inspect or replace the pending list. The current execution is preserved.
-    pub(crate) async fn configure_worker_task_queue(
-        &self,
-        name: &str,
-        task_ids: Option<Vec<String>>,
-        expected: Option<u64>,
-    ) -> Result<String, McpError> {
+    pub(crate) fn inspect_worker_task_queue(&self, name: &str) -> Result<String, McpError> {
         let worker = self.queue_worker(name, true)?;
-        let session = worker
-            .factory_session
-            .as_deref()
-            .expect("validated session");
+        let session = worker.factory_session.as_deref().expect("validated session");
         let queues = SqliteWorkerTaskQueueStore::open(&self.cas_root).map_err(error)?;
-        let lock = worker_lock(&self.cas_root, &worker, "queue")?;
-        let start_fence = task_ids
-            .as_ref()
-            .map(|_| worker_lock(&self.cas_root, &worker, "start"))
-            .transpose()?;
-        let mut queue = queues.get(session, &worker.name).map_err(error)?;
-        let changed = task_ids.is_some();
-        let mut source_notices = String::new();
-        let mut source_admissions = Vec::new();
-        let mut checked_sources = std::collections::HashSet::new();
-        if task_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
-            ensure_owned_queue_checkout(&self.cas_root, &worker, None)?;
-        }
-        if let Some(mut ids) = task_ids {
-            if expected.is_some_and(|expected| expected != queue.revision) {
-                return Err(error(
-                    "Worker task queue revision changed; inspect it before replacing",
-                ));
-            }
-            let mut unique = std::collections::HashSet::new();
-            let tasks = self.open_task_store()?;
-            for id in &ids {
-                let task = tasks.get(id).map_err(error)?;
-                crate::task_assignment::ensure_review_assignment(task.review_dispatch_id.as_deref(), Some(worker.role))
-                    .map_err(error)?;
-            }
-            for id in &ids {
-                if id.trim().is_empty() || !unique.insert(id.clone()) {
-                    return Err(error(
-                        "Worker task queue requires nonempty, distinct task IDs",
-                    ));
-                }
-                let task = tasks.get(id).map_err(error)?;
-                if let Some(key) = task.external_ref.as_deref().and_then(crate::cloud::peer_claims::github_source_key)
-                    && !checked_sources.insert(key) { continue; }
-                let admission = self.task_source_admission_for(&task, None).await?;
-                source_notices.push_str(&admission.notice);
-                source_admissions.push(admission);
-            }
-            // A single-task spawn can still be booting before its durable
-            // queue is created. Initialize its promised head before the tail.
-            if queue.revision == 0 && queue.current_task.is_none()
-                && let Some((_, Some(receipt))) = assignment_worker(&self.cas_root, &worker.name, Some(&worker)).map_err(error)?
-                && !matches!(receipt.state, cas_store::SpawnLifecycleState::Failed | cas_store::SpawnLifecycleState::Stopped)
-                && let Some(id) = receipt.task_id
-                && let Ok(task) = tasks.get(&id)
-                && task.status == TaskStatus::Open
-                && task.assignee.as_deref().is_none_or(|owner| owner == worker.name || owner == worker.id)
-            { queue.current_task = Some(id); }
-            // Only a formerly running Open cursor without a live lease is
-            // stale (cas-6184). An unstarted promised head is still pending.
-            if let Some(id) = queue.current_task.as_deref()
-                && queue.current_started
-                && tasks.get(id).map_err(error)?.status == TaskStatus::Open
-                && self.open_agent_store()?.get_lease(id).map_err(error)?
-                    .is_none_or(|lease| lease.status != cas_types::LeaseStatus::Active
-                        || lease.expires_at <= chrono::Utc::now())
-            {
-                queue.current_task = None;
-                queue.current_started = false;
-                queue.starting = false;
-                queue.dispatch_from = None;
-                queue.context_reset_from = None;
-                queue.context_reset_request = None;
-            }
-            if queue.current_task.is_none() {
-                queue.current_task = tasks
-                    .list(Some(TaskStatus::InProgress))
-                    .map_err(error)?
-                    .into_iter()
-                    .find(|task| {
-                        task.assignee
-                            .as_deref()
-                            .is_some_and(|a| a == worker.name || a == worker.id)
-                    })
-                    .map(|task| task.id);
-            }
-            if queue.current_task.as_deref().is_some_and(|id| {
-                tasks
-                    .get(id)
-                    .is_ok_and(|task| task.status == TaskStatus::InProgress)
-            }) {
-                queue.current_started = true;
-            }
-            if queue.current_started && ids.iter().any(|id| Some(id) == queue.current_task.as_ref()) {
-                // gate[G-163 assign]: Queue replacement names the task already running
-                return Err(error(crate::gates::tag(
-                    "G-163",
-                    "The current task is already running; supply only pending task IDs",
-                )));
-            }
-            ids.retain(|id| Some(id) != queue.current_task.as_ref());
-            queue.pending = ids;
-            queues
-                .save(session, &worker.name, &mut queue)
-                .map_err(error)?;
-        }
-        let predecessor = queue.current_task.clone();
-        let idle = predecessor.as_deref().is_none_or(|id| {
-            self.open_task_store()
-                .ok()
-                .and_then(|tasks| tasks.get(id).ok())
-                .is_some_and(|task| {
-                    matches!(task.status, TaskStatus::Closed | TaskStatus::AwaitingMerge)
-                })
-        });
-        drop(source_admissions);
-        drop(start_fence);
-        drop(lock);
-        if changed && idle {
-            self.advance_worker_task_queue(&worker.name, predecessor.as_deref())
-                .await?;
-            queue = queues.get(session, &worker.name).map_err(error)?;
-        }
-        let tasks = self.open_task_store()?;
-        Ok(format!("{}{source_notices}", render(&worker, &queue, tasks.as_ref()).map_err(error)?))
+        let queue = queues.get(session, &worker.name).map_err(error)?;
+        render(&worker, &queue, self.open_task_store()?.as_ref()).map_err(error)
     }
 
     /// Called after either close or park commits, including immutable receipts.
@@ -478,46 +357,8 @@ impl CasCore {
         &self,
         id: &str,
     ) -> Result<Option<String>, McpError> {
-        let tasks = self.open_task_store()?;
-        let task = tasks.get(id).map_err(error)?;
-        if !matches!(task.status, TaskStatus::Closed | TaskStatus::AwaitingMerge)
-            || task.deliverables.merge_conflicted
-        {
-            return Ok(None);
-        }
-        let Some(worker) = task.assignee.as_deref() else {
-            return Ok(None);
-        };
-        let agents = self.open_agent_store()?;
-        let Some(registration) = agents
-            .list(None)
-            .map_err(error)?
-            .into_iter()
-            .filter(|a| a.role == AgentRole::Worker && (a.name == worker || a.id == worker))
-            .max_by_key(|a| a.registered_at)
-        else {
-            return Ok(None);
-        };
-        let Some(session) = registration.factory_session.as_deref() else {
-            return Ok(None);
-        };
-        if SqliteWorkerTaskQueueStore::open(&self.cas_root)
-            .map_err(error)?
-            .get(session, &registration.name)
-            .map_err(error)?
-            .revision
-            == 0
-        {
-            return Ok(None);
-        }
-        if agents
-            .get_lease(id)
-            .map_err(error)?
-            .is_some_and(|lease| lease.status == cas_types::LeaseStatus::Active)
-        {
-            return Ok(None);
-        }
-        self.advance_worker_task_queue(worker, Some(id)).await
+        crate::worker_lifecycle::retire_after_delivery(&self.cas_root, id).map_err(error)?;
+        Ok(None)
     }
 
     /// cas-526e: a release returns work to the pool, so it also leaves the
@@ -627,6 +468,9 @@ impl CasCore {
         let retrying = queue.starting && queue.dispatch_from.as_deref() == predecessor;
         let tasks = self.open_task_store()?;
         let agents = self.open_agent_store()?;
+        if let Some(id) = queue.current_task.as_deref()
+            && tasks.get(id).is_ok_and(|task| task.is_terminal() || task.status == TaskStatus::AwaitingMerge)
+        { return Ok(None); }
         // A returned predecessor can close again while its successor is held.
         // Even an interrupted brief dispatch must keep that execution's slot.
         if queue.current_started
@@ -1035,6 +879,7 @@ pub(crate) async fn reconcile_worker_task_queues(
     root: &Path,
     session: &str,
 ) -> Result<usize, McpError> {
+    crate::worker_lifecycle::reconcile(root, session).map_err(error)?;
     let core = CasCore::with_daemon(root.to_path_buf(), None, None);
     let agents = core.open_agent_store()?;
     let Some(owner) =

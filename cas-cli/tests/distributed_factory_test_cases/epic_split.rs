@@ -557,7 +557,7 @@ async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_ca
 
     // Each side is refused on children without a takeover: start, claim and spawn.
     for child in ["cas-d1", "cas-d2"] {
-        let refused = soundwave.start(child, false).await.unwrap_err();
+        let refused = other_core.cas_task_start(Parameters(cas::mcp::tools::IdRequest { id: child.into() })).await.unwrap_err().message.to_string();
         assert!(refused.contains("SPLIT TO A PEER") && refused.contains(&id), "{refused}");
         assert!(refused.contains("prowl@"), "{refused}");
     }
@@ -575,6 +575,12 @@ async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_ca
         .unwrap().peek(10).unwrap().is_empty());
     let refused = prowl.claim("cas-a2").await.unwrap_err();
     assert!(refused.contains("SPLIT TO A PEER"), "{refused}");
+    for (side, id) in [(&soundwave, "cas-d2"), (&prowl, "cas-a2")] {
+        let store = open_task_store(&side.machine.cas_dir).unwrap();
+        let mut task = store.get(id).unwrap();
+        task.assignee = None;
+        store.update(&task).unwrap();
+    }
     let refused = soundwave
         .factory(json!({"action": "spawn_workers", "count": 1, "task_id": "cas-d1", "isolate": true}))
         .await
@@ -592,13 +598,18 @@ async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_ca
 
     // Each starts its own share: the worker wins its local lease and only
     // then takes its own supervisor's split claim (take_from_local).
-    soundwave.start("cas-a1", false).await.unwrap();
+    let mut own_worker = Agent::new_with_role("sw-own".into(), "soundwave-own-worker".into(), AgentRole::Worker);
+    own_worker.factory_session = Some("factory-sw".into());
+    register(&soundwave.machine, &own_worker);
+    let own_core = cas::mcp::CasCore::with_daemon(soundwave.machine.cas_dir.clone(), None, None);
+    own_core.set_agent_id_for_testing(own_worker.id);
+    own_core.cas_task_start(Parameters(cas::mcp::tools::IdRequest { id: "cas-a1".into() })).await.unwrap();
     prowl.start("cas-d1", false).await.unwrap();
-    assert_eq!(cloud_holder(&cloud, "cas-a1").as_deref(), Some("sw-w"));
+    assert_eq!(cloud_holder(&cloud, "cas-a1").as_deref(), Some("sw-own"));
     assert_eq!(cloud_holder(&cloud, "cas-d1").as_deref(), Some("pr-w"));
 
     // Force alone cannot take a split child; only the bound worker consumes the decision.
-    let refused = soundwave.start("cas-d2", true).await.unwrap_err();
+    let refused = other_core.cas_task_start_with_options(Parameters(TaskStartRequest { id: "cas-d2".into(), brief: Some(true), force: Some(true) })).await.unwrap_err().message.to_string();
     assert!(refused.contains("SPLIT TO A PEER") && refused.contains(&id), "{refused}");
     let forced = soundwave.start("cas-d3", false).await.unwrap();
     assert!(forced.contains("SPLIT OVERRIDE"), "{forced}");
@@ -627,9 +638,14 @@ async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_ca
     open_task_store(&prowl.machine.cas_dir).unwrap().add(&next).unwrap();
     prowl.task(json!({"action": "update", "id": "cas-a3", "epic": next.id})).await.unwrap();
     assert_eq!(cloud_holder(&cloud, "cas-a3"), None, "retarget releases the remote split owner's claim");
-    let started = prowl.start("cas-a3", false).await.unwrap();
+    let mut next_worker = Agent::new_with_role("pr-next".into(), "prowl-next-worker".into(), AgentRole::Worker);
+    next_worker.factory_session = Some("factory-pr".into());
+    register(&prowl.machine, &next_worker);
+    let next_core = cas::mcp::CasCore::with_daemon(prowl.machine.cas_dir.clone(), None, None);
+    next_core.set_agent_id_for_testing(next_worker.id);
+    let started = text(next_core.cas_task_start(Parameters(cas::mcp::tools::IdRequest { id: "cas-a3".into() })).await.unwrap());
     assert!(started.contains("Started task:"), "{started}");
-    assert_eq!(cloud_holder(&cloud, "cas-a3").as_deref(), Some("pr-w"));
+    assert_eq!(cloud_holder(&cloud, "cas-a3").as_deref(), Some("pr-next"));
     assert_eq!(open_task_store(&prowl.machine.cas_dir).unwrap().get("cas-a3").unwrap().status, TaskStatus::InProgress);
 }
 

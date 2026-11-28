@@ -2066,7 +2066,7 @@ async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
 }
 
 #[tokio::test]
-async fn cas_5dc0_repark_opens_next_qa_round_and_reuses_the_idle_reviewer() {
+async fn cas_5dc0_repark_opens_next_qa_round_with_fresh_workers() {
     for busy in [false, true] {
         let mut env = TestEnvGuard::temp_home();
         let mut f = fixture(&mut env);
@@ -2125,6 +2125,18 @@ async fn cas_5dc0_repark_opens_next_qa_round_and_reuses_the_idle_reviewer() {
             }))
             .await
             .unwrap();
+        let branch = "factory/corrected-worker";
+        git(&f.worker_path, &["switch", "-c", branch]);
+        let mut replacement = Agent::new_with_role("correction-session".into(), "corrected-worker".into(), AgentRole::Worker);
+        replacement.factory_session = Some("qa-reround-fixture".into());
+        replacement.metadata.insert("clone_path".into(), f.worker_path.display().to_string());
+        agents.register(&replacement).unwrap();
+        let supervisor = crate::mcp::CasService::new(supervisor, None);
+        let request = serde_json::json!({"action":"update", "id":TASK, "assignee":replacement.name});
+        let response = supervisor.task(Parameters(serde_json::from_value(request).unwrap())).await.unwrap();
+        assert_ne!(response.is_error, Some(true), "{response:?}");
+        f.core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        f.core.set_agent_id_for_testing(replacement.id.clone());
         std::fs::write(f.worker_path.join("footer.css"), ".footer { gap: 12px; }\n").unwrap();
         git(&f.worker_path, &["add", "footer.css"]);
         git(
@@ -2140,7 +2152,7 @@ async fn cas_5dc0_repark_opens_next_qa_round_and_reuses_the_idle_reviewer() {
             f.dir.path(),
             &[
                 "update-ref",
-                &format!("refs/remotes/origin/{BRANCH}"),
+                &format!("refs/remotes/origin/{branch}"),
                 &f.final_tip,
             ],
         );
@@ -2152,8 +2164,6 @@ async fn cas_5dc0_repark_opens_next_qa_round_and_reuses_the_idle_reviewer() {
                 force: None,
             }))
         };
-        // cas-cff4: the first start surfaces the queued request_changes notice.
-        assert!(start().await.is_err(), "the worker must see the decision before restarting");
         start().await.unwrap();
         close(&f).await;
         let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
@@ -2167,8 +2177,8 @@ async fn cas_5dc0_repark_opens_next_qa_round_and_reuses_the_idle_reviewer() {
         let assigned = tasks.get(next.qa_task_id.as_deref().unwrap()).unwrap();
         assert_eq!(
             assigned.assignee.as_deref(),
-            (!busy).then_some(reviewer.name.as_str()),
-            "reuse only an available independent reviewer"
+            None,
+            "each QA round requires a fresh reviewer"
         );
         assert_eq!(
             next.state,
@@ -2181,8 +2191,8 @@ async fn cas_5dc0_repark_opens_next_qa_round_and_reuses_the_idle_reviewer() {
             .unwrap();
         assert_eq!(
             queued.iter().any(|row| row.prompt.contains(&assigned.id)),
-            !busy,
-            "only the idle reused reviewer receives the new assignment"
+            false,
+            "the previous reviewer receives no further assignment"
         );
         let prompts = crate::store::open_prompt_queue_store(&cas_dir)
             .unwrap()
@@ -2192,12 +2202,8 @@ async fn cas_5dc0_repark_opens_next_qa_round_and_reuses_the_idle_reviewer() {
             .iter()
             .find(|row| row.source == format!("qa-dispatch:{}", next.id))
             .unwrap();
-        // pin: assigned-reviewer handoffs must not instruct a duplicate reviewer spawn.
-        let instructs_spawn = handoff.prompt.contains("Spawn a reviewer");
-        assert_eq!(
-            instructs_spawn, busy,
-            "handoff must match actual reviewer assignment"
-        );
+        assert_eq!(handoff.target, "supervisor");
+        assert_ne!(assigned.id, qa_task.id);
     }
 }
 

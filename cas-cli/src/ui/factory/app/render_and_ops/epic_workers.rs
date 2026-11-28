@@ -9419,10 +9419,21 @@ mod tests {
             "reason": "Recover the parked delivery's stale source binding",
         }))).await.unwrap();
         assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Open);
+        let mut correction = Agent::new_with_role("correction-id".into(), "correction-worker".into(), AgentRole::Worker);
+        correction.factory_session = Some("takeover-session".into());
+        correction.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.register(&correction).unwrap();
+        let branch = "factory/correction-worker";
+        git(&checkout, &["switch", "-c", branch]);
+        git(&checkout, &["push", "-q", "origin", branch]);
+        supervisor.task(request(serde_json::json!({
+            "action":"update", "id":task.id, "assignee":correction.name,
+        }))).await.unwrap();
         supervisor.task(request(serde_json::json!({
             "action": "rebind_branch", "id": task.id, "branch": branch,
-            "reason": "Approve the replacement after returning the parked mismatch",
+            "reason": "Approve the fresh worker after returning the parked mismatch",
         }))).await.unwrap();
+        let worker = service(&correction.id);
         env.set("CAS_AGENT_ROLE", "worker");
         worker.coordination(Parameters(serde_json::from_value(serde_json::json!({
             "action": "inbox_poll",

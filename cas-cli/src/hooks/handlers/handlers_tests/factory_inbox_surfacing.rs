@@ -19,7 +19,7 @@ use tempfile::TempDir;
 
 use crate::hooks::handlers::handle_user_prompt_submit;
 use crate::test_support::TestEnvGuard;
-use crate::types::{EntryType, Task, TaskStatus};
+use crate::types::{Task, TaskStatus};
 
 const SESSION: &str = "cas-src-happy-jay-91";
 const WORKER: &str = "ready-cheetah-71";
@@ -444,13 +444,8 @@ fn supervisor_terminal_input_enters_history_but_harness_envelopes_do_not() {
     assert!(history[0].processed_at.is_some());
 }
 
-/// cas-b657 (GH #375): the real UserPromptSubmit handler must preserve useful
-/// operator context in a factory worker session while rejecting every known
-/// machine origin. The test parses the actual hook wire shape and delivers it
-/// through the factory authority: hook dispatch enriches the raw prompt from
-/// typed sidecar metadata, never a marker parsed out of rendered display text.
 #[test]
-fn factory_worker_captures_operator_context_but_not_typed_machine_relays() {
+fn factory_worker_keeps_operator_and_machine_prompts_in_attribution_only() {
     let mut env = TestEnvGuard::new();
     let project = TempDir::new().unwrap();
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
@@ -527,19 +522,7 @@ fn factory_worker_captures_operator_context_but_not_typed_machine_relays() {
         .unwrap()
         .list()
         .unwrap();
-    assert!(
-        entries.iter().any(|entry| {
-            entry.entry_type == EntryType::Context
-                && entry.content.contains("preserve the operator instruction")
-        }),
-        "an absent typed provenance field is the explicit operator case: {entries:#?}"
-    );
-    assert!(
-        entries
-            .iter()
-            .all(|entry| !entry.content.contains("updatedAt changes only")),
-        "all three typed machine origins must be excluded without parsing their text: {entries:#?}"
-    );
+    assert!(entries.is_empty());
 }
 
 /// Session isolation must hold on the surfacing path exactly as it does on the

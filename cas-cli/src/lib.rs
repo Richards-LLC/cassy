@@ -124,6 +124,7 @@ pub mod opencode_preflight;
 pub(crate) mod prompt_revalidation;
 pub(crate) mod task_assignment;
 pub(crate) mod worker_task_queue;
+pub(crate) mod worker_lifecycle;
 pub mod qa_pass;
 pub mod qa_registry;
 pub mod qa_impact;

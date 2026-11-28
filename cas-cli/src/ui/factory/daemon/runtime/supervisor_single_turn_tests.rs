@@ -266,6 +266,78 @@ pub(super) async fn fixture() -> (tempfile::TempDir, FactoryDaemon) {
     fixture_for(cas_mux::SupervisorCli::Claude).await
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn automatic_context_reset_preserves_drafts_and_newer_turns() {
+    if !fixture_child("automatic_context_reset_preserves_drafts_and_newer_turns") { return; }
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    for cli in [cas_mux::SupervisorCli::Codex, cas_mux::SupervisorCli::Claude] {
+        let (root, mut daemon) = fixture_for(cli).await;
+        let cas = daemon.app.cas_dir().to_path_buf();
+        let name = daemon.app.supervisor_name().to_string();
+        let agents = crate::store::open_agent_store(&cas).unwrap();
+        let mut agent = agents.get("single-sup").unwrap();
+        let native = "019f84af-3121-7950-ba14-b01db2daa152";
+        let account = root.path().join("account");
+        agent.cc_session_id = Some(native.into());
+        agent.metadata.insert("supervisor_cli".into(), cli.backend().name().into());
+        agent.metadata.insert("supervisor_account_dir".into(), account.to_string_lossy().into_owned());
+        agents.update(&agent).unwrap();
+        let transcript = if cli == cas_mux::SupervisorCli::Codex {
+            account.join("sessions").join(format!("rollout-{native}.jsonl"))
+        } else {
+            account.join("projects").join(root.path().to_string_lossy().replace(['/', '.'], "-")).join(format!("{native}.jsonl"))
+        };
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        let at = chrono::Utc::now();
+        let (idle, busy) = if cli == cas_mux::SupervisorCli::Codex {
+            (format!("{}\n{}\n", serde_json::json!({"type":"session_meta","payload":{"id":native,"cwd":root.path()}}),
+                serde_json::json!({"timestamp":at,"type":"event_msg","payload":{"type":"task_complete","turn_id":"old"}})),
+                format!("{}\n", serde_json::json!({"timestamp":at+chrono::Duration::seconds(1),"type":"event_msg","payload":{"type":"task_started","turn_id":"new"}})))
+        } else {
+            (format!("{}\n", serde_json::json!({"timestamp":at,"type":"system","subtype":"turn_duration"})),
+                format!("{}\n", serde_json::json!({"timestamp":at+chrono::Duration::seconds(1),"type":"user","message":{"role":"user","content":"new work"}})))
+        };
+        std::fs::write(&transcript, &idle).unwrap();
+        let restart = crate::factory_daemon_health::supervisor_restart_path(&cas, &daemon.session_name);
+        let pid = daemon.app.mux.pane_process_group_id(&name);
+        let draft = b"unsent operator draft";
+        daemon.app.mux.get(&name).unwrap().deliver_user_input(draft, cas_mux::UserInputKind::KeyStream).await.unwrap();
+        if cli == cas_mux::SupervisorCli::Codex {
+            crate::factory_daemon_health::request_supervisor_restart(&cas, &daemon.session_name, crate::supervisor_auto_clear::SOURCE).unwrap();
+            daemon.take_supervisor_restart_request();
+            assert!(restart.is_file());
+        } else {
+            assert_eq!(daemon.deliver_context_reset(&name).await, super::delivery::ContextResetDelivery::NotReady);
+        }
+        assert_eq!(daemon.app.mux.pane_process_group_id(&name), pid);
+        assert!(daemon.app.mux.get(&name).unwrap().is_composer_dirty());
+        assert!(!daemon.app.mux.has_pending_injects());
+        daemon.app.mux.get(&name).unwrap().deliver_user_input(b"\x15", cas_mux::UserInputKind::KeyStream).await.unwrap();
+        std::fs::write(&transcript, format!("{idle}{busy}")).unwrap();
+        if cli == cas_mux::SupervisorCli::Codex {
+            daemon.take_supervisor_restart_request();
+            assert!(restart.is_file());
+        } else {
+            assert_eq!(daemon.deliver_context_reset(&name).await, super::delivery::ContextResetDelivery::NotReady);
+        }
+        assert!(!daemon.app.mux.has_pending_injects());
+        assert_eq!(daemon.app.mux.pane_process_group_id(&name), pid);
+        std::fs::write(&transcript, &idle).unwrap();
+        if cli == cas_mux::SupervisorCli::Codex {
+            daemon.take_supervisor_restart_request();
+            assert!(!restart.exists());
+        } else {
+            assert!(matches!(daemon.deliver_context_reset(&name).await, super::delivery::ContextResetDelivery::Started(_)));
+            settle_injected_writes(&mut daemon).await;
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !std::fs::read(root.path().join("input")).unwrap().windows(b"/clear".len()).any(|bytes| bytes == b"/clear") {
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+        }
+    }
+}
+
 /// [`fixture`] with the supervisor launched under `cli`.
 pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempDir, FactoryDaemon) {
     fixture_with_readiness(cli, true).await
@@ -1284,9 +1356,9 @@ async fn cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle()
                 // Native observation selects live Active/Stale registrations.
                 supervisor.status = cas_types::AgentStatus::Active;
                 let account = root.path().canonicalize().unwrap().join("codex-account");
-                supervisor.metadata.insert("worker_cli".into(), "codex".into());
-                supervisor.metadata.insert("worker_account_dir".into(), account.display().to_string());
-                supervisor.metadata.insert("clone_path".into(), root.path().display().to_string());
+                supervisor.cc_session_id = Some("019f84af-3121-7950-ba14-b01db2daa152".into());
+                supervisor.metadata.insert("supervisor_cli".into(), "codex".into());
+                supervisor.metadata.insert("supervisor_account_dir".into(), account.display().to_string());
                 agents.register(&supervisor).unwrap();
                 let path = account.join("sessions/2026/11/02/rollout-aa152.jsonl");
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1310,7 +1382,7 @@ async fn cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle()
                 std::fs::write(&path, transcript).unwrap();
                 assert_eq!(crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
                     &path, cas_mux::SupervisorCli::Codex), busy);
-                assert_eq!(crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(&cas, &supervisor), Some(path));
+                assert_eq!(super::supervisor_commands::supervisor_transcript(&cas, &daemon.session_name, &name, cas_mux::SupervisorCli::Codex), Some(path));
                 daemon.app.refresh_data().unwrap();
                 // Silence alone must not turn an unresolved native tool into idle.
                 let body = if oversized { BODY.replace("review the lane.", &"x".repeat(6000)) } else { BODY.into() };

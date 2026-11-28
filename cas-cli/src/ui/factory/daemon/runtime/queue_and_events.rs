@@ -16349,7 +16349,12 @@ mod tests {
         ).await;
         let core = crate::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
         core.set_agent_id_for_testing(supervisor.id);
-        let queue_state = core.configure_worker_task_queue(&worker.name, Some(vec![task.id.clone()]), None).await.unwrap();
+        let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&cas_dir).unwrap();
+        let mut queue = queues.get("factory-session", &worker.name).unwrap();
+        queue.pending = vec![task.id.clone()];
+        queues.save("factory-session", &worker.name, &mut queue).unwrap();
+        crate::worker_task_queue::reconcile_worker_task_queues(&cas_dir, "factory-session").await.unwrap();
+        let queue_state = core.inspect_worker_task_queue(&worker.name).unwrap();
         let task = tasks.get(&task.id).unwrap();
         assert_eq!(task.status, cas_types::TaskStatus::InProgress, "{queue_state}");
         let cursor = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&cas_dir).unwrap()

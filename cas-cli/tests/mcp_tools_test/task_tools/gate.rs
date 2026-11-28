@@ -1171,7 +1171,8 @@ async fn start_beside_a_branch_parked_for_another_target_preserves_its_tip_gh_10
     let store = open_task_store(&cas_dir).unwrap();
     let mut parked = cas::types::Task::new("cas-pk06".to_string(), "Parked hub delivery".to_string());
     parked.status = TaskStatus::AwaitingMerge;
-    parked.assignee = Some("test-agent".to_string());
+    parked.assignee = Some("prior-worker".to_string());
+    parked.deliverables.parked_branch = Some("factory/test-agent".into());
     parked.deliverables.factory_branch_anchor = Some(parked_tip.clone());
     store.add(&parked).unwrap();
 
@@ -1430,11 +1431,11 @@ async fn phase_outcome_refuses_dependent_start_and_close() {
     // The phase is still below its bar, but its sequential implementation
     // children must be able to ship the work that will satisfy that bar.
     for id in ["reader-prep", "reader-sibling"] {
-        let started = unified_task(&service, serde_json::json!({"action":"start","id":id})).await;
+        let worker = super::independent_qa::reviewer_core(&root, id);
+        let worker = CasService::new(worker, None);
+        let started = unified_task(&worker, serde_json::json!({"action":"start","id":id})).await;
         assert!(started.contains("Started task"), "own-phase child {id}: {started}");
-    }
-    for id in ["reader-prep", "reader-sibling"] {
-        let closed = unified_task(&service, serde_json::json!({"action":"close","id":id})).await;
+        let closed = unified_task(&worker, serde_json::json!({"action":"close","id":id})).await;
         assert!(closed.contains("Closed task"), "own-phase child {id}: {closed}");
     }
     for action in ["start", "close"] {
@@ -1451,7 +1452,8 @@ async fn phase_outcome_refuses_dependent_start_and_close() {
         "notes":serde_json::json!({"measurements":{"stability":100,"p95_seconds":0.1},"receipt":"artifact:forged"}).to_string(),
         "supervisor_override":true,"reason":"worker says go"})).await;
     assert!(forgery.contains("live registered supervisor"), "{forgery}");
-    let independent = unified_task(&service, serde_json::json!({"action":"start","id":"independent"})).await;
+    let independent_worker = CasService::new(super::independent_qa::reviewer_core(&root, "independent-worker"), None);
+    let independent = unified_task(&independent_worker, serde_json::json!({"action":"start","id":"independent"})).await;
     assert!(independent.contains("Started task"), "{independent}");
     set_test_agent_role(&root, AgentRole::Supervisor);
     unified_task(&service, serde_json::json!({"action":"notes","id":"phase-reader","note_type":"outcome_receipt",

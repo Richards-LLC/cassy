@@ -71,8 +71,7 @@ fn divergent_unparked_target(
 
 /// GH #1919: G-100 asks the supervisor to retarget unfinished work to the
 /// next train. When the corrected target is another open train's lane and the
-/// task's parent is a different train, the parent moves with the target, so
-/// the re-park start is not refused G-06 by the frozen train it left.
+/// task's parent is a different train, the parent moves with the target.
 /// Returns (old parent, new train).
 fn train_parent_move(
     cas_root: &std::path::Path,
@@ -823,9 +822,6 @@ impl CasCore {
     ) -> Result<String, String> {
         self.ensure_review_assignee(task.review_dispatch_id.as_deref(), Some(assignee))
             .map_err(|error| error.message.to_string())?;
-        if std::env::var("CAS_FACTORY_MODE").is_err() {
-            return Ok(assignee.to_string());
-        }
         let Ok(agent_store) = self.open_agent_store() else {
             return Ok(assignee.to_string());
         };
@@ -845,6 +841,8 @@ impl CasCore {
             ));
             return Ok(assignee.to_string());
         };
+        crate::worker_lifecycle::ensure_assignment(task_store, worker, &task.id)?;
+        if std::env::var("CAS_FACTORY_MODE").is_err() { return Ok(assignee.to_string()); }
         let worker_name = &worker.name;
         if !by_name {
             warnings.push(format!(

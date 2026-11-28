@@ -1960,7 +1960,12 @@ impl FactoryDaemon {
             };
         };
 
-        if !self.app.mux.pane_ready_for_injection(&pane_target) {
+        if !self.app.mux.pane_ready_for_injection(&pane_target)
+            || self.app.mux.pane_composer_dirty(&pane_target)
+            || self.app.mux.pane_inject_busy(&pane_target)
+            || (pane_target == self.app.supervisor_name()
+                && super::supervisor_commands::command_turn_idle(self.app.cas_dir(), &self.session_name, &pane_target, harness) != Some(true))
+        {
             return ContextResetDelivery::NotReady;
         }
 
@@ -1981,12 +1986,10 @@ impl FactoryDaemon {
             "lifecycle-wake:context-reset",
             None,
         );
-        // cas-786a6: the settle is a per-pane state, not an inline await.
-        // A destructive control: no composer preservation, as before.
         match self
             .app
             .mux
-            .begin_interrupt_and_inject(&pane_target, command, settle, false)
+            .begin_interrupt_and_inject(&pane_target, command, settle, true)
             .await
         {
             Ok(cas_mux::InjectStart::Started(ticket)) => ContextResetDelivery::Started(ticket),

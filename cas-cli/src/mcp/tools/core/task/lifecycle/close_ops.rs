@@ -3279,7 +3279,7 @@ fn same_except_close_audit(before: &Task, after: &Task) -> bool {
 pub(crate) mod lifecycle_race_hook {
     type Hook = Box<dyn FnOnce() + Send>;
     #[derive(PartialEq)]
-    enum Phase { BeforeWrite, BeforeCas, BeforeHandoff, BeforeLease, BeforePark, AfterPark }
+    enum Phase { BeforeWrite, BeforeCas, BeforeHandoff, BeforePark, AfterPark }
     static HOOKS: std::sync::Mutex<Vec<(String, Phase, Hook)>> = std::sync::Mutex::new(Vec::new());
 
     pub(crate) fn before_terminal_write(task_id: &str, hook: impl FnOnce() + Send + 'static) {
@@ -3292,10 +3292,6 @@ pub(crate) mod lifecycle_race_hook {
 
     pub(crate) fn before_queue_handoff(task_id: &str, hook: impl FnOnce() + Send + 'static) {
         HOOKS.lock().unwrap().push((task_id.to_string(), Phase::BeforeHandoff, Box::new(hook)));
-    }
-
-    pub(crate) fn before_start_lease(task_id: &str, hook: impl FnOnce() + Send + 'static) {
-        HOOKS.lock().unwrap().push((task_id.to_string(), Phase::BeforeLease, Box::new(hook)));
     }
 
     pub(crate) fn before_park(task_id: &str, hook: impl FnOnce() + Send + 'static) {
@@ -3312,10 +3308,6 @@ pub(crate) mod lifecycle_race_hook {
 
     pub(super) fn fire_before_park(task_id: &str) {
         fire_at(task_id, Phase::BeforePark);
-    }
-
-    pub(crate) fn fire_before_start_lease(task_id: &str) {
-        fire_at(task_id, Phase::BeforeLease);
     }
 
     pub(crate) fn fire(task_id: &str) {
@@ -8082,6 +8074,13 @@ impl CasCore {
         }
         #[cfg(test)]
         lifecycle_race_hook::fire_before_handoff(&id);
+        if result.as_ref().is_ok_and(|result| {
+            result.is_error.unwrap_or(false)
+                && !result.content.iter().any(|content| matches!(content,
+                    rmcp::model::ContentBlock::Text(text) if text.text.lines().any(is_merge_handoff)))
+        }) {
+            return result;
+        }
         let note = self.advance_queue_after_delivery(&id).await;
         match note {
             Ok(Some(note)) => if let Ok(result) = result.as_mut() {
@@ -13926,6 +13925,9 @@ impl CasCore {
         }
         crate::cloud::peer_claims::release_task_claim_in_background(&self.cas_root, &task.id);
         crate::cloud::file_leases::release_for_task(&self.cas_root, &task.id);
+
+        crate::worker_lifecycle::retire_after_delivery(&self.cas_root, &task.id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
 
         // cas-7877: cancelling a QA work item is the supervisor deciding the
         // review will not happen. Withdraw its round too, so the delivery is

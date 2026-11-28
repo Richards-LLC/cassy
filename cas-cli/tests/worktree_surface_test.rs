@@ -5181,6 +5181,22 @@ async fn cas_5dc4_conflicting_parked_merge_returns_worker_for_redelivery() {
     env.set_current_dir(&worker);
     let inbox = service.coordination(Parameters(coord_req("inbox_poll"))).await.unwrap();
     assert!(get_text(&inbox).contains("merge_conflicted"), "{}", get_text(&inbox));
+    service.task(Parameters(start())).await.unwrap_err();
+    register_delivery_agent(&root, "correction-worker", "bob", AgentRole::Worker, "conflict-session");
+    let mut correction = agents.get("correction-worker").unwrap();
+    correction.metadata.insert("clone_path".into(), worker.to_string_lossy().into_owned());
+    agents.update(&correction).unwrap();
+    let branch = "factory/bob-cas-5dc4";
+    run_git(&["switch", "-c", branch], &worker);
+    run_git(&["push", "origin", branch], &worker);
+    for request in [
+        serde_json::json!({"action":"update", "id":task.id, "assignee":"bob"}),
+        serde_json::json!({"action":"rebind_branch", "id":task.id, "branch":branch,
+            "reason":"Approve the fresh conflict correction worker"}),
+    ] {
+        supervisor.task(Parameters(task_req(request))).await.unwrap();
+    }
+    let service = delivery_service(&root, "correction-worker");
     let started = service.task(Parameters(start())).await.unwrap();
     assert!(!started.is_error.unwrap_or(false), "{}", get_text(&started));
     assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
@@ -7696,6 +7712,11 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
             "reopen must invalidate the old resolved proof authority"
         );
 
+        let worker_id = format!("{worker_id}-fresh-cycle");
+        register_delivery_agent(&cas_root, &worker_id, "bob", AgentRole::Worker, &factory_session);
+        let mut reopened = task_store.get(&task.id).unwrap();
+        reopened.assignee = Some("bob".into());
+        task_store.update(&reopened).unwrap();
         let worker_service = delivery_service(&cas_root, &worker_id);
         let started = worker_service
             .task(Parameters(task_req(serde_json::json!({
@@ -8180,13 +8201,15 @@ async fn resolved_task_proof_freezes_scope_until_supervisor_starts_a_fresh_cycle
     assert_eq!(closed.status, TaskStatus::Closed);
     assert_eq!(closed.acceptance_criteria, "original acceptance");
 
+    register_delivery_agent(&cas_root, "fresh-scope-worker", "bob", AgentRole::Worker, "resolved-scope-factory");
+    let worker = delivery_service(&cas_root, "fresh-scope-worker");
     let mut fresh = Task::new(
         "cas-resolved-scope-fresh".to_string(),
         "Reviewed scope needing rework".to_string(),
     );
     fresh.status = TaskStatus::InProgress;
     fresh.depth = TaskDepth::Deep;
-    fresh.assignee = Some("alice".to_string());
+    fresh.assignee = Some("bob".to_string());
     fresh.acceptance_criteria = "first-cycle acceptance".to_string();
     task_store.add(&fresh).expect("add fresh-cycle task");
     let old_dispatch = approve_task_scope(&cas_root, &supervisor, &fresh.id, supervisor_id).await;

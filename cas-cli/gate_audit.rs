@@ -382,7 +382,7 @@ impl Functions<'_> {
         let mut types = Types(BTreeSet::new());
         types.visit_return_type(output);
         f.producer = if types.0.contains("CallToolResult") {
-            Some("MCP: server_handler::call_tool → facts::observe_tool_result")
+            Some("MCP: server_handler::call_tool → facts::observe_tool_result_as")
         } else if types.0.contains("HookOutput") {
             Some("hook: cli::hook::process_hook_input → facts::observe_hook_output")
         } else {
@@ -695,7 +695,7 @@ pub fn scan_against(root: &Path, registry: &[(String, String, String, String)], 
                 boundary.into(),
             ]);
         }
-        for observer in ["observe_tool_result", "observe_hook_output", "observe_cli_output"] {
+        for observer in ["observe_tool_result", "observe_tool_result_as", "observe_hook_output", "observe_cli_output"] {
             if f.calls.contains(observer) && !f.site.starts_with("cas-cli/src/gates/") {
                 audit.rows.push([
                     format!("fact recording boundary {}", f.name), f.site.clone(),
@@ -818,7 +818,7 @@ pub fn scan_against(root: &Path, registry: &[(String, String, String, String)], 
     // Producers and recording boundaries are discovered by type/call AST.
     // Dynamic MCP ToolRouter dispatch is checked at its one public entry;
     // helper result rows name that topology, not an inferred code-flow proof.
-    for (entry, observer) in [("call_tool", "observe_tool_result"), ("process_hook_input", "observe_hook_output")] {
+    for (entry, observer) in [("call_tool", "observe_tool_result_as"), ("process_hook_input", "observe_hook_output")] {
         if functions.iter().any(|f| f.producer.is_some())
             && !functions.iter().any(|f| f.name == entry && f.calls.contains(observer))
         {

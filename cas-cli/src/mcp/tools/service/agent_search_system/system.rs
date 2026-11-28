@@ -553,7 +553,12 @@ impl CasService {
         &self,
         req: SystemRequest,
     ) -> Result<CallToolResult, McpError> {
-        self.report_cas_bug_with_transport(req, &GhBugFilingTransport)
+        // A factory agent has a role; the operator's own session has none.
+        let actor = std::env::var("CAS_AGENT_ROLE")
+            .ok()
+            .filter(|role| !role.trim().is_empty())
+            .map(|role| std::env::var("CAS_AGENT_NAME").unwrap_or(role));
+        self.report_cas_bug_with_transport(req, &GhBugFilingTransport, actor.as_deref())
             .await
     }
 
@@ -661,10 +666,14 @@ impl CasService {
         Ok(Some(identity))
     }
 
+    /// Every report is a local ledger row. The operator (`agent` is `None`)
+    /// files at once; an agent files only once the same refusal key has
+    /// recurred `AGENT_FILING_THRESHOLD` times within the window.
     async fn report_cas_bug_with_transport<T: BugFilingTransport>(
         &self,
         req: SystemRequest,
         transport: &T,
+        agent: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
         let title = req.title.ok_or_else(|| {
             Self::error(ErrorCode::INVALID_PARAMS, "title required for bug report")
@@ -744,6 +753,28 @@ impl CasService {
             Ok(task_id) => (task_id, None),
             Err(warning) => ("unassigned".to_string(), Some(warning)),
         };
+        let recurrences = crate::issue_intake::record_report(
+            &self.inner.cas_root,
+            &fingerprint,
+            agent.unwrap_or("operator"),
+            &task_id,
+            &title,
+            chrono::Utc::now(),
+        )
+        .map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Bug report was not recorded: {error}"),
+            )
+        })?;
+        if agent.is_some() && recurrences < crate::issue_intake::AGENT_FILING_THRESHOLD {
+            return Ok(Self::success(format!(
+                "Recorded locally: report {recurrences} of {} for this refusal in {} days. \
+                 No GitHub issue filed; continue your task.",
+                crate::issue_intake::AGENT_FILING_THRESHOLD,
+                crate::issue_intake::AGENT_FILING_WINDOW_DAYS,
+            )));
+        }
         let filing_result = resolve_issue_repo(&self.inner.cas_root).and_then(|repo| {
             let scope = crate::mcp::tools::core::task::ProjectScope::current(&self.inner.cas_root);
             let local_component = crate::quality_ledger::is_cassy_source(&self.inner.cas_root)
@@ -814,6 +845,7 @@ impl CasService {
             &outcome.url,
             &title,
             chrono::Utc::now(),
+            self.inner.get_registered_agent_id_read_only().ok().as_deref(),
         );
         let degradation = outcome
             .degradation
@@ -1394,7 +1426,7 @@ mod tests {
             }
             let transport = recording_transport();
             let result = report_service(temp.path())
-                .report_cas_bug_with_transport(report_request(env.home()), &transport)
+                .report_cas_bug_with_transport(report_request(env.home()), &transport, None)
                 .await
                 .unwrap();
             assert!(response_text(&result).contains("Bug report created:"));
@@ -1437,7 +1469,7 @@ mod tests {
             }))
             .unwrap();
             service
-                .report_cas_bug_with_transport(request, &transport)
+                .report_cas_bug_with_transport(request, &transport, None)
                 .await
                 .unwrap();
         }
@@ -1449,11 +1481,64 @@ mod tests {
             "actual": "hangs",
         }))
         .unwrap();
-        assert!(service.report_cas_bug_with_transport(keyless, &transport).await.is_err());
+        assert!(service.report_cas_bug_with_transport(keyless, &transport, None).await.is_err());
         assert_eq!(transport.reports_seen.borrow().len(), 1);
         let comments = transport.comments_seen.borrow();
         assert_eq!(comments.len(), 4);
         assert!(comments.iter().all(|(url, body)| url == &transport.issue_url && body.contains(launch)));
+    }
+
+    /// 189 of 221 open issues were agent-filed. An agent's report is a local
+    /// ledger row; GitHub sees it on the fifth report of one refusal inside the
+    /// window, once. The operator files at once.
+    #[tokio::test]
+    async fn agent_reports_reach_github_only_when_the_refusal_recurs_five_times() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let service = report_service(temp.path());
+        let transport = recording_transport();
+        let refusal = "verifier_factory_launch: verifier_factory_owner: live registered supervisor required";
+        let report = |actual: &str| -> super::SystemRequest {
+            serde_json::from_value(serde_json::json!({
+                "action": "report_cas_bug", "title": "Verifier launch refused", "description": "d", "actual": actual,
+            }))
+            .unwrap()
+        };
+        // Rows older than the window do not count toward the threshold.
+        let key = crate::issue_intake::RefusalFingerprint::of(refusal).unwrap();
+        for _ in 0..4 {
+            let old = chrono::Utc::now() - chrono::Duration::days(8);
+            crate::issue_intake::record_report(temp.path(), &key, "worker-old", "cas-1", "old", old).unwrap();
+        }
+
+        for report_number in 1..=4 {
+            let result = service
+                .report_cas_bug_with_transport(report(refusal), &transport, Some("worker-1"))
+                .await
+                .unwrap();
+            assert_eq!(result.is_error, Some(false));
+            assert!(transport.repos_seen.borrow().is_empty(), "report {report_number} reached GitHub");
+        }
+        service.report_cas_bug_with_transport(report(refusal), &transport, Some("worker-1")).await.unwrap();
+        assert_eq!(transport.reports_seen.borrow().len(), 1);
+
+        // Past the threshold the open issue gets a +1, not a second issue.
+        service.report_cas_bug_with_transport(report(refusal), &transport, Some("worker-2")).await.unwrap();
+        assert_eq!(transport.reports_seen.borrow().len(), 1);
+        assert_eq!(transport.comments_seen.borrow().len(), 1);
+
+        // The operator files a new refusal at once.
+        let operator = "dispatch refused for lack of capacity while workers sit idle";
+        service.report_cas_bug_with_transport(report(operator), &transport, None).await.unwrap();
+        assert_eq!(transport.reports_seen.borrow().len(), 2);
+
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(temp.path().join("bug-reports.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let by = |actor: &str| rows.iter().filter(|row| row["actor"] == actor).count();
+        assert_eq!((by("worker-old"), by("worker-1"), by("worker-2"), by("operator")), (4, 5, 1, 1));
     }
 
     /// Component reports deduplicate only against tasks owned by that component.
@@ -1509,7 +1594,7 @@ mod tests {
                 "action": "report_cas_bug", "title": "Merge stays held after the verifier is scheduled",
                 "description": "A product task encounters a Cassy close refusal.", "actual": actual,
             })).unwrap();
-            let result = service.report_cas_bug_with_transport(request, &transport).await.unwrap();
+            let result = service.report_cas_bug_with_transport(request, &transport, None).await.unwrap();
             assert_eq!(result.is_error, Some(false));
             assert_eq!(transport.reports_seen.borrow().len(), usize::from(!dedup), "{project_repo:?}/{source}/{origin}/{target:?}");
             assert!(transport.comments_seen.borrow().is_empty());
@@ -1561,7 +1646,7 @@ mod tests {
             config.save(temp.path()).unwrap();
             let transport = recording_transport();
             let result = report_service(temp.path())
-                .report_cas_bug_with_transport(report_request(env.home()), &transport)
+                .report_cas_bug_with_transport(report_request(env.home()), &transport, None)
                 .await
                 .unwrap();
             let text = response_text(&result);

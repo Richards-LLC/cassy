@@ -1250,6 +1250,7 @@ mod tests {
                 "{action}"
             );
             assert_eq!(routed.notes.contains("build-route:"), action == "spawn");
+            tasks.delete(&routed.id).unwrap();
         }
         assert_eq!(
             crate::store::open_spawn_queue_store(&root)

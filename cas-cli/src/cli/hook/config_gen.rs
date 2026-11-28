@@ -1022,8 +1022,6 @@ struct CodexHandlerSpec {
     timeout: u64,
 }
 
-/// The Cassy handlers for `layer`. Both layers carry the tool guards; only the
-/// user layer adds SessionStart/Stop and the MCP policy matcher (cas-d0fe).
 fn codex_handler_specs(layer: CodexHookLayer) -> Vec<CodexHandlerSpec> {
     let mut specs = vec![
         CodexHandlerSpec {
@@ -1040,6 +1038,12 @@ fn codex_handler_specs(layer: CodexHookLayer) -> Vec<CodexHandlerSpec> {
         },
     ];
     if layer == CodexHookLayer::User {
+        specs.push(CodexHandlerSpec {
+            event: "UserPromptSubmit",
+            command: "CAS_HOOK_HARNESS=codex cas hook UserPromptSubmit",
+            matcher: None,
+            timeout: 3,
+        });
         specs.push(CodexHandlerSpec {
             event: "SessionStart",
             command: "CAS_HOOK_HARNESS=codex cas hook SessionStart",
@@ -1143,6 +1147,7 @@ fn codex_hook_matcher(event: &str, layer: CodexHookLayer) -> String {
             crate::config::hooks::SLACK_POLICY_MATCHER
         ),
         ("PreToolUse", CodexHookLayer::Project) => "^(Bash|apply_patch)$".to_string(),
+        ("PostToolUse", _) => "^Bash$|^mcp__cs__".to_string(),
         _ => "^Bash$".to_string(),
     }
 }
@@ -1159,10 +1164,10 @@ mod codex_provision_tests {
             assert!(project.is_match(tool));
         }
         assert!(!project.is_match("mcp__cs__coordination"));
-        assert_eq!(
-            codex_hook_matcher("PostToolUse", CodexHookLayer::User),
-            "^Bash$"
-        );
+        let post = regex::Regex::new(&codex_hook_matcher("PostToolUse", CodexHookLayer::User)).unwrap();
+        for tool in ["Bash", "mcp__cs__coordination", "mcp__cs__task", "mcp__cs__artifact"] {
+            assert!(post.is_match(tool), "{tool}");
+        }
         // cas-d0fe: the user layer also routes Slack/Violet MCP calls through
         // the same policy Claude's PreToolUse matcher covers.
         let user = codex_hook_matcher("PreToolUse", CodexHookLayer::User);
@@ -1256,7 +1261,7 @@ mod codex_provision_tests {
             .iter()
             .filter(|hook| hook.cas_owned)
             .collect();
-        assert_eq!(cas_hooks.len(), 4, "{cas_hooks:?}");
+        assert_eq!(cas_hooks.len(), 5, "{cas_hooks:?}");
         assert!(
             cas_hooks
                 .iter()
@@ -1270,6 +1275,63 @@ mod codex_provision_tests {
         let project_hooks =
             std::fs::read_to_string(project.path().join(".codex/hooks.json")).unwrap();
         assert!(!project_hooks.contains("SessionStart") && !project_hooks.contains("\"Stop\""));
+    }
+
+    #[test]
+    fn codex_hooks_drain_ten_then_two_pending_messages_and_mid_turn_mail() {
+        use cas_core::hooks::types::{HookInput, HookSpecificOutput};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_AGENT_NAME", "codex-supervisor");
+        env.set("CAS_FACTORY_SESSION", "codex-mail");
+        env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
+        let config = project.path().join("account");
+        provision_codex_user_config(&config).unwrap();
+        let hooks: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(config.join("hooks.json")).unwrap()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let bodies: Vec<_> = (0..12).map(|i| format!("payload-{i:02}")).collect();
+        let ids: Vec<_> = bodies.iter().map(|body| queue.enqueue_with_session("worker", "supervisor", body, "codex-mail").unwrap()).collect();
+        assert_eq!(hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"], "CAS_HOOK_HARNESS=codex cas hook UserPromptSubmit");
+        let mut input = HookInput {
+            session_id: "codex-mail-native".into(), cwd: project.path().to_string_lossy().into_owned(),
+            hook_event_name: "UserPromptSubmit".into(), user_prompt: Some("continue".into()),
+            agent_role: Some("supervisor".into()), ..Default::default()
+        };
+        let output = crate::hooks::handle_hook("UserPromptSubmit", input.clone()).unwrap();
+        let Some(HookSpecificOutput::UserPromptSubmit { additional_context }) = output.hook_specific_output else { panic!("missing turn context") };
+        for (index, (id, body)) in ids.iter().zip(&bodies).enumerate() {
+            assert_eq!(additional_context.matches(body).count(), usize::from(index < 10));
+            assert_eq!(queue.message_delivery_report(*id).unwrap().unwrap().delivered_at.is_some(), index < 10);
+        }
+        let output = crate::hooks::handle_hook("UserPromptSubmit", input.clone()).unwrap();
+        let Some(HookSpecificOutput::UserPromptSubmit { additional_context }) = output.hook_specific_output else { panic!("missing next turn context") };
+        for (index, (id, body)) in ids.iter().zip(&bodies).enumerate() {
+            assert_eq!(additional_context.matches(body).count(), usize::from(index >= 10));
+            assert!(queue.message_delivery_report(*id).unwrap().unwrap().delivered_at.is_some());
+        }
+        let large_bodies = [format!("payload-large-a{}", "界".repeat(2400)), format!("payload-large-b{}", "界".repeat(2400))];
+        let large_ids: Vec<_> = large_bodies.iter().map(|body| queue.enqueue_with_session("worker", "supervisor", body, "codex-mail").unwrap()).collect();
+        for turn in 0..2 {
+            let output = crate::hooks::handle_hook("UserPromptSubmit", input.clone()).unwrap();
+            let Some(HookSpecificOutput::UserPromptSubmit { additional_context }) = output.hook_specific_output else { panic!("missing character-bounded turn context") };
+            for (index, (id, body)) in large_ids.iter().zip(&large_bodies).enumerate() {
+                assert_eq!(additional_context.matches(body).count(), usize::from(index == turn));
+                assert_eq!(queue.message_delivery_report(*id).unwrap().unwrap().delivered_at.is_some(), index <= turn);
+            }
+        }
+        let tool = "mcp__cs__coordination";
+        let matcher = hooks["hooks"]["PostToolUse"][0]["matcher"].as_str().unwrap();
+        assert!(regex::Regex::new(matcher).unwrap().is_match(tool));
+        let id = queue.enqueue_with_session("worker", "supervisor", "payload-mid-turn", "codex-mail").unwrap();
+        input.hook_event_name = "PostToolUse".into();
+        input.tool_name = Some(tool.into());
+        let output = crate::hooks::handle_hook("PostToolUse", input).unwrap();
+        let encoded = serde_json::to_string(&output).unwrap();
+        assert_eq!(encoded.matches("payload-mid-turn").count(), 1);
+        assert!(queue.message_delivery_report(id).unwrap().unwrap().delivered_at.is_some());
     }
 }
 

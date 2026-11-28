@@ -2,7 +2,6 @@ use crate::hooks::handlers::handlers_middle::capture_transcript_for_prompts;
 use crate::hooks::handlers::handlers_middle::session_stop::{
     build_duplicate_detection_context, build_learning_review_context, build_rule_review_context,
     build_session_summary_context, handle_loop_iteration,
-    synthesize_buffered_observations_with_sources,
 };
 use crate::hooks::handlers::handlers_middle::utils::{
     find_similar_entry, find_similar_rule, is_architectural_file, truncate_list, truncate_str,
@@ -592,38 +591,11 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
         }
     }
 
-    // === SYNTHESIZE BUFFERED OBSERVATIONS ===
-    // Process observations that were buffered during the session
     let mut buffer_count = 0;
     if let Some(tracer) = DevTracer::get() {
         if let Ok(buffered) = tracer.get_buffered_observations_for_session(&input.session_id) {
             buffer_count = buffered.len();
-
-            if !buffered.is_empty() {
-                // Synthesize buffered observations into learnings
-                let synthesis_result = synthesize_buffered_observations_with_sources(
-                    cas_root,
-                    &buffered,
-                    &input.session_id,
-                    &session_observation_source_ids,
-                );
-
-                match synthesis_result {
-                    Ok(learnings_created) => {
-                        if learnings_created > 0 {
-                            eprintln!(
-                                "cas: Synthesized {learnings_created} learnings from {buffer_count} buffered observations"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("cas: Buffer synthesis error: {e}");
-                    }
-                }
-
-                // Clear the buffer after processing
-                let _ = tracer.clear_observation_buffer_for_session(&input.session_id);
-            }
+            let _ = tracer.clear_observation_buffer_for_session(&input.session_id);
         }
     }
 

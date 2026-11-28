@@ -2767,6 +2767,10 @@ impl CasCore {
         } else {
             None
         };
+        if let Some(worker) = worker.as_ref() {
+            crate::worker_lifecycle::ensure_assignment(task_store.as_ref(), worker, &req.id)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        }
         let _queue_lock = if queued_start {
             let worker = worker.as_ref().ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS,
                 crate::gates::tag("G-09", "Queued start requires its registered worker")))?;
@@ -3668,8 +3672,6 @@ impl CasCore {
             }
         }
 
-        #[cfg(test)]
-        close_ops::lifecycle_race_hook::fire_before_start_lease(&req.id);
         let local_claim =
             agent_store.try_claim(&req.id, &agent_id, lease_duration, Some("Task started"));
         let won = match &local_claim {
@@ -3999,6 +4001,8 @@ impl CasCore {
             }
         };
         if is_worker {
+            crate::worker_lifecycle::bind_task(&self.cas_root, &agent_id, &req.id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
             blocker_warning.push_str(&epic_lane::assignment_branch_note(&self.cas_root, task_store.as_ref(), &task));
         }
         // cas-2e1b: lane CI binds its impact selection to this newly recorded
@@ -5331,18 +5335,22 @@ mod related_recall_response_tests {
         let mut dependent = plain_task_request("Dependent dashboard calibration");
         dependent.assignee = Some(worker.name.clone());
         dependent.blocked_by = Some(task.id.clone());
-        // Ordinary blocks permit parallel preparation in the current ready policy.
-        core.cas_task_create(Parameters(dependent)).await.unwrap();
-        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 2);
+        let count = core.open_task_store().unwrap().list(None).unwrap().len();
+        core.cas_task_create(Parameters(dependent)).await.unwrap_err();
+        assert_eq!(core.open_task_store().unwrap().list(None).unwrap().len(), count);
+        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 1);
         let mut config = crate::config::Config::load(&core.cas_root).unwrap();
         let mut orchestration = config.orchestration();
         orchestration.auto_prompt.on_task_assigned = false;
         config.orchestration = Some(orchestration.clone());
         config.save(&core.cas_root).unwrap();
+        let mut disabled_worker = cas_types::Agent::new_with_role("disabled-worker-id".into(), "disabled-worker".into(), cas_types::AgentRole::Worker);
+        disabled_worker.factory_session = worker.factory_session.clone();
+        core.open_agent_store().unwrap().register(&disabled_worker).unwrap();
         let mut disabled = plain_task_request("Disabled dispatch nutrition study");
-        disabled.assignee = Some(worker.id.clone());
+        disabled.assignee = Some(disabled_worker.id.clone());
         core.cas_task_create(Parameters(disabled)).await.unwrap();
-        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 2);
+        assert!(queue.peek_for_targets(&[&disabled_worker.name], Some("assignment-session"), 10).unwrap().is_empty());
         orchestration.auto_prompt.on_task_assigned = true;
         config.orchestration = Some(orchestration);
         config.save(&core.cas_root).unwrap();
@@ -5359,7 +5367,7 @@ mod related_recall_response_tests {
         retired.assignee = Some(worker.id.clone());
         core.cas_task_create(Parameters(retired)).await.unwrap();
         core.cas_task_create(Parameters(plain_task_request("Unassigned storage cleanup"))).await.unwrap();
-        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 2);
+        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 1);
 
     }
 

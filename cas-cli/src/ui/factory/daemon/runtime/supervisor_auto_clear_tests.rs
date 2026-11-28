@@ -117,6 +117,50 @@ fn merge_lock(root: &Path) -> crate::worktree::target_lock::DeliveryTargetLock {
     crate::worktree::target_lock::lock_delivery_target(root, Path::new("/repo/.git"), "main").unwrap()
 }
 
+#[test]
+fn codex_window_pressure_saves_handoff_then_requests_supervisor_restart() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    for (window, cap, threshold) in [(200_000, Some(300_000), 160_000), (475_000, None, 300_000)] {
+        let mut lane = Lane::new();
+        let cap = cap.map(|cap| format!("supervisor_wake_input_budget={cap}\n")).unwrap_or_default();
+        std::fs::write(lane.root.join("config.toml"), format!("[factory]\ncommander_mirror_enabled=false\n{cap}")).unwrap();
+        let native = "019f84af-3121-7950-ba14-b01db2daa152";
+        lane.agents[0].cc_session_id = Some(native.into());
+        lane.agents[0].metadata.insert("supervisor_cli".into(), "codex".into());
+        crate::store::open_agent_store(&lane.root).unwrap().update(&lane.agents[0]).unwrap();
+        lane.transcript = PathBuf::from(&lane.agents[0].metadata["supervisor_account_dir"]).join("sessions").join(format!("rollout-{native}.jsonl"));
+        std::fs::create_dir_all(lane.transcript.parent().unwrap()).unwrap();
+        std::fs::write(&lane.transcript, format!("{}\n", json!({"type":"session_meta","payload":{"id":native,"cwd":lane.project}}))).unwrap();
+        let append = |lane: &Lane, n: u64, input: u64| {
+            let at = (chrono::Utc::now() + chrono::Duration::seconds(n as i64)).to_rfc3339();
+            let mut file = std::fs::OpenOptions::new().append(true).open(&lane.transcript).unwrap();
+            for row in [
+                json!({"timestamp":at,"type":"event_msg","payload":{"type":"task_started","turn_id":format!("turn-{n}")}}),
+                json!({"timestamp":at,"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":input},"total_token_usage":{"input_tokens":input*n,"output_tokens":n*5},"model_context_window":window}}}),
+                json!({"timestamp":at,"type":"event_msg","payload":{"type":"task_complete","turn_id":format!("turn-{n}")}}),
+            ] { writeln!(file, "{row}").unwrap(); }
+        };
+        append(&lane, 1, threshold - 1);
+        lane.scan();
+        assert!(lane.handoffs().is_empty());
+        append(&lane, 2, threshold);
+        lane.scan();
+        assert_eq!(lane.handoffs().len(), 1);
+        let restart = crate::factory_daemon_health::supervisor_restart_path(&lane.root, SESSION);
+        assert!(!restart.exists());
+        lane.deliver_notice();
+        append(&lane, 3, threshold);
+        lane.scan();
+        assert!(restart.is_file());
+        let request = crate::factory_daemon_health::take_supervisor_restart(&lane.root, SESSION, chrono::Utc::now()).unwrap();
+        assert_eq!(request.requester, SOURCE);
+        assert!(lane.rows(CONTEXT_RESET_CONTROL).is_empty());
+        assert!(lane.current_handoff().content.contains(APPROVAL));
+        lane.scan();
+        assert!(!restart.exists());
+    }
+}
+
 /// AC (a) and (c): one over-budget wake at an idle boundary saves exactly one
 /// handoff and queues exactly one clear; the new session gets the handoff with
 /// the operator approval and the supervisor's judgement intact.
